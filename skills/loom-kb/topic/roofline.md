@@ -1,4 +1,8 @@
-# Calibration: achieved efficiency vs roofline (Strix Halo gfx1151)
+# Topic: roofline (calibration of achieved efficiency; where the remaining gap usually is)
+
+## Contents
+
+- Where the remaining gap usually is
 
 Ceilings are from `roofline.py` (216 GB/s, 59 TFLOP/s). Achieved numbers are
 end-to-end and client-side, from tuned Loom ports. `EFF` in `roofline.py` is the
@@ -75,3 +79,23 @@ bandwidth and show what the hardware gives. Ceilings: `--device radeon-r9700s` (
 | 〃 | prefill 512 | ~1200 | 1091 | 776 | 0.91 (int8 MMQ: not bound by the f16 peak) |
 | Qwen3-14B Q4_K_M | decode (tg128) | 70.0 | 59.4 | 63.4 | 0.91 |
 | Qwen3-0.6B Q4_K_M | decode (tg128) | ~1500 | 358 | 506 | 0.34 (per-layer launch cost dominates) |
+
+## Where the remaining gap usually is
+
+- **Prefill GEMM efficiency.** Q4_K GEMMs run ~28 TFLOP/s in the model (~30 on real data in isolation), ~70 %
+  of the real-data WMMA ceiling (~40–43 TOPS, see above); gufo (an engine tuned for this chip) reaches ~80 %
+  with int8 (W8A8 / K-quant×Q8_1) wave64 GEMMs, which halve LDS and activation traffic, and fused
+  norm/SwiGLU→Q8_1 epilogues. int8 WMMA is not faster per instruction here (same ~40 TOPS on real data), so
+  the gain is energy: fewer bytes moved per MAC. Tried here and slower on real data: a wave64 port of the f16
+  GEMM through transposed fragment loads (27.6 vs 30.5 TFLOP/s) and llama.cpp's mmq formulation
+  (`gen_gemm.gemm_q8`: Q8_1 activations x Q4_K codes on int8 WMMA, 20.7; 26.2 even with the per-block scaling
+  removed): the f16 kernel's staging pipeline is the better one; an int8 kernel would need gufo's deeper
+  pipelining to pay off.
+- **Gated delta-net prefill** (hybrids): the register recurrence steps through the chunk token by token
+  (Qwen3.8-27B: 0.14 ms/token of 2.3, all GDN kernels 0.27); a chunked (WY / parallel-scan) form is the lever.
+- **Small models** (≤ 1B), for example Qwen3-0.6B: decode at 2k context ran 179
+  vs 193 tok/s for llama.cpp. There, the attention and launch overhead per layer
+  dominates rather than weight bandwidth. Fewer, fused launches per layer, and
+  fewer splits when context is short, are the levers.
+- **MoE decode** is bound by the expert gather: batch the active experts' matvecs
+  per token group.

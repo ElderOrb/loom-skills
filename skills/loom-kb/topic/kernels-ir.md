@@ -1,10 +1,19 @@
-# Loom IR cookbook for model ports
+# Topic: kernels-ir (Loom IR cookbook for model ports)
 
 The upstream language guide is in hrx-system at `loom/docs/src/guide/*.md`; read
 `kernels-and-launch`, `buffers-views-memory`, `facts-and-specialization`,
 `vectors-and-structured-compute`, and `command-programs`. This file collects what
 mattered in practice when writing LLM kernels, plus the errors hit most often and
 how to fix them.
+
+## Contents
+
+- Shape of a kernel
+- Proof facts (SUBRANGE/*)
+- Other diagnostics
+- Idioms that compile to fast code on RDNA3
+- Testing kernels (`check.case`, loom-test)
+- Compile errors seen in ports, and their fixes
 
 ## Shape of a kernel
 

@@ -1,4 +1,4 @@
-# Campaign lessons (loom-org)
+# Topic: org (campaign lessons for populating a Hugging Face org)
 
 Detail behind the rules in SKILL.md. Rules first, reasons after.
 

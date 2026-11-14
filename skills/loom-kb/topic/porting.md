@@ -1,7 +1,16 @@
-# How loom-serve drives a text model (what the glue does)
+# Topic: porting (how loom-serve drives a text model, bring-up, extending the starter)
 
-The upstream reference is hrx-system `loom/docs/src/serving/model-programs.md`;
-library examples live in `hrx-loom-library/program/text/qwen3_8/`.
+The upstream reference is hrx-system `loom/docs/src/serving/model-programs.md`; library examples live in `hrx-loom-library/program/text/qwen3_8/`.
+
+## Contents
+
+- Package card (`model.json`)
+- hrx-loom 0.1.0 (PyPI) text ABI
+- Lifecycle
+- Decode vs prefill inside one program
+- Tokenizer gotchas
+- Bring-up debugging order
+- Extending the starter
 
 ## Package card (`model.json`)
 
@@ -35,19 +44,6 @@ functions). New in 0.1.0 versus the earlier CI wheels:
   `[{"type":"function","function":{"name":…,"arguments":"<JSON string>"}}]`.
 - Model ids must be visible ASCII without spaces (`--model-id`).
 - `check.expect.close` for floats is now `check.expect.approximate … : T, T`.
-
-## Recurrent state (hybrid models)
-
-`storage.loom`'s geometry record declares recurrent **slots** in the arena: words
-4–7 are origin, stride, length (bytes per slot) and capacity. The runtime assigns
-each resident row a reader slot and a writer slot and records them, with the fork
-position, in the row's origins entry (`encode_state`): words 0 (reader byte offset),
-1 (writer byte offset) and 3 (fork position). A span that starts at the fork
-position continues the reader's state (e.g. a reused prefix or a retained agent
-turn); any later span continues the row's own writer; a span at position 0 starts
-from zeros. Every span publishes its final state to the writer. Prefix reuse for
-hybrids happens only at retained frontiers (the end of a previous turn), which is
-exactly what agent loops need. `gen_gdn.py` implements this protocol.
 
 ## Lifecycle
 
@@ -124,11 +120,55 @@ stage:
 - `prepare_input` encodes with special-token matching, so special tokens in the
   rendered prompt become single ids, matching HF `apply_chat_template` + encode.
 
-## ATEM/channel formats (non-ChatML)
+## Bring-up debugging order
 
-The Glimmer port (`glimmer-example/chat/atem.loom`) is a full example of a
-channel-based format. Its prompt looks like `<|start|>role<|message|>…<|eot|>`;
-reasoning is addressed `to=self`, and the answer `to=user`. Its control program
-parses recipient headers in `output_next`. Its kit's `chat_probe.raw_from_chat()`
-rebuilds the raw output text from the channels the same way: define one in your
-kit for such formats (`export LOOM_KIT=W/kit` makes the benchmark scripts use it).
+1. **The server fails to register.** `serve.sh` prints diagnostics. See
+   `reference/loom-ir-cookbook.md` for each diagnostic family (PARSE, TYPE,
+   SUBRANGE, TARGET, SYMBOL).
+2. **Garbage from the first token.** Run the kernel unit tests. They found the
+   one-wave matvec writer bug (K=1024 gives 32 lanes for 64 outputs) in seconds.
+   Then suspect, in order:
+   - rope pairing;
+   - the norm eps;
+   - a tied head that is missing `output.weight` (the head must use `token_embd.weight`);
+   - a tensor format with no dequant helper.
+3. **Correct short answers but wrong long ones.** The prefill path (≥64 tokens:
+   GEMM + flash2 + fallback) is wrong, or KV paging is. Compare 1k/2k goldens
+   against short goldens, and run `consistency.py` for mixed batches.
+4. **Correct but stops early or never stops.** Check the EOS ids and the chat
+   `terminal`.
+5. **503 "insufficient completion capacity".** `--memory_bytes` is too small. The message blames retained
+   state, but it also comes on a fresh server: every admission charges the weights, the request's KV pages and
+   the largest command program's scratch at a prefill-sized invocation (a drafting hybrid's `@llm_verify` keeps
+   every token's gated delta-net inputs: 7 GB at a 4096-token prefill of a 30-layer MoE). build.py's printed
+   value covers the weights (projector included), the KV pool (pool × 2·kv_layers × kv_heads·head_dim·2 bytes),
+   that scratch + 3 GiB, and the recurrent state.
+6. **Registration fails with a VGPR spill (`spill-traffic-register-exhausted`).** A
+   kernel holds too much in registers for this model's shape. Split the work over more waves
+   (`gen_flash2s.py`: two waves per head at head_dim 256, four at 512) or reload operands per iteration.
+7. **Coherent but wrong from the first token, kernel tests pass.** A wiring or
+   config bug. Compare against `starter/llama_trace.py` (llama.cpp's intermediate tensors,
+   node by node) with a numpy forward of layers 0–1; then read the generated command program for one layer of each kind
+   (`awk '/---- layer N$/,/---- layer N+1/' pkg/program/llm.loom`). A real example:
+   a stale cfg.json with `qk_norm: false` left Qwen3.5's Q/K norms out (`%no_norm`).
+   An independent numpy forward of a short prompt that matches llama.cpp's top
+   logits narrows "my understanding of the model" vs "my kernels" quickly; it is a
+   diagnostic, never the golden.
+
+## Extending the starter
+
+- **New quant format.** Add a `@g_<fmt>_values` func in `COMMON` (gen_llm.py; `mv()` calls it),
+  add the entries to `FMT`/`SB` in `starter/formats.py` (inspect_gguf.py's "no kernels" check and pick_gguf.py read
+  the same table), and add a `dequant16` case in `gen_gemm.py` (or list it in `gen_gemm.HELPER`: the GEMM then
+  dequantizes through the value helper). For int8 decode matvecs, also an `@g_<fmt>_icodes` (integer codes, scale,
+  minimum) and the format in `formats.ICODES`; `gen_llm.Q5_0` is a worked example of both helpers. bf16 needs a
+  value helper (`view<32xbf16>` -> `vector.extf`). Unit-test against `gguf.quants.dequantize` (make_kernel_tests.py
+  does, for every format and K a model uses).
+
+- **Library programs are the canonical reference** for the text-service ABI (prepare,
+  control, storage, service entry points). `templates/` follow the upstream tiny-text
+  fixture (`loom/src/loom/serve/fixture/text` at tag v0.1.0 of ROCm/hrx-system) and
+  `library/program/text/qwen3_8/chat.loom`. The upstream doc is
+  `loom/docs/src/serving/model-programs.md`. When a new hrx-loom release changes the
+  ABI, diff that fixture between the old and new tags; the registration error names
+  the missing export (e.g. `root symbol '@text_chat_reasoning_v1' was not found`).

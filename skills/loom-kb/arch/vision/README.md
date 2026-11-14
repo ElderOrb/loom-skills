@@ -1,4 +1,4 @@
-# Image input (vision) for ported LLMs
+# Vision encoders (mmproj + projector families)
 
 A GGUF LLM whose repo ships a vision projector (`mmproj-*.gguf`) gets image input from `port.sh` with no
 hand-work when the projector family has an encoder plan in `starter/vision/`:
@@ -27,6 +27,12 @@ What happens (all generated, nothing per model):
   llama-server `--mmproj` and Loom on six images (shapes+text, chart, document, photo-like, tall, wide).
   Prompt token counts must be equal (resize rule, token limits, markers, chat rendering), replies must
   match token by token up to a near-tie.
+
+## Contents
+
+- How it works
+- Adding a projector family
+- Pitfalls that cost time
 
 ## How it works
 
