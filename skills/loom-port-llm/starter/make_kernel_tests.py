@@ -883,7 +883,9 @@ if cfg.get("recurrent_layers"):
 # 4b. g_gdn_recurrence alone on one launch of two spans: a fresh 37-token span (position 0) and a 5-token span that
 # continues its reader slot, plus a 70-token span that runs in the prefill-form kernel (odd lengths: partial output batches; each span's own reader/writer slots).
 if cfg.get("recurrent_layers"):
-    spans_ = [(37, 0, False), (70, 0, False), (5, 10, True)]; t = sum(L for L, _, _ in spans_); ns = len(spans_)
+    from gen_gdn import chunk_mode as _cm
+    _chunk = bool(_cm(gdn_geometry(cfg)))   # gfx12 chunked prefill kernel: spans of 64+ tokens are its (case gdn_chunk_spans), so this case keeps every span under 64
+    spans_ = [(37, 0, False), (63 if _chunk else 70, 0, False), (5, 10, True)]; t = sum(L for L, _, _ in spans_); ns = len(spans_)
     x = rng.standard_normal((t, C)).astype(np.float32)
     qs, ks, vs = x[:, :HK * DK].reshape(t, HK, DK), x[:, HK * DK:2 * HK * DK].reshape(t, HK, DK), x[:, 2 * HK * DK:].reshape(t, HV, DV)
     qinv = 1 / np.sqrt((qs.astype(np.float64) ** 2).sum(-1) + eps); kinv = 1 / np.sqrt((ks.astype(np.float64) ** 2).sum(-1) + eps)
@@ -933,6 +935,62 @@ if cfg.get("recurrent_layers"):
   kernel.launch @g_gdn_recurrence[%spans](%t, %spans, %layer, %meta, %orig, %arena, %x, %inv, %alpha, %beta, %a, %dt, %raw) : [index](index, index, index, {MT}, {OT}, {AT}, tensor<{t}x{C}xf32>, tensor<{t}x{2 * HK}xf32>, tensor<{t}x{HV}xf32>, tensor<{t}x{HV}xf32>, tensor<{HV}xf32>, tensor<{HV}xf32>, tensor<{t}x{VD}xf32>){PF_LAUNCH}
   check.expect.close actual(%raw) expected(%eraw) atol(1.0e-4) rtol(2.0e-3) nan(different) : tensor<{t}x{VD}xf32>
   check.expect.close actual(%arena) expected(%expect) atol(1.0e-4) rtol(1.0e-3) nan(different) : {AT}
+  check.return
+}}
+""")
+# 4c. g_gdn_chunk_rdna4 (gfx12 chunked prefill, gen_gdn_chunk.py) alone on three spans of 64+ tokens: a fresh 130-token span (two full chunks and a
+# 2-token tail), a 64-token span that continues a stored state (one full chunk) and a fresh 97-token span; f16 WMMA products with f32 state, so the
+# tolerances are those of f16 operands (about 1e-3 of the largest value), not of the f32 sequential kernel.
+if cfg.get("recurrent_layers") and _chunk:
+    spans_ = [(130, 0, False), (64, 10, True), (97, 0, False)]; t = sum(L for L, _, _ in spans_); ns = len(spans_)
+    x = rng.standard_normal((t, C)).astype(np.float32)
+    qs, ks, vs = x[:, :HK * DK].reshape(t, HK, DK), x[:, HK * DK:2 * HK * DK].reshape(t, HK, DK), x[:, 2 * HK * DK:].reshape(t, HV, DV)
+    qinv = 1 / np.sqrt((qs.astype(np.float64) ** 2).sum(-1) + eps); kinv = 1 / np.sqrt((ks.astype(np.float64) ** 2).sum(-1) + eps)
+    inv = np.stack([qinv, kinv], -1).reshape(t, 2 * HK).astype(np.float32)
+    alpha = rng.standard_normal((t, HV)).astype(np.float32); beta = rng.standard_normal((t, HV)).astype(np.float32)
+    arena = np.zeros(2 * ns * LB // 4, np.float32); meta = np.zeros(4 + 9 * ns, np.int32); meta[0] = ns
+    origins = np.zeros((ns, 5), np.int64); raw_o = np.zeros((t, HV, DV)); first = 0; finals = []
+    for si, (L, p0, cont) in enumerate(spans_):
+        rd, wr = 2 * si * LB, (2 * si + 1) * LB
+        origins[si] = [rd, wr, 0, p0, 0]; meta[4 + 9 * si:4 + 9 * si + 5] = [L, p0, 0, si, first]
+        S = np.zeros((HV, DV, DK))
+        if cont:
+            S0 = (0.3 * rng.standard_normal((HV, DV, DK))).astype(np.float32)
+            arena[rd // 4:rd // 4 + SB // 4] = S0.reshape(-1); S = S0.astype(np.float64)
+        for i in range(first, first + L):
+            for h in range(HV):
+                kh = h % HK; q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
+                St = S[h] * np.exp(np.log1p(np.exp(float(alpha[i, h]) + dt[h])) * a_log[h])
+                d = (vs[i, h] - St @ k) / (1 + np.exp(-float(beta[i, h])))
+                S[h] = St + np.outer(d, k); raw_o[i, h] = S[h] @ q
+        finals.append((wr, S)); first += L
+    expect = arena.copy()
+    for wr, S in finals:
+        expect[wr // 4:wr // 4 + SB // 4] = S.astype(np.float32).reshape(-1)
+    for n, a in [("gc_meta", meta), ("gc_orig", origins.reshape(-1).view(np.int32)), ("gc_arena", arena), ("gc_expect", expect),
+                 ("gc_x", x), ("gc_inv", inv), ("gc_alpha", alpha), ("gc_beta", beta), ("gc_raw", raw_o.reshape(t, VD).astype(np.float32))]:
+        save(n, a)
+    AT = f"tensor<{2 * ns * LB // 4}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * ns}xi32>"
+    _scale = float(np.abs(raw_o).max()); _sscale = float(max(np.abs(S).max() for _, S in finals))
+    cases.append(f"""check.case public @gdn_chunk_spans {{
+  %t = check.literal value({t}) : index
+  %spans = check.literal value({ns}) : index
+  %layer = check.literal value(0) : index
+  %meta = check.file.read.npy path("gc_meta.npy") : {MT}
+  %orig = check.file.read.npy path("gc_orig.npy") : {OT}
+  %arena = check.file.read.npy path("gc_arena.npy") : {AT}
+  %expect = check.file.read.npy path("gc_expect.npy") : {AT}
+  %x = check.file.read.npy path("gc_x.npy") : tensor<{t}x{C}xf32>
+  %inv = check.file.read.npy path("gc_inv.npy") : tensor<{t}x{2 * HK}xf32>
+  %alpha = check.file.read.npy path("gc_alpha.npy") : tensor<{t}x{HV}xf32>
+  %beta = check.file.read.npy path("gc_beta.npy") : tensor<{t}x{HV}xf32>
+  %a = check.file.read.npy path("g_a.npy") : tensor<{HV}xf32>
+  %dt = check.file.read.npy path("g_dt.npy") : tensor<{HV}xf32>
+  %eraw = check.file.read.npy path("gc_raw.npy") : tensor<{t}x{VD}xf32>
+  %raw = check.generate.fill value(0.0) : tensor<{t}x{VD}xf32>
+  kernel.launch @g_gdn_chunk_rdna4[%spans](%t, %spans, %layer, %meta, %orig, %arena, %x, %inv, %alpha, %beta, %a, %dt, %raw) : [index](index, index, index, {MT}, {OT}, {AT}, tensor<{t}x{C}xf32>, tensor<{t}x{2 * HK}xf32>, tensor<{t}x{HV}xf32>, tensor<{t}x{HV}xf32>, tensor<{HV}xf32>, tensor<{HV}xf32>, tensor<{t}x{VD}xf32>)
+  check.expect.close actual(%raw) expected(%eraw) atol({3e-3 * _scale:.3e}) rtol(1.0e-2) nan(different) : tensor<{t}x{VD}xf32>
+  check.expect.close actual(%arena) expected(%expect) atol({3e-3 * _sscale:.3e}) rtol(1.0e-2) nan(different) : {AT}
   check.return
 }}
 """)
