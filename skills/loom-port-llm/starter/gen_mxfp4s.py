@@ -52,6 +52,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     TN = 64 if two_w else 128     # output columns per tile
     RF = rf or (2 if two_w else 4)   # 16-row A fragments per wave (rf = 4: 64 rows); the accumulators are rf * cfr * (1 or 2 weights) = 16 fragments
     cfr = (8 if two_w else 16) // RF   # 16-column B fragments per wave and weight
+    CBM = 'c256' if BM == 256 else 'cbm'   # the row-tile constant (gen_gemm's GEMM_SKIP_PADDING looks for %c256 in `%row_origin = index.mul %row_group, %c256`)
     NWV = NT // 32
     WR = BM // (16 * RF)          # waves stacked along the rows, WC = NWV // WR along the columns
     WC = NWV // WR
@@ -69,10 +70,10 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     A = L.append
     A(f'''kernel.def target(@rdna4) export("{name}") @{name}(%rows: index, %n: index) {{
   %c1 = index.constant 1 : index
-  %cbm = index.constant {BM} : index
+  %{CBM} = index.constant {BM} : index
   %cnt = index.constant {NT} : index
   %tn = index.constant {TN} : index
-  %row_tiles = index.div %rows, %cbm : index
+  %row_tiles = index.div %rows, %{CBM} : index
   %out_tiles = index.div %n, %tn : index
   kernel.launch.config workgroups(%row_tiles, %out_tiles, %c1) workgroup_size(%cnt, %c1, %c1) : index
 }} launch(%rows_arg: index, %k_arg: index, %n_arg: index, %x: buffer, %scales: buffer, {", ".join(f"%{w}: buffer, %{w}s: buffer" for w in weights)}, %y: buffer) {{
@@ -97,9 +98,9 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %cks32 = index.constant {KS // 32} : index
   %cnb = index.constant {NB} : index
   %c128 = index.constant {KS} : index
-  %cbm = index.constant {BM} : index
+  %{CBM} = index.constant {BM} : index
   %tn = index.constant {TN} : index
-  %row_tile_count = index.div %rows, %cbm : index
+  %row_tile_count = index.div %rows, %{CBM} : index
   %out_tile_count = index.div %n, %tn : index
   %row_group_id = kernel.workgroup.id<x> : index
   %out_group_id = kernel.workgroup.id<y> : index
@@ -120,7 +121,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     A(f'''  %wave_cols = index.constant {wave_cols} : index
   %wave_col_value = index.mul %wave_col_group, %wave_cols : index
   %wave_col = index.assume %wave_col_value [range(%wave_col_value, 0, {TN - wave_cols})] : index
-  %row_origin = index.mul %row_group, %cbm : index
+  %row_origin = index.mul %row_group, %{CBM} : index
   %out_origin = index.mul %out_group, %tn : index
   %blocks = index.div %k, %c32 : index
   %k_half = index.div %k, %c2 : index
@@ -461,7 +462,7 @@ def f8_producer(text):
 # -- the program pass ----------------------------------------------------------------------------------------------------
 _LAUNCH = re.compile(r"^(?P<ind>\s*)kernel\.launch @(?P<k>\w+)\[(?P<grid>[^\]]*)\]\((?P<args>.*)\) : \[(?P<gt>[^\]]*)\]\((?P<at>.*)\)$")
 _F8_OPERANDS = {"%h16": ("%h8", "%s_h8", "%s_h"), "%o16": ("%o8", "%s_o8", "%s_o"), "%f16": ("%f8", "%s_f8", "%s_f")}   # f16 operand -> (fp8, its scales, f16's scales)
-_F8_LEAF = re.compile(r"^g_gemm_mxfp4s_(store|swiglu)_m128$")
+_F8_LEAF = re.compile(r"^g_gemm_mxfp4s_(store)_m128$")
 
 
 def _split(s):
@@ -525,7 +526,35 @@ def fuse_mxfp4s_f8(text, prefix="g"):
                 leaves.append((i, x))
     if not leaves:
         return text, 0
-    used = sorted({x for _, x in leaves})
+    # SwiGLU triples: gate leaf, up leaf (two projections of one operand, outputs YA / YB) and the silu_mul that joins them -> one fused fp8 kernel
+    def block_end(i):
+        depth = 0
+        for j in range(i, len(lines)):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth == 0:
+                return j
+    leaf_at = dict(leaves)
+    triples = []   # (gate leaf line, up leaf line, silu block first line, silu block last line)
+    for j, l in enumerate(lines):
+        m = _LAUNCH.match(l)
+        if not (m and m.group("k") == "g_silu_mul_lv" and lines[j - 1].strip() == "scf.if %gemm {" and lines[j + 1].strip() == "} else {"
+                and lines[j + 3].strip() == "}" and (n := _LAUNCH.match(lines[j + 2])) and n.group("k") == "g_silu_mul"):
+            continue
+        ya, yb = _split(m.group("args"))[2:4]
+        up = [i for i in leaf_at if _split(_LAUNCH.match(lines[i]).group("args"))[-1] == yb and i < j]
+        gate = [i for i in leaf_at if _split(_LAUNCH.match(lines[i]).group("args"))[-1] == ya and i < j]
+        if not up or not gate:
+            continue
+        g, u = max(gate), max(up)   # the nearest ones before the silu_mul
+        if leaf_at[u] != leaf_at[g] or g > u:
+            continue
+        if lines[g - 2].strip() == "scf.if %mm {" and lines[u - 2].strip() == "scf.if %mm {" and block_end(g - 2) + 1 == u - 2 and block_end(u - 2) + 1 == j - 1:
+            ga, ua = _split(_LAUNCH.match(lines[g]).group("args")), _split(_LAUNCH.match(lines[u]).group("args"))
+            if ga[:5] == ua[:5]:
+                triples.append((g, u, j - 1, j + 3))
+    in_triple = {i for g, u, _, _ in triples for i in (g, u)}
+    leaves = [(i, x) for i, x in leaves if i not in in_triple]
+    used = sorted({x for _, x in leaves} | {leaf_at[g] for g, _, _, _ in triples})
     kernels = {}
     for x in used:
         for i in producers[x]:
@@ -557,6 +586,22 @@ def fuse_mxfp4s_f8(text, prefix="g"):
             f"{ind}  scf.if %big {{", f"{ind}    {lines[i].strip()}", f"{ind}  }} else {{", f"{ind}    {lines[i + 2].strip()}", f"{ind}  }}",
             f"{ind}}}"])
         drop.update(range(i, i + 4))
+    for g, u, s0, s1 in triples:
+        mg, mu, ms = _LAUNCH.match(lines[g]), _LAUNCH.match(lines[u]), _LAUNCH.match(lines[s0 + 1])
+        x8, s8, _ = _F8_OPERANDS[leaf_at[g]]
+        ga, ua = _split(mg.group("args")), _split(mu.group("args"))
+        gt, ut = _split(mg.group("at")), _split(mu.group("at"))
+        args = ga[:3] + [x8, s8] + ga[5:7] + ua[5:7] + [ga[7]]
+        at = gt[:7] + ut[5:7] + [gt[7]]
+        ind = lines[g - 2][:len(lines[g - 2]) - len(lines[g - 2].lstrip())]
+        region = lines[g - 2:s1 + 1]
+        repl[g - 2] = "\n".join([
+            f"{ind}scf.if %huge {{",
+            f"{ind}  // dual-group: rdna4 kernel.launch @{prefix}_gemm_mxfp4s_swiglu_f8_m256_rdna4[{mg.group('grid')}]({', '.join(args)}) : [{mg.group('gt')}]({', '.join(at)})",
+            f"{ind}  {lines[g].strip()}", f"{ind}  {lines[u].strip()}", f"{ind}  {lines[s0 + 1].strip()}",
+            f"{ind}  // dual-group: end",
+            f"{ind}}} else {{"] + region + [f"{ind}}}"])
+        drop.update(range(g - 1, s1 + 1))
     # the operand buffers: after the %f16 allocation of @llm_advance's prologue
     j = next(i for i, l in enumerate(lines) if re.match(r"\s*%f16 = buffer\.alloca<global> align\(256\) %f16_size : buffer", l))
     widths = {}
@@ -572,28 +617,22 @@ def fuse_mxfp4s_f8(text, prefix="g"):
     text = text[:a] + body + text[b:]
     first = text.index("command.program.def")   # the twins precede every launch (dual_target.py: a launch of K comes after the end of the K_rdna4 kernels)
     first = text.rfind("\n", 0, first) + 1
-    return text[:first] + "".join(t.rstrip("\n") + "\n\n" for t in kernels.values()) + text[first:], len(leaves)
+    return text[:first] + "".join(t.rstrip("\n") + "\n\n" for t in kernels.values()) + text[first:], len(leaves) + 2 * len(triples)
 
 
 # ======================================================================================================================
 # int8-activation matvec weight codes (decode, verify widths): the split-plane twin of gen_llm.MXFP4_ICODES
 # ======================================================================================================================
 def mxfp4s_icodes(order="pairs"):
-    """@g_mxfp4s_icodes(%w, %ws, %qrow, %srow, %group): the signed codes 2 * fp4 (kvalues_mxfp4: 0 1 2 3 4 6 8 12 and negatives) of 32-value block `group`
-    of the row whose nibbles start at byte %qrow of %w and whose scales start at byte %srow of %ws, and the block scale 2^(e - 128) (the codes carry the
-    factor 2): iq_decode / iq_dot (gen_llm) take it as the Q8_0 path does (one f32 scale, eight dot4 steps per block and token). Nibble order `order`."""
+    """@g_mxfp4s_icodes(%w, %ws, %origin, %scale_origin, %group): the signed codes 2 * fp4 (kvalues_mxfp4: 0 1 2 3 4 6 8 12 and negatives) of the 32-value block
+    whose 16 nibble bytes start at byte %origin of %w and whose E8M0 byte is at %scale_origin of %ws (%group unused: the Q8_0-style call shape of gen_llm.iq_decode),
+    and the block scale 2^(e - 128) (the codes carry the factor 2): eight dot4 steps per block and token, as the Q8_0 path. Nibble order `order`."""
     join = ("vector.interleave<0> %lo_codes, %hi_codes : vector<16xi8>, vector<16xi8> -> vector<32xi8>" if order == "pairs"
             else "vector.concat<0> %lo_codes, %hi_codes : vector<16xi8>, vector<16xi8> -> vector<32xi8>")
     return f"""
-func.def inline @g_mxfp4s_icodes(%w: buffer, %ws: buffer, %qrow: offset, %srow: offset, %group: index) -> (vector<32xi8>, f32) {{
-  %c16 = index.constant 16 : offset
-  %one = index.constant 1 : offset
-  %q_off = index.scale %group, %c16 : index, offset -> offset
-  %q_pos = index.add %qrow, %q_off : offset
-  %q_view = buffer.view %w[%q_pos] : buffer -> view<16xi8>
-  %s_off = index.scale %group, %one : index, offset -> offset
-  %s_pos = index.add %srow, %s_off : offset
-  %e_view = buffer.view %ws[%s_pos] : buffer -> view<1xi8>
+func.def inline @g_mxfp4s_icodes(%w: buffer, %ws: buffer, %origin: offset, %scale_origin: offset, %group: index) -> (vector<32xi8>, f32) {{
+  %q_view = buffer.view %w[%origin] : buffer -> view<16xi8>
+  %e_view = buffer.view %ws[%scale_origin] : buffer -> view<1xi8>
   %e8 = view.load %e_view[0] : view<1xi8> -> i8
   %e = scalar.extui %e8 : i8 to i32
   %c1_i = scalar.constant 1 : i32

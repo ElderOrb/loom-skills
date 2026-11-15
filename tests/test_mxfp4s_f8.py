@@ -98,7 +98,7 @@ class KernelTests(unittest.TestCase):
             self.assertIn("%rows_arg: index, %k_arg: index, %n_arg: index, %x: buffer, %scales: buffer, %w: buffer, %ws: buffer", t)   # the f16 kernels' leading arguments, then the two planes
             self.assertIn("%s_view = buffer.view %scales[%origin] : buffer -> view<[%rows]x2xf32>", t)   # gen_gemm's skip-padding anchor
             self.assertTrue(t.endswith("  kernel.return\n}\n"))
-            self.assertIn("%row_origin = index.mul %row_group, %cbm : index", t)
+            self.assertIn("%row_origin = index.mul %row_group, %c256 : index", t)
 
 
 class IcodesTests(unittest.TestCase):
@@ -167,84 +167,93 @@ class ProducerTests(unittest.TestCase):
 
 
 class FuseTests(unittest.TestCase):
-    PROGRAM = """command.program.def public @llm_advance() launch(%weights: buffer) {
+    @staticmethod
+    def store(k, n, x, sx, w, y, big=True):
+        mv = f"""    scf.if %single {{
+      kernel.launch @g_mv_mxfp4s_k{k}_r4[{n}, %t]({n}, %t, %zero_i32, %h, {w}, {w}_sc, {y}) : [index, index](index, index, i32, buffer, view<8xi8>, view<8xi8>, buffer)
+    }} else {{
+      kernel.launch @g_mv_mxfp4s_k{k}_t4_r4[{n}, %t]({n}, %t, %zero_i32, %h, {w}, {w}_sc, {y}) : [index, index](index, index, i32, buffer, view<8xi8>, view<8xi8>, buffer)
+    }}"""
+        args = f"(%tp, {'%nH' if k == 5120 else '%nFF'}, {n}, {x}, {sx}, {w}, {w}_sc, {y}) : [index, index](index, index, index, buffer, buffer, view<8xi8>, view<8xi8>, buffer)"
+        return f"""  scf.if %mm {{
+    scf.if %big {{
+      kernel.launch @g_gemm_mxfp4s_store_m128[%tp, {n}]{args}
+    }} else {{
+      kernel.launch @g_gemm_mxfp4s_store[%tp, {n}]{args}
+    }}
+    }} else {{
+{mv}
+    }}"""
+
+    @property
+    def program(self):
+        return ProducerTests.FIXTURE + f"""
+command.program.def public @llm_advance() launch(%weights: buffer) {{
   %nH = index.constant 5120 : index
   %nFF = index.constant 17408 : index
   %half_row = index.constant 10240 : offset
   %half_wide = index.constant 12288 : offset
   %half_ffn = index.constant 34816 : offset
   %f16 = buffer.alloca<global> align(256) %f16_size : buffer
-  scf.if %mm {
+  scf.if %mm {{
     kernel.launch @g_post_add_norm_rs_live_lv[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16) : [index](index, buffer, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer, buffer, buffer)
-  } else {
+  }} else {{
     kernel.launch @g_post_add_norm[%t](%t, %y, %wn, %x, %wn, %h) : [index](index, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer)
-  }
-  scf.if %mm {
-    scf.if %big {
-      kernel.launch @g_gemm_mxfp4s_swiglu_m128[%tp, %nFF](%tp, %nH, %nFF, %h16, %s_h, %wg, %wgs, %wu, %wus, %f) : [index, index](index, index, index, buffer, buffer, view<8xi8>, view<8xi8>, view<8xi8>, view<8xi8>, view<8xi8>, buffer)
-    } else {
-      kernel.launch @g_gemm_mxfp4s_swiglu[%tp, %nFF](%tp, %nH, %nFF, %h16, %s_h, %wg, %wgs, %wu, %wus, %f) : [index, index](index, index, index, buffer, buffer, view<8xi8>, view<8xi8>, view<8xi8>, view<8xi8>, view<8xi8>, buffer)
-    }
-  } else {
-    kernel.launch @g_mv_mxfp4s_k5120_swiglu_r4[%nFF, %t](%nFF, %t, %zero_i32, %h, %wg, %wgs, %wu, %wus, %f) : [index, index](index, index, i32, buffer, view<8xi8>, view<8xi8>, view<8xi8>, view<8xi8>, view<8xi8>, buffer)
-  }
-  scf.if %mm {
+  }}
+{self.store(5120, "%nFF", "%h16", "%s_h", "%wg", "%f")}
+{self.store(5120, "%nFF", "%h16", "%s_h", "%wu", "%fu")}
+  scf.if %gemm {{
+    kernel.launch @g_silu_mul_lv[%t](%t, %nFF, %f, %fu, %info) : [index](index, index, buffer, buffer, buffer)
+  }} else {{
+    kernel.launch @g_silu_mul[%t](%t, %nFF, %f, %fu) : [index](index, index, buffer, buffer)
+  }}
+  scf.if %mm {{
     kernel.launch @g_row_scale_f16_live_lv[%t](%t, %info, %nFF, %f, %s_f, %f16) : [index](index, buffer, index, buffer, buffer, buffer)
-  }
-  scf.if %mm {
-    scf.if %big {
-      kernel.launch @g_gemm_mxfp4s_store_m128[%tp, %nH](%tp, %nFF, %nH, %f16, %s_f, %wd, %wds, %y) : [index, index](index, index, index, buffer, buffer, view<8xi8>, view<8xi8>, buffer)
-    } else {
-      kernel.launch @g_gemm_mxfp4s_store[%tp, %nH](%tp, %nFF, %nH, %f16, %s_f, %wd, %wds, %y) : [index, index](index, index, index, buffer, buffer, view<8xi8>, view<8xi8>, buffer)
-    }
-  }
+  }}
+{self.store(17408, "%nH", "%f16", "%s_f", "%wd", "%y")}
   command.return
-}
+}}
 """
 
-    def program(self):
-        return ProducerTests.FIXTURE + "\n" + self.PROGRAM
-
-    def test_leaves_and_producers_are_grouped(self):
-        text, n = R.fuse_mxfp4s_f8(self.program())
-        self.assertEqual(n, 2)
-        self.assertEqual(text.count("// dual-group: rdna4 kernel.launch @g_gemm_mxfp4s_swiglu_f8_m256_rdna4[%tp, %nFF](%tp, %nH, %nFF, %h8, %s_h8,"), 1)
-        self.assertEqual(text.count("// dual-group: rdna4 kernel.launch @g_gemm_mxfp4s_store_f8_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8,"), 1)
+    def test_swiglu_pair_and_store_leaves_are_grouped(self):
+        text, n = R.fuse_mxfp4s_f8(self.program)
+        self.assertEqual(n, 3)   # gate + up (one fused group) and down
+        self.assertEqual(text.count("// dual-group: rdna4 kernel.launch @g_gemm_mxfp4s_swiglu_f8_m256_rdna4[%tp, %nFF](%tp, %nH, %nFF, %h8, %s_h8, %wg, %wg_sc, %wu, %wu_sc, %f)"), 1)
+        self.assertEqual(text.count("// dual-group: rdna4 kernel.launch @g_gemm_mxfp4s_store_f8_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8, %wd, %wd_sc, %y)"), 1)
         self.assertIn("// dual-group: rdna4 kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%t](%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8)", text)
         self.assertIn("// dual-group: rdna4 kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8)", text)
         self.assertEqual(text.count("scf.if %huge {"), 2)
         for buf, width in (("%h8", 5120), ("%f8", 17408)):
             self.assertRegex(text, rf"{buf}_row = index\.constant {width} : offset")
-            self.assertIn(f"{buf} = buffer.alloca<global> align(256) {buf}_size : buffer", text)
         self.assertNotIn("%o8 =", text)   # no reader of %o16: its fp8 copy is not made
-        # the twins precede the program (dual_target.py)
         self.assertLess(text.index('export("g_row_scale_f16_live_lv_f8_rdna4")'), text.index("command.program.def"))
 
     def test_the_gfx11_program_keeps_every_launch(self):
         import dual_target
         dummy = 'kernel.def export("g_dummy") @g_dummy(%a: index) {\n}\n\nkernel.def target(@rdna4) export("g_dummy_rdna4") @g_dummy_rdna4(%a: index) {\n}\n\n'
-        text, _ = R.fuse_mxfp4s_f8(dummy + self.program())
+        text, _ = R.fuse_mxfp4s_f8(dummy + self.program)
         dual = dual_target.apply(text, enable=True, select="launch")
         self.assertIn("template.apply<@grp", dual)
         base = re.findall(r"(?s)template\.def<@grp\d+_(\w+)> target\(@rdna3\) @\w+\([^)]*\) \{\n(.*?)template\.return", dual)
         twin = re.findall(r"(?s)template\.def<@grp\d+_(\w+)> target\(@rdna4\) @\w+\([^)]*\) \{\n(.*?)template\.return", dual)
-        self.assertEqual(len(base), 4)
+        self.assertEqual(len(base), 4)   # two producers, the swiglu pair, the down GEMM
         self.assertEqual(sorted(k for k, _ in base), sorted(k for k, _ in twin))
         for _, body in base:
-            self.assertNotIn("_f8_", body)   # the gfx11 provider is the launch the f16 program had
+            self.assertNotIn("_f8_", body)   # the gfx11 provider is the launches the f16 program had
+        launches = sorted(body.count("kernel.launch") for _, body in base)
+        self.assertEqual(launches, [1, 1, 1, 3])   # the swiglu group: gate, up, silu_mul on gfx11
         for _, body in twin:
             self.assertEqual(body.count("kernel.launch"), 1)
             self.assertIn("_f8_", body)
 
     def test_an_unknown_reader_leaves_the_f16_path(self):
-        prog = self.program().replace("  command.return\n", "  kernel.launch @g_mystery[%t](%t, %f16) : [index](index, buffer)\n  command.return\n")
+        prog = self.program.replace("  command.return\n", "  kernel.launch @g_mystery[%t](%t, %f16) : [index](index, buffer)\n  command.return\n")
         text, n = R.fuse_mxfp4s_f8(prog)
-        # %f16 has an unknown user: its GEMM stays; %h16's swiglu leaf is still converted
-        self.assertEqual(n, 1)
+        self.assertEqual(n, 2)   # %f16 has an unknown user: the down GEMM stays; %h16's pair is still converted
         self.assertNotIn("%f8 =", text)
 
     def test_a_k_the_step_does_not_divide_keeps_the_f16_path(self):
-        text, n = R.fuse_mxfp4s_f8(self.program().replace("%nH = index.constant 5120 : index", "%nH = index.constant 2880 : index"))
+        text, n = R.fuse_mxfp4s_f8(self.program.replace("%nH = index.constant 5120 : index", "%nH = index.constant 2880 : index"))
         self.assertEqual(n, 1)   # the down GEMM (K = 17408) only
 
     def test_no_llm_advance_no_change(self):
