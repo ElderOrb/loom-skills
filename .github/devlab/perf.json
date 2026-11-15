@@ -1,47 +1,28 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
+ "_comment": "MXFP4 prefill GEMMs on fp8 WMMA (R9700): kernel tests of the new kernels, f16-path vs fp8-path A/B (ABBA) on one runner; gates of the fp8 path in a second job.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "llama_spec": "matched",
- "jobs": [
-  {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
-   "variants": [
-    {
-     "name": "card",
-     "build": {}
-    },
-    {
-     "name": "nodraft",
-     "build": {},
-     "execution": {
-      "draft_depth": 0
-     }
-    }
-   ],
-   "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
-   ]
-  }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+ "card": "loom-fun-staging/quark75-Qwen3.8-27B-MXFP4-loom",
  "kit": null,
  "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ "jobs": [
+  {
+   "name": "mxfp4-f8-ab",
+   "memory_bytes_r9700": 34000000000,
+   "variants": [
+    {"name": "f16", "build": {"GEMM_MXFP4_F8": "0"}, "context": 134144},
+    {"name": "f8", "build": {"GEMM_MXFP4_F8": "1"}, "context": 134144}
+   ],
+   "steps": ["ktest:f8", "perf:f16:1", "perf:f8:1", "perf:f8:1", "perf:f16:1"]
+  },
+  {
+   "name": "mxfp4-f8-gates",
+   "memory_bytes_r9700": 34000000000,
+   "variants": [
+    {"name": "f8", "build": {"GEMM_MXFP4_F8": "1"}, "context": 134144}
+   ],
+   "steps": ["func:f8", "gates:f8:dev"]
+  }
+ ]
 }
