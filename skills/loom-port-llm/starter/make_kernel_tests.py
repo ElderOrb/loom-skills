@@ -250,22 +250,22 @@ for name, K in todo:
             # verify == decode: the multi-token variant must round every token exactly as the 1-token kernel
             # (run here over the same tg tokens) does
             same = (f"""  %y1 = check.generate.fill value(0.0) : tensor<{tg}x{n}xf32>
-  kernel.launch @{k1}[%n, %t](%n, %t, %acc, %xq, %w, %y1) : [index, index](index, index, i32, tensor<{tg}x{2 * K}xi8>, {ty(raw(name))}, tensor<{tg}x{n}xf32>)
+  kernel.launch @{k1}[%n, %t](%n, %t, %acc, %xq, %w{sa}, %y1) : [index, index](index, index, i32, tensor<{tg}x{2 * K}xi8>, {ty(raw(name))}{st}, tensor<{tg}x{n}xf32>)
   check.expect.close actual(%y) expected(%y1) atol(0.0) rtol(0.0) nan(different) : tensor<{tg}x{n}xf32>
 """ if tg > 1 else "")
-            wt = ty(raw(name))
+            wt = ty(raw(name)); sd, sa, st = split_w(name, tag)
             cases.append(f"""check.case public @mv_{tag} {{
   %n = check.literal value({n}) : index
   %t = check.literal value({tg}) : index
   %k = check.literal value({K}) : index
   %acc = check.literal value(0) : i32
   %w = check.file.read.npy path("{tag}_w.npy") : {wt}
-  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{tg}x{K}xf32>
+{sd}  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{tg}x{K}xf32>
   %e = check.file.read.npy path("{tag}_y.npy") : tensor<{tg}x{n}xf32>
   %xq = check.generate.fill value(0) : tensor<{tg}x{2 * K}xi8>
   %y = check.generate.fill value(0.0) : tensor<{tg}x{n}xf32>
   kernel.launch @g_quant_q8[%t, %k](%t, %k, %x, %xq) : [index, index](index, index, tensor<{tg}x{K}xf32>, tensor<{tg}x{2 * K}xi8>)
-  kernel.launch @{kern}[%n, %t](%n, %t, %acc, %xq, %w, %y) : [index, index](index, index, i32, tensor<{tg}x{2 * K}xi8>, {wt}, tensor<{tg}x{n}xf32>)
+  kernel.launch @{kern}[%n, %t](%n, %t, %acc, %xq, %w{sa}, %y) : [index, index](index, index, i32, tensor<{tg}x{2 * K}xi8>, {wt}{st}, tensor<{tg}x{n}xf32>)
   check.expect.close actual(%y) expected(%e) atol(2.0e-3) rtol(2.0e-3) nan(different) : tensor<{tg}x{n}xf32>
 {same}  check.return
 }}
@@ -298,6 +298,29 @@ for li in range(cfg["layers"]):
   %e = check.file.read.npy path("{tag}_y.npy") : tensor<{tg}x{n}xf32>
   %y = check.generate.fill value(0.0) : tensor<{tg}x{n}xf32>
   kernel.launch @{kern}[%n, %t](%n, %t, %acc, %x, %w{sa}, %y) : [index, index](index, index, i32, tensor<{tg}x{K}xf32>, {wt}{st}, tensor<{tg}x{n}xf32>)
+  check.expect.close actual(%y) expected(%e) atol(2.0e-3) rtol(2.0e-3) nan(different) : tensor<{tg}x{n}xf32>
+  check.return
+}}
+""")
+        if ACT_Q8 and fmt in IQ_FMTS:   # the int8-activation variants of this width (decode.mxfp4s.act_q8): g_quant_q8 then g_mv_<fmt>_k<K>[_t<tg>]_q8[_r<R>]
+            for tg in (1, 4, 8, 16):
+                xs = rng.standard_normal((tg, K)).astype(np.float32); y = q8_ref(xs).astype(np.float64) @ W.T.astype(np.float64)
+                tag = name.replace(".", "_") + f"_q8_t{tg}"
+                save(tag + "_w", raw(name)); save(tag + "_x", xs); save(tag + "_y", y.astype(np.float32))
+                _R = iq_r(n, K, tg); kern = f"g_mv_{fmt}_k{K}" + (f"_t{tg}" if tg > 1 else "") + "_q8" + (f"_r{_R}" if _R != 16 else "")
+                wt = ty(raw(name)); sd, sa, st = split_w(name, tag)
+                cases.append(f"""check.case public @mv_{tag} {{
+  %n = check.literal value({n}) : index
+  %t = check.literal value({tg}) : index
+  %k = check.literal value({K}) : index
+  %acc = check.literal value(0) : i32
+  %w = check.file.read.npy path("{tag}_w.npy") : {wt}
+{sd}  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{tg}x{K}xf32>
+  %e = check.file.read.npy path("{tag}_y.npy") : tensor<{tg}x{n}xf32>
+  %xq = check.generate.fill value(0) : tensor<{tg}x{2 * K}xi8>
+  %y = check.generate.fill value(0.0) : tensor<{tg}x{n}xf32>
+  kernel.launch @g_quant_q8[%t, %k](%t, %k, %x, %xq) : [index, index](index, index, tensor<{tg}x{K}xf32>, tensor<{tg}x{2 * K}xi8>)
+  kernel.launch @{kern}[%n, %t](%n, %t, %acc, %xq, %w{sa}, %y) : [index, index](index, index, i32, tensor<{tg}x{2 * K}xi8>, {wt}{st}, tensor<{tg}x{n}xf32>)
   check.expect.close actual(%y) expected(%e) atol(2.0e-3) rtol(2.0e-3) nan(different) : tensor<{tg}x{n}xf32>
   check.return
 }}
