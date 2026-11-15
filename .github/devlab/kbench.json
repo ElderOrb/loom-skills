@@ -67,7 +67,9 @@
         "nobar",
         "nox",
         "nofrag",
-        "noload"
+        "noload",
+        "adirect",
+        "adbuf"
       ],
       "files": [
         "bench.loom",
@@ -76,7 +78,9 @@
         "bench_nobar.loom",
         "bench_nox.loom",
         "bench_nofrag.loom",
-        "bench_noload.loom"
+        "bench_noload.loom",
+        "bench_adirect.loom",
+        "bench_adbuf.loom"
       ],
       "tests": [
         "test.loom"

@@ -34,11 +34,13 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs"):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
-    store: 256 x 128 outputs, swiglu: 256 x 64 of each of gate and up. K advances 128 values (four MXFP4 blocks) per stage."""
+    store: 256 x 128 outputs, swiglu: 256 x 64 of each of gate and up. K advances 128 values (four MXFP4 blocks) per stage.
+    dbuf (with a_direct): the weight stage is double-buffered, one barrier per step: the next step is decoded into the other buffer while this one is multiplied.
+    a_direct: the activation fragments are loaded from global memory straight into registers (no LDS staging of the activations)."""
     two_w = mode == "swiglu"
     NT = 256
     TW = 128                      # weight rows staged per tile (swiglu: 64 gate + 64 up)
@@ -110,11 +112,12 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs"):
   %k16 = index.div %k, %c16 : index
   %x_view = buffer.view %x[%origin] : buffer -> view<[%rows]x[%k16]x16xi8>
   %s_view = buffer.view %scales[%origin] : buffer -> view<[%rows]x2xf32>
-  %x_bytes = index.constant {256 * PX} : offset
+  %x_bytes = index.constant {16384 if a_direct else 256 * PX} : offset
   %x_stage = buffer.alloca<workgroup> align(16) %x_bytes : buffer
-  %x_stage_st = buffer.view %x_stage[%origin] : buffer -> view<256x{PX}xi8>
+{"" if a_direct else f"  %x_stage_st = buffer.view %x_stage[%origin] : buffer -> view<256x{PX}xi8>"}
   %w_bytes = index.constant {TW * PX} : offset
-  %w_stage = buffer.alloca<workgroup> align(16) %w_bytes : buffer
+  %w_alloc = index.constant {TW * PX * (2 if dbuf else 1)} : offset
+  %w_stage = buffer.alloca<workgroup> align(16) %w_alloc : buffer
   %w_stage_st = buffer.view %w_stage[%origin] : buffer -> view<{TW}x{PX}xi8>
   %a_schema = encoding.define #encoding.operand<element_format=f8e4m3, payload_elements=8, payload_registers=2> : encoding<schema>
   %b_schema = encoding.define #encoding.operand<element_format=f8e5m2, payload_elements=8, payload_registers=2> : encoding<schema>
@@ -122,8 +125,8 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs"):
   %b_layout = encoding.layout.strided [1, {PX}] : encoding<layout>
   %a_storage = encoding.define #encoding.storage {{layout = %a_layout : encoding<layout>, schema = %a_schema : encoding<schema>}} : encoding<storage>
   %b_storage = encoding.define #encoding.storage {{layout = %b_layout : encoding<layout>, schema = %b_schema : encoding<schema>}} : encoding<storage>
-  %x_stage_f8 = buffer.view %x_stage[%origin] : buffer -> view<256x{PX}xf8E4M3, %a_storage>
-  %w_stage_f8 = buffer.view %w_stage[%origin] : buffer -> view<{PX}x{TW}xf8E5M2, %b_storage>
+{"  %x_g8 = buffer.view %x[%origin] : buffer -> view<[%rows]x[%k]xf8E4M3, %a_storage>" if a_direct else f"  %x_stage_f8 = buffer.view %x_stage[%origin] : buffer -> view<256x{PX}xf8E4M3, %a_storage>"}
+{"" if dbuf else f"  %w_stage_f8 = buffer.view %w_stage[%origin] : buffer -> view<{PX}x{TW}xf8E5M2, %b_storage>"}
   // A staging: thread t copies the 128 activation bytes of row t of this step
   %x_row_value = index.add %row_origin, %workitem : index
   %x_row = index.assume %x_row_value [lt(%x_row_value, %rows)] : index
@@ -165,7 +168,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs"):
     def loads(sfx, kstep):
         """global loads of step `kstep` (an index value name): activation 8 x vector<16xi8>, weights 2 blocks (e, q)"""
         t = [f"    %kcol{sfx} = index.mul {kstep}, %c8 : index"]
-        for i in range(8):
+        for i in range(0 if a_direct else 8):
             t.append(f"    %xc{sfx}{i}_v = index.add %kcol{sfx}, %xi{i} : index")
             t.append(f"    %xc{sfx}{i} = index.assume %xc{sfx}{i}_v [lt(%xc{sfx}{i}_v, %k16)] : index")
             t.append(f"    %xr{sfx}{i} = vector.load %x_view[%x_row, %xc{sfx}{i}, %c0] : view<[%rows]x[%k16]x16xi8> -> vector<16xi8>")
@@ -193,79 +196,117 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs"):
     # constant column offsets of the activation loads
     for i in range(8):
         A(f"  %xo{i} = index.constant {16 * i} : index\n  %xi{i} = index.constant {i} : index")
+    def stage_text(wview="%w_stage_st", raw=("%cr_q{j}", "%cr_e{j}"), sfx=""):
+        """activation stores (staged variant) and the decode of the weights' raw registers (names raw % j) into the LDS view `wview`; sfx renames
+        every value the text defines (a second copy of it in one scope)"""
+        L2 = []
+        A2 = L2.append
+        for i in range(0 if a_direct else 8):
+            A2(f"    vector.store %cr_x{i}, %x_stage_st[%workitem, %xo{i}] : vector<16xi8>, view<256x{PX}xi8>")
+        for j in range(2):
+            A2(f'''    %em{j} = scalar.subi %cr_e{j}, %c107 : i32
+        %ea{j} = scalar.shli %em{j}, %cs2 : i32
+        %ea4_{j} = scalar.muli %ea{j}, %ones : i32
+        %ea4z_{j} = scalar.andi %ea4_{j}, %lo_mask : i32
+        %tlo{j} = scalar.addi %ea4z_{j}, %tab_lo_c : i32
+        %thi{j} = scalar.addi %ea4_{j}, %tab_hi_c : i32
+        %tab2_{j} = vector.from_elements %tlo{j}, %thi{j} : vector<2xi32>
+        %tab{j} = vector.bitcast %tab2_{j} : vector<2xi32> to vector<8xi8>''')
+            for i in range(4):
+                A2(f'''    %qw{j}{i}_1 = vector.slice %cr_q{j}[{i}] : vector<4xi32> -> vector<1xi32>
+        %qw{j}{i} = vector.bitcast %qw{j}{i}_1 : vector<1xi32> to vector<4xi8>
+        %lo_i{j}{i} = vector.andi %qw{j}{i}, %m7 : vector<4xi8>
+        %hs_i{j}{i} = vector.shrui %qw{j}{i}_1, %m4i : vector<1xi32>
+        %hs_b{j}{i} = vector.bitcast %hs_i{j}{i} : vector<1xi32> to vector<4xi8>
+        %hi_i{j}{i} = vector.andi %hs_b{j}{i}, %m7 : vector<4xi8>
+        %lo_m{j}{i} = vector.table.lookup %tab{j}[%lo_i{j}{i}] : vector<8xi8>, vector<4xi8> -> vector<4xi8>
+        %hi_m{j}{i} = vector.table.lookup %tab{j}[%hi_i{j}{i}] : vector<8xi8>, vector<4xi8> -> vector<4xi8>
+        %ls_i{j}{i} = vector.shli %qw{j}{i}_1, %m4i : vector<1xi32>
+        %ls_m{j}{i} = vector.andi %ls_i{j}{i}, %m80i : vector<1xi32>
+        %ls_b{j}{i} = vector.bitcast %ls_m{j}{i} : vector<1xi32> to vector<4xi8>
+        %hs_m{j}{i} = vector.andi %qw{j}{i}_1, %m80i : vector<1xi32>
+        %hs_s{j}{i} = vector.bitcast %hs_m{j}{i} : vector<1xi32> to vector<4xi8>
+        %lo_f{j}{i} = vector.ori %lo_m{j}{i}, %ls_b{j}{i} : vector<4xi8>
+        %hi_f{j}{i} = vector.ori %hi_m{j}{i}, %hs_s{j}{i} : vector<4xi8>
+        %lo_w{j}{i} = vector.bitcast %lo_f{j}{i} : vector<4xi8> to vector<1xi32>
+        %hi_w{j}{i} = vector.bitcast %hi_f{j}{i} : vector<4xi8> to vector<1xi32>''')
+            A2(f'''    %lo4_{j} = vector.concat<0> %lo_w{j}0, %lo_w{j}1, %lo_w{j}2, %lo_w{j}3 : vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32> -> vector<4xi32>
+        %hi4_{j} = vector.concat<0> %hi_w{j}0, %hi_w{j}1, %hi_w{j}2, %hi_w{j}3 : vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32> -> vector<4xi32>
+        %lo16_{j} = vector.bitcast %lo4_{j} : vector<4xi32> to vector<16xi8>
+        %hi16_{j} = vector.bitcast %hi4_{j} : vector<4xi32> to vector<16xi8>
+        %wcl{j}_a = index.constant {32 * j} : index
+        %wcl{j} = index.add %stage_col, %wcl{j}_a : index''')
+            if order == "pairs":   # byte i = elements 2i (low nibble) and 2i + 1 (high): one 32-byte block in element order
+                A2(f'''    %blk{j} = vector.interleave<0> %lo16_{j}, %hi16_{j} : vector<16xi8>, vector<16xi8> -> vector<32xi8>
+        vector.store %blk{j}, %w_stage_st[%stage_row, %wcl{j}] : vector<32xi8>, view<{TW}x{PX}xi8>''')
+            else:                  # ggml: element i low, i + 16 high
+                A2(f'''    %wch{j} = index.add %wcl{j}, %c16 : index
+        vector.store %lo16_{j}, %w_stage_st[%stage_row, %wcl{j}] : vector<16xi8>, view<{TW}x{PX}xi8>
+        vector.store %hi16_{j}, %w_stage_st[%stage_row, %wch{j}] : vector<16xi8>, view<{TW}x{PX}xi8>''')
+
+        t = "\n".join(L2).replace("%cr_q{j}", "@").replace("%w_stage_st[", wview + "[")
+        t = re.sub(r"%cr_q(\d)", lambda m: raw[0].format(j=m.group(1)), t)
+        t = re.sub(r"%cr_e(\d)", lambda m: raw[1].format(j=m.group(1)), t)
+        if sfx:
+            for nm in sorted(set(re.findall(r"^\s*(%\w+) = ", t, flags=re.M)), key=len, reverse=True):
+                t = re.sub(re.escape(nm) + r"\b", nm + sfx, t)
+        return t
+    if a_direct:
+        for r in range(RF):
+            A(f"  %xrow{r}_v = index.add %row_origin, {'%wave_row' if r == 0 else f'%wave_row{r}'} : index\n  %xrow{r} = index.assume %xrow{r}_v [lt(%xrow{r}_v, %rows)] : index")
     A(loads("p", "%c0"))
-    carried = [(f"%cr_x{i}", f"%xrp{i}", f"%xrn{i}", "vector<16xi8>") for i in range(8)]
+    if dbuf:
+        assert a_direct
+        A(stage_text(raw=("%wq{j}p", "%we{j}p"), sfx="_pro"))
+        A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+        A("    %k_one = index.min %c1, %k_steps_m1 : index")
+        A(loads("q", "%k_one"))
+    carried = [(f"%cr_x{i}", f"%xrp{i}", f"%xrn{i}", "vector<16xi8>") for i in range(0 if a_direct else 8)]
     for j in range(2):
-        carried.append((f"%cr_e{j}", f"%we{j}p", f"%we{j}n", "i32"))
-        carried.append((f"%cr_q{j}", f"%wq{j}p", f"%wq{j}n", "vector<4xi32>"))
+        carried.append((f"%cr_e{j}", f"%we{j}{'q' if dbuf else 'p'}", f"%we{j}n", "i32"))
+        carried.append((f"%cr_q{j}", f"%wq{j}{'q' if dbuf else 'p'}", f"%wq{j}n", "vector<4xi32>"))
     A("  " + ", ".join(f"%o{a}" for a in accs) + ", " + ", ".join(f"%unused_{i}" for i in range(len(carried))) +
       " = scf.for %step = [%c0 to %k_steps step %c1](" +
       ", ".join(f"%i{a} = %init : vector<8xf32>" for a in accs) + ", " + ", ".join(f"{c[0]} = {c[1]} : {c[3]}" for c in carried) + ") -> (" +
       ", ".join("vector<8xf32>" for _ in accs) + ", " + ", ".join(c[3] for c in carried) + ") {")
-    # --- stage: activations (plain copies), weights (decode MXFP4 -> bf8 bytes)
-    for i in range(8):
-        A(f"    vector.store %cr_x{i}, %x_stage_st[%workitem, %xo{i}] : vector<16xi8>, view<256x{PX}xi8>")
-    for j in range(2):
-        A(f'''    %em{j} = scalar.subi %cr_e{j}, %c107 : i32
-    %ea{j} = scalar.shli %em{j}, %cs2 : i32
-    %ea4_{j} = scalar.muli %ea{j}, %ones : i32
-    %ea4z_{j} = scalar.andi %ea4_{j}, %lo_mask : i32
-    %tlo{j} = scalar.addi %ea4z_{j}, %tab_lo_c : i32
-    %thi{j} = scalar.addi %ea4_{j}, %tab_hi_c : i32
-    %tab2_{j} = vector.from_elements %tlo{j}, %thi{j} : vector<2xi32>
-    %tab{j} = vector.bitcast %tab2_{j} : vector<2xi32> to vector<8xi8>''')
-        for i in range(4):
-            A(f'''    %qw{j}{i}_1 = vector.slice %cr_q{j}[{i}] : vector<4xi32> -> vector<1xi32>
-    %qw{j}{i} = vector.bitcast %qw{j}{i}_1 : vector<1xi32> to vector<4xi8>
-    %lo_i{j}{i} = vector.andi %qw{j}{i}, %m7 : vector<4xi8>
-    %hs_i{j}{i} = vector.shrui %qw{j}{i}_1, %m4i : vector<1xi32>
-    %hs_b{j}{i} = vector.bitcast %hs_i{j}{i} : vector<1xi32> to vector<4xi8>
-    %hi_i{j}{i} = vector.andi %hs_b{j}{i}, %m7 : vector<4xi8>
-    %lo_m{j}{i} = vector.table.lookup %tab{j}[%lo_i{j}{i}] : vector<8xi8>, vector<4xi8> -> vector<4xi8>
-    %hi_m{j}{i} = vector.table.lookup %tab{j}[%hi_i{j}{i}] : vector<8xi8>, vector<4xi8> -> vector<4xi8>
-    %ls_i{j}{i} = vector.shli %qw{j}{i}_1, %m4i : vector<1xi32>
-    %ls_m{j}{i} = vector.andi %ls_i{j}{i}, %m80i : vector<1xi32>
-    %ls_b{j}{i} = vector.bitcast %ls_m{j}{i} : vector<1xi32> to vector<4xi8>
-    %hs_m{j}{i} = vector.andi %qw{j}{i}_1, %m80i : vector<1xi32>
-    %hs_s{j}{i} = vector.bitcast %hs_m{j}{i} : vector<1xi32> to vector<4xi8>
-    %lo_f{j}{i} = vector.ori %lo_m{j}{i}, %ls_b{j}{i} : vector<4xi8>
-    %hi_f{j}{i} = vector.ori %hi_m{j}{i}, %hs_s{j}{i} : vector<4xi8>
-    %lo_w{j}{i} = vector.bitcast %lo_f{j}{i} : vector<4xi8> to vector<1xi32>
-    %hi_w{j}{i} = vector.bitcast %hi_f{j}{i} : vector<4xi8> to vector<1xi32>''')
-        A(f'''    %lo4_{j} = vector.concat<0> %lo_w{j}0, %lo_w{j}1, %lo_w{j}2, %lo_w{j}3 : vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32> -> vector<4xi32>
-    %hi4_{j} = vector.concat<0> %hi_w{j}0, %hi_w{j}1, %hi_w{j}2, %hi_w{j}3 : vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32> -> vector<4xi32>
-    %lo16_{j} = vector.bitcast %lo4_{j} : vector<4xi32> to vector<16xi8>
-    %hi16_{j} = vector.bitcast %hi4_{j} : vector<4xi32> to vector<16xi8>
-    %wcl{j}_a = index.constant {32 * j} : index
-    %wcl{j} = index.add %stage_col, %wcl{j}_a : index''')
-        if order == "pairs":   # byte i = elements 2i (low nibble) and 2i + 1 (high): one 32-byte block in element order
-            A(f'''    %blk{j} = vector.interleave<0> %lo16_{j}, %hi16_{j} : vector<16xi8>, vector<16xi8> -> vector<32xi8>
-    vector.store %blk{j}, %w_stage_st[%stage_row, %wcl{j}] : vector<32xi8>, view<{TW}x{PX}xi8>''')
-        else:                  # ggml: element i low, i + 16 high
-            A(f'''    %wch{j} = index.add %wcl{j}, %c16 : index
-    vector.store %lo16_{j}, %w_stage_st[%stage_row, %wcl{j}] : vector<16xi8>, view<{TW}x{PX}xi8>
-    vector.store %hi16_{j}, %w_stage_st[%stage_row, %wch{j}] : vector<16xi8>, view<{TW}x{PX}xi8>''')
-    A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
-    # --- prefetch the next step (clamped to the last step: the extra loads are unused)
-    A("    %k_next_raw = index.add %step, %c1 : index\n    %k_next = index.min %k_next_raw, %k_steps_m1 : index")
+    if dbuf:
+        A("    %par = index.rem %step, %c2 : index\n    %npar = index.sub %c1, %par : index")
+        A("    %cur_off = index.scale %par, %w_bytes : index, offset -> offset\n    %nxt_off = index.scale %npar, %w_bytes : index, offset -> offset")
+        A(f"    %w_cur_f8 = buffer.view %w_stage[%cur_off] : buffer -> view<{PX}x{TW}xf8E5M2, %b_storage>")
+        A(f"    %w_nxt_st = buffer.view %w_stage[%nxt_off] : buffer -> view<{TW}x{PX}xi8>")
+        A("    %k_next_raw = index.add %step, %c2 : index\n    %k_next = index.min %k_next_raw, %k_steps_m1 : index")
+    else:
+        A(stage_text())
+        A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+        # --- prefetch the next step (clamped to the last step: the extra loads are unused)
+        A("    %k_next_raw = index.add %step, %c1 : index\n    %k_next = index.min %k_next_raw, %k_steps_m1 : index")
     A(loads("n", "%k_next"))
     cur = {a: f"%i{a}" for a in accs}
     rowv = ["%wave_row"] + [f"%wave_row{r}" for r in range(1, RF)]
+    if a_direct:
+        A("    %kbase = index.mul %step, %c128 : index")
     for kk in range(KS // 16):
         A(f"    %fk{kk} = index.constant {kk * 16} : index")
         for r in range(RF):
-            A(f"    %l{r}_{kk} = vector.fragment.load<lhs> %x_stage_f8[{rowv[r]}, %fk{kk}] shape [%c16, %c16] : view<256x{PX}xf8E4M3, %a_storage> -> vector<2xi32>")
+            if a_direct:
+                if r == 0:
+                    A(f"    %kg{kk} = index.add %kbase, %fk{kk} : index")
+                A(f"    %l{r}_{kk} = vector.fragment.load<lhs> %x_g8[%xrow{r}, %kg{kk}] shape [%c16, %c16] : view<[%rows]x[%k]xf8E4M3, %a_storage> -> vector<2xi32>")
+            else:
+                A(f"    %l{r}_{kk} = vector.fragment.load<lhs> %x_stage_f8[{rowv[r]}, %fk{kk}] shape [%c16, %c16] : view<256x{PX}xf8E4M3, %a_storage> -> vector<2xi32>")
         for wi in range(len(weights)):
             for c in range(cfr):
                 A(f'''    %wr{wi}{c}_{kk}_c = index.constant {wi * TN + c * 16} : index
     %wr{wi}{c}_{kk} = index.add %wave_col, %wr{wi}{c}_{kk}_c : index
-    %rf{wi}{c}_{kk} = vector.fragment.load<rhs> %w_stage_f8[%fk{kk}, %wr{wi}{c}_{kk}] shape [%c16, %c16] : view<{PX}x{TW}xf8E5M2, %b_storage> -> vector<2xi32>''')
+    %rf{wi}{c}_{kk} = vector.fragment.load<rhs> {"%w_cur_f8" if dbuf else "%w_stage_f8"}[%fk{kk}, %wr{wi}{c}_{kk}] shape [%c16, %c16] : view<{PX}x{TW}xf8E5M2, %b_storage> -> vector<2xi32>''')
         for wi in range(len(weights)):
             for c in range(cfr):
                 for r in range(RF):
                     a = f"{wi}r{r}c{c}"
                     A(f"    %m{a}_{kk} = vector.mma %l{r}_{kk}, %rf{wi}{c}_{kk}, {cur[a]} : vector<2xi32>, vector<2xi32>, vector<8xf32>")
                     cur[a] = f"%m{a}_{kk}"
+    if dbuf:
+        A(stage_text(wview="%w_nxt_st"))
     A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
     A("    scf.yield " + ", ".join(cur[a] for a in accs) + ", " + ", ".join(c[2] for c in carried) + " : " +
       ", ".join("vector<8xf32>" for _ in accs) + ", " + ", ".join(c[3] for c in carried) + "\n  }")

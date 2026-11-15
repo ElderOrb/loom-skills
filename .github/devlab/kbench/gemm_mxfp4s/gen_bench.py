@@ -59,11 +59,14 @@ def _nox(t, mode):
     return re.sub(r"^\s*vector\.store %cr_x\d, %x_stage_st[^\n]*\n", "", t, flags=re.M)
 
 
+GEN = {"adirect": {"a_direct": True}, "adbuf": {"a_direct": True, "dbuf": True}}   # variants that are generator parameters (the levers), not text ablations
+
+
 def kernel(mode, kn, variant="", order="pairs"):
-    t = G.gemm_mxfp4s_f8_m256(mode, order=order)
+    t = G.gemm_mxfp4s_f8_m256(mode, order=order, **GEN.get(variant, {}))
     old = f"g_gemm_mxfp4s_{mode}_f8_m256_rdna4"
     t = t.replace(f'export("{old}") @{old}(', f'export("{kn}") @{kn}(')
-    return VARIANTS[variant](t, mode) if variant else t
+    return VARIANTS[variant](t, mode) if variant in VARIANTS else t
 
 
 def build(variant=""):
@@ -175,10 +178,10 @@ def save(d, name, a):
 def tests(outdir):
     rng = np.random.default_rng(7)
     out = []
-    for order in ("pairs", "split16"):
+    for order, variant in [("pairs", ""), ("split16", "")] + [("pairs", v) for v in GEN]:
         for mode, K, n in (("store", 5120, 1024), ("swiglu", 5120, 512), ("store", 17408, 256)):
             rows = 512
-            kn = f"t_{mode}_{order}_{K}"
+            kn = f"t_{mode}_{order}{'_' + variant if variant else ''}_{K}"
             nib = [rng.integers(0, 256, (n, K // 2)).astype(np.uint8) for _ in range(2 if mode == "swiglu" else 1)]
             sc = [rng.integers(108, 127, (n, K // 32)).astype(np.uint8) for _ in nib]
             W = [dequant(a, b, order) for a, b in zip(nib, sc)]
@@ -199,7 +202,7 @@ def tests(outdir):
                          f'  %ws{i} = check.file.read.npy path("{kn}_ws{i}.npy") : tensor<{b.size}xi8>\n')
                 args += [f"%w{i}", f"%ws{i}"]; tys += [f"tensor<{a.size}xi8>", f"tensor<{b.size}xi8>"]
             tol = 1.0e-3 * float(np.abs(y).std() + 1e-6)
-            out.append(kernel(mode, kn, order=order))
+            out.append(kernel(mode, kn, variant, order=order))
             out.append(f"""check.case public @{kn}_case {{
   %rows = check.literal value({rows}) : index
   %k = check.literal value({K}) : index
@@ -220,7 +223,7 @@ if __name__ == "__main__" and len(sys.argv) > 2:
     d = sys.argv[2]
     os.makedirs(d, exist_ok=True)
     for v in (sys.argv[3:] or ["base"]):
-        if v != "base" and v not in VARIANTS: raise SystemExit("unknown variant " + v)
+        if v != "base" and v not in VARIANTS and v not in GEN: raise SystemExit("unknown variant " + v)
         v = "" if v == "base" else v
         open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)) + ("\n" + PEAK8 if not v else ""))
     # hrx-loom 0.1.0: float comparison is check.expect.approximate with the actual and expected types (as make_kernel_tests.py does)
