@@ -61,3 +61,30 @@
     0-7 dequant the gate format, waves 8-15 the up format, an scf.if on a wave-uniform condition; replaces two
     GEMMs + `g_silu_mul`). Correct (kernel test) but -1.1/-1.5 % at 2k/8k vs the two GEMMs: carrying both
     formats' prefetch registers costs more than `g_silu_mul` (0.8 %) and the %fu round trip save. Not kept.
+
+## gfx12 chunked (WY) prefill: `g_gdn_chunk_rdna4` (`gen_gdn_chunk.py`, choice `hybrid.gdn.chunk`, env `GDN_CHUNK`)
+Qwen3.8-27B on the R9700, 2k prefill, ms/token (doubling each kernel in prefill, same server): the sequential recurrence 0.046 (7.5 %), conv 0.011,
+gated norm 0.007, q/k norm 0.004 (the last three inside the run-to-run noise of one doubling, +-0.01). Nothing else of the GDN family is worth a kernel.
+- **Row/column split of the sequential kernel does not move on the R9700**: the 8 x 4 form (MTP models' only form) is the best of 8x2, 8x8, 16x2, 16x4,
+  16x8, 32x4, 4x4 (2k prefill -1.8, -2.9, -2.9, -2.4, -2.1, -6, -11.7 %; decode -0.4 .. -5 %).
+- **The chunked form works on gfx12 with f16 WMMA and an f32 state** (the first kernel test run passed: 84/84): one workgroup of 8 waves per value head,
+  chunks of CN = 32 tokens, wave w owns value columns [16w, 16w + 16) and keeps the state S^T as the 8 f32 result fragments of the state update
+  (key rows 8 half + i of 16-row blocks); its f16 copy is the rhs fragment of the K S / Q S products as it is (the flash2_rdna4 layout identity).
+  Per chunk: scan of the decays (threads), K K^T and Q K^T tiles (one tile per wave), T = (I + A)^-1 by forward substitution in f32 (one thread per column,
+  32 rows), R = beta (v - exp(gc) K S), d = T R, O = exp(gc) Q S + P d, S <- exp(G) S + (K exp(G - gc))^T d. Spans of 64+ tokens run it; shorter
+  spans (decode, verify, a prompt's tail) the sequential kernel's gfx12 twin (`g_gdn_recurrence_rdna4`: the same kernel text restricted to spans under
+  64 tokens). A dual-group launch (no gfx11 counterpart) adds the chunk kernel in the prefill branch: a gfx11 build launches nothing there.
+  Numerics: f16 operands (K, Q, S copy, T, P, d, R), f32 accumulation and state: relative error 5e-4 .. 9e-4 of the largest value against float64
+  (numpy emulation of the exact dataflow) and the kernel test (`gdn_chunk_spans`: 130 / 64 / 97-token spans, one continuing a stored state) passes at 1e-2 relative.
+- **Measured (R9700, same job, ABAB, 2 rounds)**: prefill 1k/2k 1536/1622 -> 1599/1694 tok/s (+4.1 / +4.4 %), decode unchanged (65.1 vs 64.9, tie). The kernel
+  costs 0.016 ms/token (the card build's sequential recurrence 0.042): skipping the kernel altogether gives 0.5656 ms/token vs 0.5815 with it (card build 0.608).
+  The K S / Q S products, the state update and the output stores are free in the ablation (the MMA work is not the cost; latency is).
+- **What failed on the way, and why it matters for the next kernel here** (Loom compile-only checks catch most of it: `loom-compile --target=amdgpu:gfx1201`):
+  - The scheduler hoists every independent load of a basic block to its top (scf.if regions are if-converted away, an earlier LDS store does not hold
+    back a later LDS load from another buffer): the unrolled 64-row solve (2016 independent A loads) failed allocation at a peak of 600-1400 VGPRs.
+    Fix: the A loads of row i depend on T[i - 2] through an index term that is zero at run time (the bits of T and an LDS zero, unknown to the compiler).
+  - CN = 64 spilled (5.6 KB scratch per lane; every reload is a global-latency wait): the first working version was 9 % SLOWER than the sequential kernel
+    (1498 vs 1644 tok/s at 2k). CN = 32 has no scratch (255 VGPRs, 53.7 KB LDS) and is the version above.
+  - Prefetching the next chunk's global loads across the loop (K, Q, norms, alpha, beta in carried registers): 85 spills, 2k 1662 vs 1685 tok/s: not kept.
+- Not done: fusing the q/k norm and the conv into the chunk kernel's staging (0.004 + 0.011 ms/token, each below the noise of a doubling); CN = 64 with the
+  solve split in two 32-row blocks (T = [[T11, 0], [-T22 A21 T11, T22]] with one MMA each); a second chunk kernel for Strix (WMMA gfx11 form).
