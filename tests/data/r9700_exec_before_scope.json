@@ -108,6 +108,11 @@
    "pool_capacity": 131072
   }
  },
+ "quark75-Qwen3.8-27B-MXFP4-loom": {
+  "r9700_execution": {
+   "prefill_capacity": 1024
+  }
+ },
  "rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom": {
   "r9700_execution": {
    "prefill_capacity": 4096

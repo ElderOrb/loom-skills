@@ -147,6 +147,8 @@ class ProducerTests(unittest.TestCase):
 
 class FuseTests(unittest.TestCase):
     PROGRAM = """command.program.def public @llm_advance() launch(%weights: buffer) {
+  %nH = index.constant 5120 : index
+  %nFF = index.constant 17408 : index
   %half_row = index.constant 10240 : offset
   %half_wide = index.constant 12288 : offset
   %half_ffn = index.constant 34816 : offset
@@ -219,6 +221,10 @@ class FuseTests(unittest.TestCase):
         # %f16 has an unknown user: its GEMM stays; %h16's swiglu leaf is still converted
         self.assertEqual(n, 1)
         self.assertNotIn("%f8 =", text)
+
+    def test_a_k_the_step_does_not_divide_keeps_the_f16_path(self):
+        text, n = R.fuse_mxfp4_f8(self.program().replace("%nH = index.constant 5120 : index", "%nH = index.constant 2880 : index"))
+        self.assertEqual(n, 1)   # the down GEMM (K = 17408) only
 
     def test_no_llm_advance_no_change(self):
         t = "kernel.def export(\"x\") @x() {\n}\n"

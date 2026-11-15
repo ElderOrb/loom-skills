@@ -12,7 +12,7 @@ CARDS = json.load(open(DATA))
 
 class ClassificationTests(unittest.TestCase):
     def test_all_cards_classified_and_no_ngram(self):
-        self.assertEqual(len(CARDS), 51)
+        self.assertEqual(len(CARDS), 52)
         for repo, e in CARDS.items():
             self.assertIn(e["choice"], ("mtp", "dflash", "assist", "none"), repo)
             self.assertNotIn("ngram", e["llama_spec"], repo)
