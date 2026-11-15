@@ -54,6 +54,28 @@
         "--profile-final-batch=true"
       ],
       "repeats": 3
+    },
+    {
+      "suite": "gemm_mxfp4s",
+      "runner": "r9700",
+      "dir": "gemm_mxfp4s",
+      "gen": "gemm_mxfp4s/gen_bench.py",
+      "gen_variants": [
+        "base"
+      ],
+      "files": [
+        "bench.loom"
+      ],
+      "tests": [
+        "test.loom"
+      ],
+      "config": [],
+      "args": [
+        "--measure=dispatch_complete",
+        "--batch-size=8",
+        "--profile-final-batch=true"
+      ],
+      "repeats": 3
     }
   ]
 }

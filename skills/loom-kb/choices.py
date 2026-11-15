@@ -251,6 +251,11 @@ CHOICE("prefill.gemm.f16o_swiglu", "bool", False, "GEMM_F16O", kernels=["g_gemm_
        doc="gfx12 f16-output swiglu group with its row scale (the R9700 prefill stack of #656). Opt-in per model: llm_config "
            "rdna4_f16_ffn is its default there. Also turns on prefill.attn.flash2_trim and prefill.attn.flash2_b2 (cfg-driven).",
        generator_defaults=("",))
+CHOICE("prefill.gemm.mxfp4s_f8", "bool", False, "GEMM_MXFP4S_F8", kernels=["g_gemm_mxfp4s_*_f8_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
+       devices=["rdna4"], from_pr="mxfp4st-kern",
+       doc="gfx12: MXFP4 split-plane (mxfp4s) prefill GEMMs on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): the nibble and scale planes are read as stored, weights decoded to bf8 "
+           "exactly in LDS, activations fp8 e4m3 with a per-row power-of-two scale written by the row-scale producers' _f8_rdna4 twins (lossy activations, gated against the "
+           "golden reference). Opt-in per model; every block exponent of the checkpoint must be in 107..132 (scan_mxfp4s_exponents.py). The gfx11 programs are unchanged.")
 CHOICE("prefill.attn.no_flash2", "bool", False, "NO_FLASH2", kernels=["*_attention_flash2*"], rows=ROWS_PREFILL, enc=("1", "0"),
        doc="No prefill flash attention (every token takes the listed split-K path).")
 CHOICE("prefill.gemm.off", "bool", False, "NO_GEMM", kernels=["g_gemm_*"], rows=ROWS_PREFILL, enc=("1", None), experiment=True,

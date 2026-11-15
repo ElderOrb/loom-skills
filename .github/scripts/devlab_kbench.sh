@@ -63,6 +63,28 @@ for path, n in seen.items():
     print("generated", path, n)
 PY
 
+# a suite may carry correctness cases ("tests": ["test.loom", ...], check.case files run with loom-test): PASS/FAIL per case, the job fails on any FAIL
+trc=0
+for t in $(q "print(' '.join(s.get('tests', [])))"); do
+  step "loom-test $t"
+  "$root/.venv/bin/loom-test" "$t" --device=amdgpu > "$out/test_${t%.loom}.json" 2> "$out/test_${t%.loom}.err"
+  python3 - "$out/test_${t%.loom}.json" "$out/test_${t%.loom}.err" <<'PYT' | tee "$out/test_${t%.loom}.txt"
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except ValueError:
+    print("FAIL compile: loom-test produced no results"); print("".join(l for l in open(sys.argv[2], errors="replace") if not l.startswith('{"format'))[-3000:]); sys.exit(1)
+bad = 0
+for s in d["samples"]:
+    fails = [f.get("detail", f.get("message", "")) if isinstance(f, dict) else str(f) for f in s["expectations"].get("failures", [])]
+    issues = [i.get("message", "") for i in s.get("issues", [])]
+    bad += not s["passed"]
+    print(("PASS " if s["passed"] else "FAIL ") + s["case"], *(x[:300] for x in issues + fails[:2]))
+print(f"{len(d['samples']) - bad}/{len(d['samples'])} passed")
+sys.exit(1 if bad else 0)
+PYT
+  [ "${PIPESTATUS[0]}" = 0 ] || trc=1
+done
 files=$(q "print(' '.join(s['files']))"); reps=$(q "print(s.get('repeats') or json.load(open('$kb')).get('repeats', 5))")
 cfgs=$(q "print(' '.join('--config='+c for c in s.get('config', [])))"); args=$(q "print(' '.join(s.get('args', [])))")
 vname() { local v=${1%.loom}; v=${v#bench_}; [ "$v" = bench ] && v=base; echo "$v"; }
@@ -113,4 +135,5 @@ open(f"{out}/summary.md", "w").write("\n".join(lines) + "\n")
 json.dump({"suite": suite, "variants": variants, "ms": res, "failures": fails}, open(f"{out}/summary.json", "w"), indent=1)
 print("\n".join(lines))
 PY
+[ "$trc" = 0 ] || rc=1
 exit $rc
