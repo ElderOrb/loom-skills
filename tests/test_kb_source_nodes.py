@@ -45,6 +45,11 @@ class SourceNodeRoutingTests(unittest.TestCase):
         for slug in sorted(manifest):
             cfg = REPO / "fleet" / slug / "llm_config.json"
             data = json.loads(cfg.read_text())
+            if any(f.get("kind") == "safetensors" for f in manifest[slug]["files"].values()):   # a safetensors card loads them (below), GGUF cards never do
+                self.assertIn("source", data, slug)
+                out = route(str(cfg), device="radeon-r9700", topic="porting")
+                self.assertIn("facet/safetensors/README.md", out, slug)
+                continue
             self.assertNotIn("source", data, slug)
             self.assertNotIn("quark", data, slug)
             for dev in ("strix-halo", "radeon-r9700"):

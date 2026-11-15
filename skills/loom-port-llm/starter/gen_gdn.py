@@ -24,8 +24,24 @@ shuffle sum), GDN_ROW_LANES=0 keeps the original 32-lane form.
 import os
 
 
+_V_GROUPED = [False, 1]
+
+
+def kh_line():
+    """The value head's key head. GGUF files hold the value heads tiled (llama.cpp's converter reorders them so ggml_repeat
+    broadcasts the key heads: value head h reads key head h % HK); an HF safetensors checkpoint keeps them grouped (value heads
+    h = r * k + j of key head k, repeat_interleave: key head h // (HV / HK)), which cfg gdn.v_order "grouped" reads natively
+    (no reordering of any weight)."""
+    if _V_GROUPED[0]:
+        return "%vratio = index.constant {RATIO} : index\n  %kh = index.div %vh, %vratio : index".replace("{RATIO}", str(_V_GROUPED[1]))
+    return "%kh = index.rem %vh, %chk : index"
+
+
 def gdn_geometry(cfg):
     g = cfg["gdn"]
+    _V_GROUPED[0] = g.get("v_order") == "grouped"
+    if _V_GROUPED[0]:
+        _V_GROUPED[1:] = [g["v_heads"] // g["k_heads"]]
     HK, HV, DK, DV, K = g["k_heads"], g["v_heads"], g["head_k"], g["head_v"], g["conv_kernel"]
     C = 2 * HK * DK + HV * DV
     state_bytes = HV * DV * DK * 4
@@ -425,7 +441,7 @@ kernel.def export("g_gdn_recurrence") @g_gdn_recurrence(%spans: index) {{
   %cdv = index.constant {DV} : index
   %chk = index.constant {HK} : index
   %column_offsets = vector.iota %c0 step %cdk : vector<4xindex>
-  %kh = index.rem %vh, %chk : index
+  {kh_line()}
   %kh_base = index.mul %kh, %cdk : index
   %q_row0 = index.add %kh_base, %lane : index
   %k_skip = index.constant {HK * DK} : index
@@ -719,7 +735,7 @@ kernel.def export("g_gdn_recurrence") @g_gdn_recurrence(%spans: index) {{
   %cg_value = index.div %lane, %crl : index
   %cg = index.assume %cg_value [range(%cg_value, 0, {32 // RL - 1})] : index
   %row_off = index.mul %r, %crpl : index
-  %kh = index.rem %vh, %chk : index
+  {kh_line()}
   %kh_base = index.mul %kh, %cdk : index
   %q_row_value = index.add %kh_base, %row_off : index
   %q_row = index.assume %q_row_value [range(%q_row_value, 0, {HK * DK - RPL})] : index
