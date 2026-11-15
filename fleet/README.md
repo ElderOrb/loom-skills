@@ -31,9 +31,9 @@ Adding a model: `python fleet/add_model.py SLUG PACKAGE_DIR --staging-revision R
 
 ## Regenerating cards: `regen.py`
 
-    regen.py plan --device radeon-r9700 --mode card --all --state S.json   # a new device: one card measurement per model, no A/B
+    regen.py plan --base BRANCH --device radeon-r9700 --mode card --all --state S.json   # BRANCH: the integration branch; a new device: one card measurement per model, no A/B
     regen.py submit S.json; (loop, >= 120 s:) regen.py poll S.json; regen.py collect S.json; regen.py ingest S.json
-    regen.py plan --device radeon-r9700 --replicas 2 --sequential --no-baselines --priority SLUG --state T.json   # a narrow change: the pair in ONE submission
+    regen.py plan --base BRANCH --device radeon-r9700 --replicas 2 --sequential --no-baselines --priority SLUG --state T.json   # a narrow change: the pair in ONE submission
     regen.py submit S.json --max-inflight auto                               # a sweep in waves (the device's runner count); a --priority plan waits one wave at most
     regen.py rerun S.json && regen.py submit S.json                          # ONE confirming -r2 job where the ratchet asks for it
     regen.py publish S.json --dry-run                                        # card-only upload to loom-fun-staging (no flag: uploads)
