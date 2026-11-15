@@ -32,7 +32,7 @@ One data file per family (`starter/hf_names/<family>.json`: internal-name patter
 of an already ported architecture is a new data file, not code; a producer convention (which tensors are quantized, which stay bf16, scale tensor
 suffixes) is a separate module per producer (`facet/quark`).
 
-Files: `starter/hf_names/qwen35.json` (the qwen35 family: Qwen3.5 / Qwen3.8 dense hybrids), `starter/hf_names/quark.json` (producer), `starter/inspect_safetensors.py`
+Files: `starter/hf_names/qwen35.json` (the qwen35 family: Qwen3.5 / Qwen3.8 dense hybrids), `starter/hf_names/llama.json` (LlamaForCausalLM: dense GQA, plain RMSNorm, neox rope; a family map may omit `layer_types`, `gdn`, `mtp`, per-layer `linear_attention`), `starter/hf_names/quark.json` (producer), `starter/inspect_safetensors.py`
 (`python3 inspect_safetensors.py REPO_OR_DIR OUT.json [--revision REV] [--checkpoint LOCAL.safetensors]`; `-o OUT.json` also works; a dump written by `fleet/st_stub.py` is a valid source),
 `starter/st_tensors.py` (numpy reader and references for the kernel tests). The inspector prints the checkpoint tensors the map does not use and the vision tensors.
 
