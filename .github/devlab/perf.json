@@ -1,5 +1,5 @@
 {
- "_comment": "gdnpf round 2: recurrence row-lane/column splits on R9700 (card drafting MTP; env GDN_ROW_LANES/GDN_COLS), rebuilt from this branch",
+ "_comment": "gdnpf round 3: chunked (WY) GDN prefill kernel on R9700: kernel test, then prefill/decode A/B vs the card build",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -7,7 +7,7 @@
  "runner": "r9700",
  "jobs": [
   {
-   "name": "gdnpf-rec",
+   "name": "gdnpf-chunk",
    "variants": [
     {
      "name": "base",
@@ -15,77 +15,19 @@
      "context": 124928
     },
     {
-     "name": "rl16c2",
+     "name": "chunk",
      "build": {
-      "GDN_ROW_LANES": "16",
-      "GDN_COLS": "2"
+      "GDN_CHUNK": "1"
      },
-     "context": 124928
-    },
-    {
-     "name": "rl16c4",
-     "build": {
-      "GDN_ROW_LANES": "16",
-      "GDN_COLS": "4"
-     },
-     "context": 124928
-    },
-    {
-     "name": "rl8c8",
-     "build": {
-      "GDN_ROW_LANES": "8",
-      "GDN_COLS": "8"
-     },
-     "context": 124928
-    },
-    {
-     "name": "rl8c2",
-     "build": {
-      "GDN_ROW_LANES": "8",
-      "GDN_COLS": "2"
-     },
-     "context": 124928
-    },
-    {
-     "name": "rl4c4",
-     "build": {
-      "GDN_ROW_LANES": "4",
-      "GDN_COLS": "4"
-     },
-     "context": 124928
-    },
-    {
-     "name": "rl16c8",
-     "build": {
-      "GDN_ROW_LANES": "16",
-      "GDN_COLS": "8"
-     },
-     "context": 124928
-    },
-    {
-     "name": "rl32c4",
-     "build": {
-      "GDN_ROW_LANES": "32",
-      "GDN_COLS": "4"
-     },
-     "context": 124928
-    },
-    {
-     "name": "base2",
-     "build": {},
      "context": 124928
     }
    ],
    "steps": [
+    "ktest:chunk",
     "perf:base:1",
-    "perf:rl16c2:1",
-    "perf:rl16c4:1",
-    "perf:rl8c8:1",
-    "perf:rl8c2:1",
-    "perf:rl4c4:1",
-    "perf:rl16c8:1",
-    "perf:rl32c4:1",
-    "perf:base2:1"
+    "perf:chunk:1",
+    "perf:base:1",
+    "perf:chunk:1"
    ]
   }
  ]
