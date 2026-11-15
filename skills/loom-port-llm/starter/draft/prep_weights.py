@@ -14,12 +14,34 @@ A policy's prepare_weight(key) returns the prepared byte length (0 = keep the fi
 program, llm_prep_<src>_<dst> (llm.loom), that reads the staged source tensor (llm.prep_input) and writes the prepared
 one: one lane per 32-value block, llama.cpp's quantize_row_q8_0 / quantize_row_q4_0 numerics."""
 
+# - MTP proposal head (head_weights.loom, PROPOSE_HEAD_ROWS=N): the proposals' head pass reads a Q4_0 copy of the Q6_K head
+#   restricted to rows [0, N) plus every row of the added tokens (ids >= the tokenizer's base vocabulary): a reduced draft
+#   vocabulary (FR-Spec / EAGLE-3 style). The converter dequantizes Q6_K (llama.cpp's dequantize_row_q6_K) and re-encodes
+#   Q4_0; the output block g reads input block g (g < split) or g + skip (the tail), so one pass copies both segments.
 SRC = {"bf16": 64, "f16": 64, "q8_0": 34}     # bytes per 32 values of a source the converter reads
-DST = {"q8_0": 34, "q4_0": 18}                # ... of a prepared format
+SRC_SUPER = {"q6_k": 210}                     # bytes per 256-value superblock of a source with a row subset (see subset_entry)
+DST = {"q8_0": 34, "q4_0": 18, "q6_k": 210}   # ... of a prepared format (q6_k: a row subset kept as is, counted in 256-value superblocks)
 
 
 def dst_bytes(dst, blocks):
     return blocks * DST[dst]
+
+
+def subset_rows(N, base, V):
+    """Source rows copied for a proposal head of N leading rows: [0, N) plus [max(base, N), V) (the added tokens);
+    N >= V or N >= base copies everything from N on. Returns (head rows, tail first row, rows)."""
+    N = min(N, V)
+    tail = max(base, N)
+    return N, tail, N + V - tail
+
+
+def subset_entry(src, dst, N, base, V, H):
+    """A policy entry (src, dst, out blocks, extra) of a row-subset copy: extra = (source bytes, split block, skip blocks)."""
+    n, tail, rows = subset_rows(N, base, V)
+    unit = 256 if dst == src else 32   # a same-format copy moves whole superblocks
+    split = n * H // unit
+    skip = tail * H // unit - split
+    return (src, dst, rows * H // unit, (V * H // 256 * SRC_SUPER[src], split, skip))
 
 
 def _decode(src):
@@ -111,8 +133,85 @@ def _encode(dst):
 """
 
 
+def _kernel_super(src, dst):
+    """g_prep_<src>_<dst> for a superblock source (Q6_K) with a row subset: output unit g reads source unit g below
+    llm.prep_split, g + llm.prep_skip from there on. dst Q4_0: a unit is a 32-value block (g_q6_k_values, the trunk's
+    dequantizer in llm.loom, then quantize_row_q4_0); dst == src: a 256-value superblock, copied byte for byte."""
+    n = f"{src}_{dst}"
+    same = dst == src
+    unit = "256-value superblock" if same else "32-value block"
+    if same:
+        body = """    %src_view = buffer.view %input[%origin] : buffer -> view<210xi8>
+    %oo = index.scale %g, %sb_bytes : index, offset -> offset
+    %dst_view = buffer.view %output[%oo] : buffer -> view<210xi8>
+    %c0 = index.constant 0 : index
+    %c210 = index.constant 210 : index
+    scf.for %k = [%c0 to %c210 step %c1] {
+      %kb = index.assume %k [range(%k, 0, 209)] : index
+      %byte = view.load %src_view[%kb] : view<210xi8> -> i8
+      view.store %byte, %dst_view[%kb] : i8, view<210xi8>
+    }
+"""
+        locate = """    %sb = %sg
+"""
+    else:
+        body = f"""    %v = func.call @g_q6_k_values(%input, %origin, %grp) : (buffer, offset, index) -> (vector<32xf32>)
+{_encode(dst)}"""
+    sbuf = "%sg" if same else "%sb"
+    locate = ("" if same else "    %sb = index.div %sg, %c8 : index\n    %grp = index.rem %sg, %c8 : index\n")
+    return f"""
+// Load-time weight preparation (draft/prep_weights.py): staged {src.upper()} tensor (input + llm.prep_input) ->
+// {dst.upper()} in output, one lane per {unit}; output unit g reads source unit g (g < split) or g + skip.
+kernel.def export("g_prep_{n}") @g_prep_{n}(%blocks: index) {{
+  %c1 = index.constant 1 : index
+  %c63 = index.constant 63 : index
+  %c64 = index.constant 64 : index
+  %rounded = index.add %blocks, %c63 : index
+  %groups = index.div %rounded, %c64 : index
+  kernel.launch.config workgroups(%groups, %c1, %c1) workgroup_size(%c64, %c1, %c1) : index
+}} launch(%blocks_arg: index, %in64: i64, %split64: i64, %skip64: i64, %output: buffer, %input: buffer) {{
+  %blocks = index.assume %blocks_arg [range(%blocks_arg, 1, 1073741824)] : index
+  %in_bound = scalar.assume %in64 [range(%in64, 0, 9223372036854775807)] : i64
+  %in_origin = index.cast %in_bound : i64 to offset
+  %split_bound = scalar.assume %split64 [range(%split64, 0, 1073741824)] : i64
+  %split = index.cast %split_bound : i64 to index
+  %skip_bound = scalar.assume %skip64 [range(%skip64, 0, 1073741824)] : i64
+  %skip = index.cast %skip_bound : i64 to index
+  %c1 = index.constant 1 : index
+  %c8 = index.constant 8 : index
+  %c64 = index.constant 64 : index
+  %sb_bytes = index.constant 210 : offset
+  %wg = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %base = index.mul %wg, %c64 : index
+  %g = index.add %base, %lane : index
+  %live = index.cmp ult, %g, %blocks : index
+  scf.if %live {{
+    %in_tail = index.cmp uge, %g, %split : index
+    %shifted = index.add %g, %skip : index
+    %sg = scf.select %in_tail, %shifted, %g : index
+{locate}    %sbo = index.scale {sbuf}, %sb_bytes : index, offset -> offset
+    %origin = index.add %in_origin, %sbo : offset
+{body}  }}
+  kernel.return
+}}
+
+command.program.def public @llm_prep_{n}() launch(%output: buffer, %input: buffer) {{
+  %b64 = config.get @llm.prep_blocks : i64
+  %blocks = index.cast %b64 : i64 to index
+  %in64 = config.get @llm.prep_input : i64
+  %split64 = config.get @llm.prep_split : i64
+  %skip64 = config.get @llm.prep_skip : i64
+  kernel.launch @g_prep_{n}[%blocks](%blocks, %in64, %split64, %skip64, %output, %input) : [index](index, i64, i64, i64, buffer, buffer)
+  command.return
+}}
+"""
+
+
 def kernel(src, dst):
     """g_prep_<src>_<dst> (one lane per 32-value block) and its stage program llm_prep_<src>_<dst>."""
+    if src in SRC_SUPER:
+        return _kernel_super(src, dst)
     n = f"{src}_{dst}"
     return f"""
 // Load-time weight preparation (draft/prep_weights.py): staged {src.upper()} tensor (input + llm.prep_input) ->
@@ -153,30 +252,40 @@ def library(pairs):
     """Config declarations + converters for the (src, dst) pairs any policy of the package uses (llm.loom)."""
     if not pairs:
         return ""
-    return ("config.decl @llm.prep_blocks : i64\n\nconfig.decl @llm.prep_input : i64\n"
+    sub = "config.decl @llm.prep_split : i64\n\nconfig.decl @llm.prep_skip : i64\n" if any(s in SRC_SUPER for s, _ in pairs) else ""
+    return ("config.decl @llm.prep_blocks : i64\n\nconfig.decl @llm.prep_input : i64\n" + sub
             + "".join(kernel(s, d) for s, d in sorted(pairs)))
 
 
 def policy(entries, what):
-    """A weight policy file: entries {key: (src, dst, blocks)}; every other key keeps its file bytes."""
+    """A weight policy file: entries {key: (src, dst, blocks)}; every other key keeps its file bytes. A row-subset entry
+    (subset_entry) is (src, dst, blocks, (source bytes, split, skip)): the staged length and llm.prep_split / llm.prep_skip."""
     hx = lambda s: s.encode().hex()
-    pairs = sorted({(s, d) for s, d, _ in entries.values()})
+    SUB = any(len(e) > 3 for e in entries.values())
+    pairs = sorted({e[:2] for e in entries.values()})
     names = sorted(entries)
     rod = "".join(f'global.rodata.def @root{j} = bytes("{hx(f"llm_prep_{s}_{d}")}")\n\n' for j, (s, d) in enumerate(pairs))
+    if SUB:
+        rod += f'global.rodata.def @split_key = bytes("{hx("llm.prep_split")}")\n\nglobal.rodata.def @skip_key = bytes("{hx("llm.prep_skip")}")\n\n'
     rod += f'global.rodata.def @blocks_key = bytes("{hx("llm.prep_blocks")}")\n\nglobal.rodata.def @input_key = bytes("{hx("llm.prep_input")}")\n\n'
     rod += "".join(f'// "{n}"\nglobal.rodata.def @k{i} = bytes("{hx(n)}")\n\n' for i, n in enumerate(names))
     body = ["  %zero = scalar.constant 0 : i64\n  %blocks_0 = scalar.constant 0 : i64\n  %kind_0 = scalar.constant 0 : i64\n"
-            "  %inb_0 = scalar.constant 0 : i64\n  %outb_0 = scalar.constant 0 : i64\n"]
+            "  %inb_0 = scalar.constant 0 : i64\n  %outb_0 = scalar.constant 0 : i64\n"
+            + ("  %len_0 = scalar.constant 0 : i64\n  %split_0 = scalar.constant 0 : i64\n  %skip_0 = scalar.constant 0 : i64\n" if SUB else "")]
     for i, n in enumerate(names):
-        s, d, b = entries[n]
+        s, d, b, *ex = entries[n]
+        ln, sp, sk = ex[0] if ex else (b * SRC.get(s, 0), b, 0)
         body.append(f"  %name{i} = global.load @k{i} : buffer\n"
                     f"  %is{i} = func.call @same(%key, %name{i}) : (buffer, buffer) -> (i1)\n"
                     f"  %nb{i} = scalar.constant {b} : i64\n  %nk{i} = scalar.constant {pairs.index((s, d))} : i64\n"
-                    f"  %ni{i} = scalar.constant {SRC[s]} : i64\n  %no{i} = scalar.constant {DST[d]} : i64\n"
+                    f"  %ni{i} = scalar.constant {SRC.get(s, SRC_SUPER.get(s, 0))} : i64\n  %no{i} = scalar.constant {DST[d]} : i64\n"
                     f"  %blocks_{i + 1} = scf.select %is{i}, %nb{i}, %blocks_{i} : i64\n"
                     f"  %kind_{i + 1} = scf.select %is{i}, %nk{i}, %kind_{i} : i64\n"
                     f"  %inb_{i + 1} = scf.select %is{i}, %ni{i}, %inb_{i} : i64\n"
-                    f"  %outb_{i + 1} = scf.select %is{i}, %no{i}, %outb_{i} : i64\n")
+                    f"  %outb_{i + 1} = scf.select %is{i}, %no{i}, %outb_{i} : i64\n"
+                    + (f"  %nl{i} = scalar.constant {ln} : i64\n  %nsp{i} = scalar.constant {sp} : i64\n  %nsk{i} = scalar.constant {sk} : i64\n"
+                       f"  %len_{i + 1} = scf.select %is{i}, %nl{i}, %len_{i} : i64\n  %split_{i + 1} = scf.select %is{i}, %nsp{i}, %split_{i} : i64\n"
+                       f"  %skip_{i + 1} = scf.select %is{i}, %nsk{i}, %skip_{i} : i64\n" if SUB else ""))
     N = len(names)
     stage = []
     for j, _ in enumerate(pairs):
@@ -189,8 +298,11 @@ def policy(entries, what):
       %ik{j} = global.load @input_key : buffer
       func.call @config_i64(%stage{j}, %bk{j}, %blocks_{N}) : (i32, buffer, i64)
       func.call @config_i64(%stage{j}, %ik{j}, %first) : (i32, buffer, i64)
-    }}
-""")
+""" + (f"""      %spk{j} = global.load @split_key : buffer
+      %skk{j} = global.load @skip_key : buffer
+      func.call @config_i64(%stage{j}, %spk{j}, %split_{N}) : (i32, buffer, i64)
+      func.call @config_i64(%stage{j}, %skk{j}, %skip_{N}) : (i32, buffer, i64)
+""" if pairs[j][0] in SRC_SUPER else "") + "    }\n")
     return f"""// Weight policy ({what}; draft/prep_weights.py): the listed tensors of the published checkpoint are staged and
 // converted at load by llm_prep_<src>_<dst> (llm.loom); every other tensor keeps its file bytes. No converted
 // checkpoint is written or published.
@@ -223,7 +335,7 @@ func.def public @prepare_weight(%key: buffer) -> (i64) {{
   %bytes = scf.if %found -> (i64) {{
     %source = scalar.constant 0 : i32
     %align = scalar.constant 256 : i64
-    %length = scalar.muli %blocks_{N}, %inb_{N} : i64
+    {"%length = scalar.muli %blocks_" + str(N) + ", %inb_" + str(N) + " : i64" if not SUB else "%length = scalar.addi %len_" + str(N) + ", %zero : i64"}
     %first = func.call @input(%source, %key, %zero, %length, %align) : (i32, buffer, i64, i64, i64) -> (i64)
 {"".join(stage)}    %prepared = scalar.muli %blocks_{N}, %outb_{N} : i64
     scf.yield %prepared : i64
