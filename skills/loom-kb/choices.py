@@ -361,7 +361,10 @@ CHOICE("draft.verify.exact", "bool", False, "SPEC_EXACT", enc=("1", "0"),
        doc="Verify with the 4-token matvec at every width (decode's rounding) instead of the GEMM from 5 tokens.", **_SP)
 CHOICE("draft.warm.mm_from", "int", 5, "DRAFT_MM_FROM", doc="The drafter's catch-up program takes the GEMM from this many tokens.", **_SP)
 CHOICE("draft.propose.head", "str", "q4_0", "PROPOSE_HEAD", doc="q4_0: the proposals' head pass reads a load-time Q4_0 copy of the "
-       "target's head (off: the head itself).", **_SP)
+       "target's head (off: the head itself; q6_k: with PROPOSE_HEAD_ROWS the subset's rows stay Q6_K).", **_SP)
+CHOICE("draft.propose.head_rows", "int", 0, "PROPOSE_HEAD_ROWS", kernels=["g_prep_*", "g_head_mv*_p40", "g_head_select_p"], rows=ROWS_DECODE + ROWS_STREAMS,
+       doc="MTP proposals over a reduced draft vocabulary (0: off, the target's own head): the proposals' head pass reads a load-time Q4_0 "
+       "copy of a Q6_K head's rows [0, N) plus every added-token row (draft/prep_weights.py); verification keeps the head, so only acceptance moves.", **{})
 CHOICE("draft.dflash.splits", "int", 32, "DFL_SPLITS", kernels=["g_dfl_attention", "g_dfl_ctx_split"], rows=ROWS_DECODE,
        doc="DFlash context-attention splits.")
 CHOICE("draft.dflash.prep_weights", "bool", True, "DRAFTER_PREP", kernels=["g_dfl_*"], rows=ROWS_DECODE + ROWS_STREAMS,
