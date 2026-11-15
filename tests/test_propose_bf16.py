@@ -21,13 +21,17 @@ SLUG = "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
 
 
 class Bf16Rows(unittest.TestCase):
-    def test_entry_counts_bf16_bytes(self):
-        src, dst, blocks, (nbytes, split, skip) = pw.subset_entry("bf16r", "q4_0", 81920, B, V, H)
-        per_row = H // 32
-        self.assertEqual((src, dst, nbytes), ("bf16r", "q4_0", V * H * 2))
-        self.assertEqual(blocks, (81920 + V - B) * per_row)
-        rows = [(g // per_row if g < split else (g + skip) // per_row) for g in range(0, blocks, per_row)]
-        self.assertEqual(rows, list(range(81920)) + list(range(B, V)))
+    def test_entry_stages_two_ranges(self):
+        """Only the bytes the copy needs are staged: the head rows [0, N) and the added-token rows (0.85 GB of the 2.54 GB head)."""
+        src, dst, blocks, (len1, split, zero, off2, len2) = pw.subset_entry("bf16r", "q4_0", 81920, B, V, H)
+        self.assertEqual((src, dst, zero), ("bf16r", "q4_0", 0))
+        self.assertEqual((len1, off2, len2), (81920 * H * 2, B * H * 2, (V - B) * H * 2))
+        self.assertEqual(blocks, (81920 + V - B) * (H // 32))
+        self.assertEqual(split, 81920 * H // 32)
+        self.assertEqual(blocks - split, len2 // 64)      # one 64-byte bf16 block per output block of the tail
+        # N inside the added tokens: everything from N on is the tail range
+        _, _, _, (l1, sp, _, o2, l2) = pw.subset_entry("bf16r", "q4_0", B + 10, B, V, H)
+        self.assertEqual((l1, o2, l2), ((B + 10) * H * 2, (B + 10) * H * 2, (V - B - 10) * H * 2))
 
     def test_converter(self):
         lib = pw.library({("bf16r", "q4_0")})
@@ -38,20 +42,20 @@ class Bf16Rows(unittest.TestCase):
         self.assertNotIn("%sb_bytes", lib)               # no superblock arithmetic
         self.assertEqual(lib.count("{"), lib.count("}"))
         self.assertIn("view<32xbf16>", pw.library({("bf16", "q8_0")}))
-        with self.assertRaises(AssertionError):
-            pw.library({("bf16r", "bf16r")})
 
     def test_policy(self):
         e = {"lm_head.weight": pw.subset_entry("bf16r", "q4_0", 81920, B, V, H),
              "mtp.fc.weight": ("bf16", "q8_0", 10240 * 5120 // 32)}
         t = pw.policy(e, "x")
-        self.assertIn(f"scalar.constant {V * H * 2} : i64", t)           # the whole BF16 head is staged
+        self.assertIn(f"scalar.constant {81920 * H * 2} : i64", t)       # the head rows are staged ...
+        self.assertIn(f"scalar.constant {(V - B) * H * 2} : i64", t)     # ... and the added-token rows as a second range
+        self.assertEqual(t.count("func.call @input("), 2)
         self.assertIn("scalar.constant 34 : i64", t)                      # the block's matrices are Q8_0
         self.assertEqual(t.count("{"), t.count("}"))
 
     def test_registry(self):
         c = choices.CHOICES["draft.propose.block"]
-        self.assertEqual((c.legacy, c.env, c.type), ("", "MTP_BLOCK_PREP", "str"))
+        self.assertEqual((c.legacy, c.env, c.type), (None, "MTP_BLOCK_PREP", "str"))
 
 
 class Programs(unittest.TestCase):

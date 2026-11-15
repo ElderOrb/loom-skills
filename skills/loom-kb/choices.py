@@ -365,7 +365,7 @@ CHOICE("draft.propose.head", "str", "q4_0", "PROPOSE_HEAD", doc="q4_0: the propo
 CHOICE("draft.propose.head_rows", "int", 0, "PROPOSE_HEAD_ROWS", kernels=["g_prep_*", "g_head_mv*_p40", "g_head_select_p"], rows=ROWS_DECODE + ROWS_STREAMS,
        doc="MTP proposals over a reduced draft vocabulary (0: off, the target's own head): the proposals' head pass reads a load-time Q4_0 "
        "copy of a Q6_K or BF16 head's rows [0, N) plus every added-token row (draft/prep_weights.py); verification keeps the head, so only acceptance moves.", **{})
-CHOICE("draft.propose.block", "str", "", "MTP_BLOCK_PREP", kernels=["g_prep_*", "g_mv_*_q8*"], rows=ROWS_DECODE + ROWS_STREAMS,
+CHOICE("draft.propose.block", "str", None, "MTP_BLOCK_PREP", kernels=["g_prep_*", "g_mv_*_q8*"], rows=ROWS_DECODE + ROWS_STREAMS,
        doc="MTP proposals of a safetensors checkpoint whose NextN block is BF16: the block's matrices (eh_proj, attention, FFN) are read from a "
        "load-time Q8_0 or Q4_0 copy (q8_0 | q4_0; empty: as stored). The block feeds proposals only (verification never reads it), so only "
        "acceptance moves (draft/prep_weights.py, weights.loom).", **{})
