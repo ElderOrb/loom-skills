@@ -42,6 +42,12 @@ def iq_r(n, K, TG, sw=False):
     R = pick_r(n, K, TG)
     if TG >= 8 and n and n % 16 == 0 and os.environ.get("MV_Q8_R16", "1") == "1":
         R = 16
+    if n and sw != 2 and (2 <= TG <= 4 or 5 <= TG <= 8) and os.environ.get("MV_Q8_WG4" if TG <= 4 else "MV_Q8_WG8"):
+        # experiment (R9700): a per-variant workgroup target for the 2-4 / 5-8 token kernels (R does not change a row's arithmetic)
+        target = int(os.environ["MV_Q8_WG4" if TG <= 4 else "MV_Q8_WG8"])
+        R = int(os.environ.get("MV_Q8_RMAX", "16"))
+        while R > 1 and n // R < target and n % (R // 2) == 0:
+            R //= 2
     if sw == 2 and n:
         R = 16
         while R > 4 and n // R < 32 and n % (R // 2) == 0:

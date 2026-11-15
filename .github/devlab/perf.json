@@ -1,47 +1,113 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
- "runner": "r9700",
+ "_comment": "q38r9700 mv: rows-per-workgroup target of the 2-8 token int8 matvecs (MV_Q8_WG4/WG8) on R9700, ABBA; c4 undrafted and drafted decode (MTP 3)",
+ "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "kit": null,
+ "llamacpp": "b1375",
+ "runner": "r9700",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "name": "mv-c4",
    "variants": [
     {
-     "name": "card",
-     "build": {}
+     "name": "card_nd",
+     "execution": {
+      "draft_depth": 0
+     }
     },
     {
-     "name": "nodraft",
-     "build": {},
+     "name": "w2048_nd",
+     "build": {
+      "MV_Q8_WG4": "2048",
+      "MV_Q8_WG8": "2048"
+     },
+     "execution": {
+      "draft_depth": 0
+     }
+    },
+    {
+     "name": "w512_nd",
+     "build": {
+      "MV_Q8_WG4": "512",
+      "MV_Q8_WG8": "512"
+     },
+     "execution": {
+      "draft_depth": 0
+     }
+    },
+    {
+     "name": "w8192_nd",
+     "build": {
+      "MV_Q8_WG4": "8192",
+      "MV_Q8_WG8": "8192"
+     },
+     "execution": {
+      "draft_depth": 0
+     }
+    },
+    {
+     "name": "w1_nd",
+     "build": {
+      "MV_Q8_WG4": "1",
+      "MV_Q8_WG8": "1"
+     },
      "execution": {
       "draft_depth": 0
      }
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
+    "c4:card_nd",
+    "c4:w2048_nd",
+    "c4:w512_nd",
+    "c4:w8192_nd",
+    "c4:w1_nd",
+    "c4:card_nd"
+   ]
+  },
+  {
+   "name": "mv-dec",
+   "variants": [
+    {
+     "name": "card"
+    },
+    {
+     "name": "w2048",
+     "build": {
+      "MV_Q8_WG4": "2048",
+      "MV_Q8_WG8": "2048"
+     }
+    },
+    {
+     "name": "w512",
+     "build": {
+      "MV_Q8_WG4": "512",
+      "MV_Q8_WG8": "512"
+     }
+    },
+    {
+     "name": "w8192",
+     "build": {
+      "MV_Q8_WG4": "8192",
+      "MV_Q8_WG8": "8192"
+     }
+    },
+    {
+     "name": "w1",
+     "build": {
+      "MV_Q8_WG4": "1",
+      "MV_Q8_WG8": "1"
+     }
+    }
+   ],
+   "steps": [
+    "perf:card:1",
+    "perf:w2048:1",
+    "perf:w512:1",
+    "perf:w8192:1",
+    "perf:w1:1",
+    "perf:card:1"
    ]
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
