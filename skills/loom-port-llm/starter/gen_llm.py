@@ -1262,6 +1262,10 @@ def mv_rows_unrolled(fmt, U, nw, CHK, waves, R, TG, PERM, wnames):
     return "\n".join(parts)
 
 
+def NCH_OK(TG):
+    return TG <= int(os.environ.get("MV_CHUNK", "16"))
+
+
 def mv(fmt, K, R=16, TG=1, swiglu=False, suffix="", iq=False, pair=False):
     """_mv(), plus a gfx12 twin `<name>_rdna4` where gfx12 must differ. A full 1024-lane workgroup (K of 31745..32768)
     must fit 8 waves per SIMD (<=192 VGPRs); the 16-token int8 kernel needs 207-208, which gfx1201 rejects
@@ -1274,6 +1278,13 @@ def mv(fmt, K, R=16, TG=1, swiglu=False, suffix="", iq=False, pair=False):
         name = re.search(r'kernel\.def export\("([^"]+)"\) @', text).group(1)
         twin = _mv(fmt, K, R, TG, swiglu, suffix, iq, pair, chunk=8).replace(f'export("{name}") @{name}(', f'export("{name}_rdna4") @{name}_rdna4(')
         text += "\n" + twin
+    elif iq and groups <= 1024 and NCH_OK(TG) and os.environ.get("LOOM_RDNA4", "1").strip().lower() not in ("0", "off", "no", "false"):
+        plan = twin_plan(R, TG, 2 if swiglu or pair else 1)
+        if plan:   # row-unrolled gfx12 twin: U rows' weight loads in flight per wave (same arithmetic per row)
+            name = re.search(r'kernel\.def export\("([^"]+)"\) @', text).group(1)
+            Rt, U = plan
+            twin = _mv(fmt, K, Rt, TG, swiglu, suffix, iq, pair, unroll=U).replace(f'export("{name}") @{name}(', f'export("{name}_rdna4") @{name}_rdna4(')
+            text += "\n" + twin
     return text
 
 
@@ -4317,7 +4328,7 @@ NVAL = {"%nQH": QH, "%nQKV": (QH + 2 * KVH) * D, "%nH": H, "%nFF": FF, **({} if 
 NVAL.update({f"%nQ{h}": h * D for h in NARROW} | {f"%nQH{h}": h for h in NARROW})   # narrower layer_heads layers
 if GDN:
     NVAL.update({"%nC": GDN["C"], "%nVD": GDN["VD"], "%nHV": GDN["HV"]})
-from mv_rows import pick_r, iq_r  # noqa: E402  (shared with make_kernel_tests.py)
+from mv_rows import pick_r, iq_r, twin_plan  # noqa: E402  (shared with make_kernel_tests.py)
 
 
 def mv_name(fmt, kval, sw, n, TG, iq=False):

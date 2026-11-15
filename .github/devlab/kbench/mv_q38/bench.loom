@@ -985,7 +985,7 @@ check.case public @k_q4_k_k5120_n17408_t4_r4_u1_sw_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(17408) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w0_1 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -1707,7 +1707,7 @@ check.case public @k_q4_k_k5120_n17408_t4_r4_u2_sw_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(17408) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w0_1 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -2935,7 +2935,7 @@ check.case public @k_q4_k_k5120_n17408_t4_r4_u4_sw_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(17408) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w0_1 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -3657,7 +3657,7 @@ check.case public @k_q4_k_k5120_n17408_t4_r8_u2_sw_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(17408) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w0_1 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -4885,7 +4885,7 @@ check.case public @k_q4_k_k5120_n17408_t4_r8_u4_sw_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(17408) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w0_1 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -5158,7 +5158,7 @@ check.case public @k_q4_k_k5120_n17408_t1_r4_u1_sw_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(17408) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<6400xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w0_1 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -5537,7 +5537,7 @@ check.case public @k_q4_k_k5120_n17408_t1_r4_u2_sw_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(17408) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<6400xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w0_1 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -5916,7 +5916,7 @@ check.case public @k_q4_k_k5120_n17408_t1_r8_u2_sw_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(17408) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<6400xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w0_1 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -6254,7 +6254,7 @@ check.case public @k_q4_k_k17408_n5120_t4_r8_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<87040xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -6725,7 +6725,7 @@ check.case public @k_q4_k_k17408_n5120_t4_r8_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<87040xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -7456,7 +7456,7 @@ check.case public @k_q4_k_k17408_n5120_t4_r8_u4_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<87040xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -7927,7 +7927,7 @@ check.case public @k_q4_k_k17408_n5120_t4_r16_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<87040xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -8146,7 +8146,7 @@ check.case public @k_q4_k_k17408_n5120_t1_r8_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<21760xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -8422,7 +8422,7 @@ check.case public @k_q4_k_k17408_n5120_t1_r8_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<21760xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<50135040xi8>
@@ -8762,7 +8762,7 @@ check.case public @k_q4_k_k5120_n10240_t4_r2_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(10240) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
@@ -9237,7 +9237,7 @@ check.case public @k_q4_k_k5120_n10240_t4_r2_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(10240) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
@@ -9581,7 +9581,7 @@ check.case public @k_q4_k_k5120_n10240_t4_r4_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(10240) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
@@ -10056,7 +10056,7 @@ check.case public @k_q4_k_k5120_n10240_t4_r4_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(10240) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
@@ -10791,7 +10791,7 @@ check.case public @k_q4_k_k5120_n10240_t4_r4_u4_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(10240) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
@@ -11014,7 +11014,7 @@ check.case public @k_q4_k_k5120_n10240_t1_r2_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(10240) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<6400xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
@@ -11294,7 +11294,7 @@ check.case public @k_q4_k_k5120_n10240_t1_r2_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(10240) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<6400xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
@@ -11574,7 +11574,7 @@ check.case public @k_q4_k_k5120_n10240_t1_r4_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(10240) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<6400xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<29491200xi8>
@@ -11918,7 +11918,7 @@ check.case public @k_q4_k_k5120_n6144_t4_r1_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(6144) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
@@ -12401,7 +12401,7 @@ check.case public @k_q4_k_k5120_n6144_t4_r2_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(6144) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
@@ -12884,7 +12884,7 @@ check.case public @k_q4_k_k5120_n6144_t4_r4_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(6144) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
@@ -13627,7 +13627,7 @@ check.case public @k_q4_k_k5120_n6144_t4_r4_u4_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(6144) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25600xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
@@ -13858,7 +13858,7 @@ check.case public @k_q4_k_k5120_n6144_t1_r1_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(6144) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<6400xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
@@ -14146,7 +14146,7 @@ check.case public @k_q4_k_k5120_n6144_t1_r2_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(6144) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<6400xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<17694720xi8>
@@ -14502,7 +14502,7 @@ check.case public @k_q6_k_k6144_n5120_t4_r1_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<30720xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
@@ -14987,7 +14987,7 @@ check.case public @k_q6_k_k6144_n5120_t4_r2_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<30720xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
@@ -15472,7 +15472,7 @@ check.case public @k_q6_k_k6144_n5120_t4_r4_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<30720xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
@@ -15698,7 +15698,7 @@ check.case public @k_q6_k_k6144_n5120_t1_r1_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<7680xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
@@ -15982,7 +15982,7 @@ check.case public @k_q6_k_k6144_n5120_t1_r2_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<7680xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<25804800xi8>
@@ -16320,7 +16320,7 @@ check.case public @k_q8_0_k6144_n5120_t4_r1_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<30720xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
@@ -16777,7 +16777,7 @@ check.case public @k_q8_0_k6144_n5120_t4_r2_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<30720xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
@@ -17234,7 +17234,7 @@ check.case public @k_q8_0_k6144_n5120_t4_r4_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(4) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<30720xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
@@ -17453,7 +17453,7 @@ check.case public @k_q8_0_k6144_n5120_t1_r1_u1_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<7680xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
@@ -17727,7 +17727,7 @@ check.case public @k_q8_0_k6144_n5120_t1_r2_u2_case {
   %seed = check.literal value(12345) : i64
   %n = check.literal value(5120) : index
   %tk = check.literal value(1) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<7680xi8>
   %w0_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>
   %w1_0 = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<33423360xi8>

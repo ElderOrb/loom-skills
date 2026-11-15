@@ -37,7 +37,7 @@ for spec in sys.argv[4:]:
   %seed = check.literal value(12345) : i64
   %n = check.literal value({n}) : index
   %tk = check.literal value({TG}) : index
-  %acc = scalar.constant 0 : i32
+  %acc = check.literal value(0) : i32
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<{xb}xi8>
 {decl}  %y = check.generate.fill value(0.0) : tensor<{TG * n}xf32>
 {launches}  check.return

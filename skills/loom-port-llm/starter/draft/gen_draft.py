@@ -838,7 +838,8 @@ def verify_program(program, g):
         for line in body.split("\n"):
             if line.startswith("  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_"):
                 layer = line.split("%layer_")[1].split(",")[0]
-                out.append(f"  scf.if %not_gated {{\n    kernel.launch @g_gdn_capture[%t](%t, %layer_{layer}, %gq, %galpha, %gbeta, %capture) : [index](index, index, buffer, buffer, buffer, buffer)\n  }}")
+                if "capture" not in os.environ.get("VERIFY_SKIP", ""):
+                  out.append(f"  scf.if %not_gated {{\n    kernel.launch @g_gdn_capture[%t](%t, %layer_{layer}, %gq, %galpha, %gbeta, %capture) : [index](index, index, buffer, buffer, buffer, buffer)\n  }}")
             out.append(line)
         body = "\n".join(out)
     # Generic recurrent replay (kits register it in gen_llm.MODEL_PARTS["replay"]; e.g. LFM2 short-conv,
@@ -920,6 +921,9 @@ def verify_program(program, g):
                 tail += (f"  %rl_{spec['name']}_{k}_{bi} = index.constant {k} : index\n"
                          f"  kernel.launch @g_spec_load_w{w}[%t](%t, %rl_{spec['name']}_{k}_{bi}, {buf}, %rc_{spec['name']}_{bi}) : [index](index, index, buffer, buffer)\n")
             tail += spec["replay"](layer)
+    _skip = [k for k in os.environ.get("VERIFY_SKIP", "").split(",") if k]   # EXPERIMENT (timing only, wrong state): drop replay launches by kernel name
+    if _skip:
+        tail = "\n".join(l for l in tail.split("\n") if not any(f"kernel.launch @g_gdn_{k}[" in l for k in _skip)) + "\n"
     if len(tail) > replay_at:   # no replay at all in an anchor-only epoch
         tail = tail[:replay_at] + "  scf.if %not_gated {\n" + tail[replay_at:] + "  }\n"
     tail += "  command.return\n}\n"

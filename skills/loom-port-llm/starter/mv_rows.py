@@ -74,3 +74,15 @@ def flash2_deep_from(cfg):
     G = cfg["heads"] // cfg["kv_heads"]
     deep = cfg["head_dim"] <= 128 and 2 < G < 16 and not cfg.get("attn_sinks") and not os.environ.get("FLASH2_TS")
     return (16384 if cfg["head_dim"] == 128 else 32768) if deep else 0
+
+
+def twin_plan(R, TG, nw):
+    """gfx12 twin of an int8 matvec (gen_llm.mv): (rows per workgroup, rows decoded per loop iteration) or None. EXPERIMENT knobs:
+    MV_TWIN_U / MV_TWIN_R for the multi-token variants, MV_TWIN_U1 / MV_TWIN_R1 for the 1-token one (rows per workgroup is at least
+    the twin's R; the arithmetic per row does not depend on either)."""
+    suf = "1" if TG == 1 else ""
+    U = int(os.environ.get("MV_TWIN_U" + suf, "1"))
+    if U <= 1:
+        return None
+    Rt = max(R, int(os.environ.get("MV_TWIN_R" + suf, str(U))), U)
+    return Rt, U
