@@ -16,8 +16,11 @@ import hashlib
 import json
 import os
 import re
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "loom-kb"))   # skills/loom-kb: devices, quants, methodology as data
+import registry  # noqa: E402
 SCHEMA_ID = "loom-card/3"
 LEGACY_SCHEMA_IDS = ("loom-card/2",)   # one GPU (Strix Halo): normalize() reads it as devices["strix-halo"]
 EVIDENCE_ID = "loom-card-evidence/2"
@@ -40,7 +43,8 @@ METRIC_KEYS = [k for k, _ in METRICS]
 # Sampling rule (methodology.md rule 5): every card value is the MEDIAN over sessions of each session's median sample. A fast model
 # (published or expected decode above FAST_DECODE_TPS tok/s: its rate is bimodal per serve session) gets SESSIONS_FAST sessions and
 # REPEAT_FAST samples per session of decode_2k, decode_32k and prefill_8k (perf.py --repeat-rows); the others SESSIONS sessions.
-FAST_DECODE_TPS, SESSIONS, SESSIONS_FAST, REPEAT_FAST = 100, 3, 6, 3
+_S = registry.methodology()["sessions"]
+FAST_DECODE_TPS, SESSIONS, SESSIONS_FAST, REPEAT_FAST = _S["fast_decode_tps"], _S["normal"], _S["fast"], _S["fast_repeat_rows"]
 
 
 def sampling_plan(decode_tps, fast_tps=FAST_DECODE_TPS):
@@ -70,12 +74,12 @@ ROOFLINE_METRIC = {"decode": "decode_tps", "decode_2k": "decode_tps_2k", "decode
 # decode context (tokens of KV read per decoded token) and streams of the drafted rows: speculative decoding commits
 # several tokens per verify pass, so their ceiling is the pass rate x the expected tokens per pass
 DRAFTED_ROWS = {"decode": (0, 1), "decode_2k": (2000, 1), "decode_32k": (32000, 1), "streams4": (600, 4)}
-# Performance guardrails (loom-org org_status.py). Far from roofline (calibrated in loom-org SKILL.md, "Far from
+# Performance guardrails (loom-fleet org_status.py). Far from roofline (calibrated in loom-fleet reference/populate-org.md, "Far from
 # roofline: how the threshold was set"): Loom below FAR_FRACTION x the efficiency tuned Loom ports have demonstrated
 # for the metric kind
 FAR_FRACTION = 0.5
 # Card performance has one source: devlab-perf jobs on AMD DevLab Dispatch Strix Halo runners (Loom, served with the
-# active wait, and llama.cpp on the same runner, the published programs; loom-org SKILL.md step 3). Per metric the last
+# active wait, and llama.cpp on the same runner, the published programs; loom-fleet reference/publish.md step 3). Per metric the last
 # session that measured it is the card's value, judged against the roofline. spec_acceptance (drafted-token
 # acceptance) is a drafting statistic of model, drafter and text, not a timing; its session's programs_sha256 decides
 # whether it is stale like any other card value.
@@ -109,13 +113,15 @@ GATES = [
     ("agent", "Multi-turn tool-calling loop: exact prompt rendering, history reuse, valid tool calls, output vs llama.cpp"),
     ("agent_think_off", "The tool-calling loop with thinking off"),
     ("sampling", "temperature, top_k and seed behave as specified; first-token distribution matches llama.cpp"),
+    ("logits", "Host logits readback (llm.logits on): at T=0 every returned row's argmax is the device's token, the top-k matches llama.cpp, greedy text is unchanged"),
     ("decision", "Decision answers (choice, score, noul probabilities) vs llama.cpp on the same prompts"),
 ]
 GATE_NAMES = [n for n, _ in GATES]
 # Gates that no longer exist (the needle gates were removed; gates.sh now only probes that the native context is admitted,
-# which is a check, not a gate). Published info.json files and old evidence still carry them: make_info.py drops them,
+# which is a check, not a gate; `gufo`, Gufo's conformance suite, is a test of another project's server that a card does not claim: only
+# the optional logits readback is). Published info.json files and old evidence still carry them: make_info.py drops them,
 # normalize() strips them for every reader, so a card never shows one. The schema still accepts them (unknown gate names).
-RETIRED_GATES = ("needle", "needle_full")
+RETIRED_GATES = ("needle", "needle_full", "gufo")
 # speculative decoding methods (llm_config.json draft.kind) as the card names them
 METHOD = {"dflash": "DFlash", "mtp": "MTP", "ngram": "n-gram prompt lookup", "assist": "assistant drafter"}
 BASE_TAGS = ["loom", "loom-serve", "gguf"]
@@ -124,20 +130,22 @@ BASE_TAGS = ["loom", "loom-serve", "gguf"]
 # name for the GPU; arch: its ISA; roofline: the loom-roofline roofline.py --device preset a card's ceilings use
 # (radeon-r9700s is the AMD DevLab Dispatch R9700S runner every R9700 measurement runs on); memory_bytes: the
 # memory loom-serve may use there (None: the package's own value); detect: what machine_info.py's GPU string says.
-GPUS = {
-    "strix-halo": {"name": 'AMD Ryzen AI Max+ 395 "Strix Halo"', "short": "Strix Halo", "arch": "gfx1151", "memory": None,
-                   "roofline": "strix-halo", "memory_bytes": None, "runner": "Strix Halo", "tag": "strix-halo",
-                   "detect": re.compile(r"strix|8060s|gfx1151", re.I)},
-    "radeon-r9700": {"name": "AMD Radeon AI PRO R9700", "short": "Radeon AI PRO R9700", "arch": "gfx1201", "memory": "32 GB",
-                     "roofline": "radeon-r9700s", "memory_bytes": 34_000_000_000, "runner": "R9700", "tag": "radeon-r9700",
-                     # loom-serve flags this GPU is served with (instead of --memory_bytes): fixed state backing. The default
-                     # elastic backing runs a synchronous trim + compaction (copying the retained KV pages, 0.3-0.5 s per ~1 GB)
-                     # after every session end, which stalls the next long prefill (perf.py --long's 8k/16k rows lost to
-                     # llama.cpp from the second round); fixed backing has no virtual state buffer to trim. It commits the
-                     # preset's pool_capacity eagerly, so the R9700 preset sizes the pool to the GPU (fixed_pool_capacity).
-                     "serve_args": ["--pool_backing=fixed"],
-                     "detect": re.compile(r"r9700|gfx1201|radeon ai pro", re.I)},
-}
+# The card's view of the registry's device rows (loom-kb/device/<family>/<device>/device.json):
+
+
+def _gpu_row(dev):
+    c = dev["card"]
+    row = {"name": dev["name"], "short": dev["short"], "arch": dev["gfx"], "memory": dev["memory"], "roofline": dev["roofline"]["default"],
+           "memory_bytes": dev["memory_bytes"], "runner": c["runner"], "tag": c["tag"],
+           "detect": re.compile(c["detect"]["pattern"], re.I if "i" in c["detect"].get("flags", "") else 0)}
+    if c.get("serve_args"):
+        row["serve_args"] = list(c["serve_args"])
+    if dev.get("preset_suffix"):
+        row["preset_suffix"] = dev["preset_suffix"]
+    return row
+
+
+GPUS = {k: _gpu_row(d) for k, d in registry.devices().items()}
 DEFAULT_GPU = "strix-halo"   # a card of loom-card/2 and evidence that names no GPU
 # The R9700 pool: the board reports 31.86 GiB (34.2 GB) of VRAM and the driver reserves part of it, so loom-serve gets
 # 34.0 GB (31.67 GiB): below what the board reports, above the 33.2 GB the largest package that fits at its native
@@ -271,7 +279,15 @@ def package_facts(pkg_files, upstream=None):
             "output": model.get("model", {}).get("id", "").split("/")[-1] or None,
             "memory_bytes": execution.get("memory_bytes"),
             "generator": cfg.get("generator"), "serve": cfg.get("serve"), "sdk": cfg.get("sdk"),
+            "logits": declares_logits(model),   # model.json declares the host logits readback capability (llm.logits)
             "features": derive_features(model, cfg, kind, execution, srcs, spec, upstream)}
+
+
+def declares_logits(model):
+    """True when a model.json (any variant's service config) carries the `llm.logits` capability key (#736: its presence = the package supports it)."""
+    if isinstance(model, dict):
+        return "llm.logits" in model or any(declares_logits(v) for v in model.values())
+    return isinstance(model, list) and any(declares_logits(v) for v in model)
 
 
 def tool_calling(chat):
@@ -483,13 +499,15 @@ def derived_tags(features, gpus=(DEFAULT_GPU,)):
     return tags
 
 
-def gate_applies(name, kind, feats):
+def gate_applies(name, kind, feats, logits=True):
     if name in ("kernel_tests", "consistency"):
         return True
     if kind == "decision":
         return name == "decision"
     if name == "decision":
         return False
+    if name == "logits":   # the host logits readback is an LLM text feature (llm.logits): a package without the capability has none
+        return logits
     if name == "vision":
         return feats["image_input"]["status"] == "yes"
     if name == "spec":
@@ -562,7 +580,7 @@ def stale_metrics(info, programs, kind=None, feats=None):
     view = single(info)
     sessions = (view.get("performance") or {}).get("sessions", [])
     rm = view.get("remeasure") or {}
-    same = {programs} | ({rm["compared_programs"]} if rm.get("programs_sha256") == programs else set())   # a same-runner A/B within the band
+    same = {programs} | ({rm["compared_programs"], *rm.get("carried_programs", [])} if rm.get("programs_sha256") == programs else set())   # a same-runner A/B within the band, or identical stages
     out = {}
     for k, (_, i) in card_metrics(info).items():
         sha = sessions[i].get("programs_sha256")
@@ -572,7 +590,7 @@ def stale_metrics(info, programs, kind=None, feats=None):
 
 
 def perf_flags(info, kind=None, feats=None, programs=None):
-    """The performance guardrails of one card (loom-org org_status.py).
+    """The performance guardrails of one card (loom-fleet org_status.py).
     far          {metric: [Loom / roofline, demonstrated efficiency]} where Loom's card value is below FAR_FRACTION x
                  the efficiency Loom ports have demonstrated for that kind of metric (info.json roofline)
     stale        {metric: programs measured} where the card value was measured on programs other than `programs`,
@@ -667,7 +685,7 @@ def gpu_view(info, gpu):
 
 
 def primary_gpu(info):
-    """The GPU a single-GPU reader (loom-org's org_status, the card's dashboards) reads: strix-halo when it has
+    """The GPU a single-GPU reader (loom-fleet org_status, the card's dashboards) reads: strix-halo when it has
     results, else the first GPU that has."""
     devs = info.get("devices") or {}
     for g in GPUS:
@@ -687,8 +705,9 @@ def gpu_preset(facts, gpu):
     """The preset a GPU's Quick start fetches: `<first preset>-r9700` on the R9700 when the package has one (build.py
     --prefill-r9700: a larger prefill chunk, same programs), else the default preset (None when the package has one)."""
     first = (facts.get("presets") or [None])[0]
-    alt = f"{first}-r9700"
-    if gpu == "radeon-r9700" and first and alt in facts["presets"]:
+    suffix = (GPUS.get(gpu) or {}).get("preset_suffix", "")
+    alt = f"{first}{suffix}"
+    if suffix and first and alt in facts["presets"]:
         return alt
     return facts.get("preset")
 
@@ -724,27 +743,87 @@ def gpu_serve_args(gpu):
     return list(GPUS[gpu].get("serve_args") or [])
 
 
-def fixed_pool_capacity(row, memory_bytes=None):
-    """KV pool positions a fixed-backing server (no --memory_bytes budget: the pool is committed eagerly) can hold on the R9700 beside
+def has_runner(gpu):
+    """True when the device has a DevLab runner (device.json runner.labels): without one nothing can be measured on it."""
+    return bool(registry.device(gpu)["runner"]["labels"])
+
+
+def fixed_pool_capacity(row, memory_bytes=None, gpu="radeon-r9700"):
+    """KV pool positions a fixed-backing server (no --memory_bytes budget: the pool is committed eagerly) can hold on the GPU (default the R9700) beside
     the package's weights/workspace/recurrent state (fit row "w") and SERVE_HEADROOM, rounded down to 1024; None when the row has no sizing."""
     if not row or not row.get("kvpp") or "w" not in row:
         return None
-    mem = memory_bytes or GPUS["radeon-r9700"]["memory_bytes"]
+    mem = memory_bytes or GPUS[gpu]["memory_bytes"]
     return max(0, int((mem - row["w"] - SERVE_HEADROOM) // row["kvpp"]) // 1024 * 1024)
 
 
-def gpu_preset_name(model_or_presets):
-    """`<first preset>-r9700`: the preset a package carries for the R9700 when its serving settings differ from model.json's
-    default preset (Strix Halo's)."""
+# --- the execution settings of a device's preset: scope.json rules (skills/loom-kb exec.* choices), not the fit table --------------
+REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
+EXEC_KEYS = ("prefill_capacity", "context_capacity", "pool_capacity", "rows", "draft_depth")   # model.json execution fields, in this order
+_RESOLVERS = {}
+
+
+def _resolver(kb_root):
+    kb_root = os.path.abspath(kb_root)
+    if kb_root not in _RESOLVERS:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("loom_kb_resolve_" + str(len(_RESOLVERS)), os.path.join(kb_root, "resolve.py"))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        _RESOLVERS[kb_root] = mod
+    return _RESOLVERS[kb_root]
+
+
+def scope_execution(slug, gpu, root=None, cfg=None):
+    """{"prefill_capacity": N, "context_capacity": N, ..., "context_cap": N} the scope.json rules (model nodes, family, facet ...) set for
+    SLUG's preset on device GPU, resolved from the checked-in build input fleet/<slug>/llm_config.json (or CFG) of the checkout ROOT (default:
+    this one; pass a git export of another ref to read that ref's rules). Empty when no rule sets one or the model is not in the fleet."""
+    root = os.path.abspath(root or REPO)
+    kb = os.path.join(root, "skills", "loom-kb")
+    if cfg is None:
+        p = os.path.join(root, "fleet", slug, "llm_config.json")
+        if not os.path.isfile(p) or not os.path.isfile(os.path.join(kb, "resolve.py")):
+            return {}
+        with open(p, encoding="utf-8") as f:
+            cfg = json.load(f)
+    got = _resolver(kb).device_execution(cfg, gpu, kb, slug=slug)
+    return {k[len("exec."):]: v["value"] for k, v in got.items()}
+
+
+def fit_rows(path, gpu, root=None):
+    """{slug: row} of a device's fit table (fit.py: sizing and verdict data) with the serving settings of the scope rules put back as the
+    row keys the readers know: "ctx_cap" (exec.context_cap) and "<runner key>_execution" (prefill_capacity, context_capacity, pool_capacity,
+    rows, draft_depth). A row that still carries such a block of its own (a table of a device without rules) keeps it unless a rule sets one.
+    ROOT: the checkout whose rules apply; default: this one when PATH is one of its own tables (.github/devlab/), else none (a table elsewhere,
+    e.g. a test fixture, is standalone data: pass root= to read this checkout's rules for it)."""
+    with open(path, encoding="utf-8") as f:
+        rows = {r["slug"]: dict(r) for r in json.load(f)}
+    xkey = registry.fit_execution_key(gpu)
+    if root is None and os.path.realpath(path).startswith(os.path.join(REPO, ".github", "devlab") + os.sep):
+        root = REPO
+    for slug, row in rows.items():
+        got = scope_execution(slug, gpu, root) if root else {}
+        if got.get("context_cap"):
+            row["ctx_cap"] = got["context_cap"]
+        ex = {k: got[k] for k in EXEC_KEYS if k in got}
+        if ex:
+            row[xkey] = ex
+    return rows
+
+
+def gpu_preset_name(model_or_presets, gpu="radeon-r9700"):
+    """`<first preset><device preset suffix>` (`<first>-r9700`): the preset a package carries for a GPU when its serving settings differ
+    from model.json's default preset (Strix Halo's). The suffix is the device's "preset_suffix" (device.json)."""
     presets = model_or_presets.get("presets", model_or_presets) if isinstance(model_or_presets, dict) else model_or_presets
-    return f"{next(iter(presets))}-r9700"
+    return f"{next(iter(presets))}{GPUS[gpu]['preset_suffix']}"
 
 
-def gpu_preset_execution(row, served_ctx=None):
-    """The execution overrides a fit-table row's "r9700_execution" gives the R9700 preset (prefill_capacity, rows, draft_depth,
+def gpu_preset_execution(row, served_ctx=None, gpu="radeon-r9700"):
+    """The execution overrides a fit-table row's "<runner>_execution" ("r9700_execution": registry.fit_execution_key) gives the GPU's preset (prefill_capacity, rows, draft_depth,
     context_capacity/pool_capacity ...), plus the served context (context_capacity = pool_capacity = served_ctx) when the R9700
     serves a shorter context and the row does not say otherwise. None: the row has no block, so the preset is not touched."""
-    ex = (row or {}).get("r9700_execution")
+    ex = (row or {}).get(registry.fit_execution_key(gpu))
     if not ex:
         return None
     out = {}
@@ -754,12 +833,12 @@ def gpu_preset_execution(row, served_ctx=None):
     return out
 
 
-def with_gpu_preset(model, execution):
-    """model.json's document with the `<first>-r9700` preset: a copy of the first preset (or of the preset a build already
+def with_gpu_preset(model, execution, gpu="radeon-r9700"):
+    """model.json's document with the GPU's `<first>-r9700` preset: a copy of the first preset (or of the preset a build already
     made, e.g. build.py --prefill-r9700) with `execution` over its execution. The programs, weights and the default preset
     (Strix Halo) are untouched."""
     doc = json.loads(json.dumps(model))
-    name = gpu_preset_name(doc)
+    name = gpu_preset_name(doc, gpu)
     first = next(iter(doc["presets"]))
     alt = doc["presets"].get(name) or json.loads(json.dumps(doc["presets"][first]))
     alt["execution"].update(execution)
@@ -922,6 +1001,9 @@ def validate(info):
                 errs.append(f"{at}.performance.baselines.{b}.session.source: no source {x['session']['source']!r}")
         if dev.get("remeasure") and dev["remeasure"]["source"] not in ids:
             errs.append(f"{at}.remeasure.source: no source {dev['remeasure']['source']!r}")
+        fs = (dev.get("remeasure") or {}).get("first_source")
+        if fs and fs not in ids:
+            errs.append(f"{at}.remeasure.first_source: no source {fs!r}")
         for n, g in (dev.get("gates") or {}).items():
             if g["source"] not in ids:
                 errs.append(f"{at}.gates.{n}.source: no source {g['source']!r}")

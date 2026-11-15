@@ -22,7 +22,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from card_lib import (DEFAULT_GPU, FEATURES, GATE_NAMES, GATES, GPUS, HF, gpu_preset, LOOM_URL, METHOD, METRIC_KEYS, METRICS, SCHEMA_ID, SKILLS_URL,  # noqa: E402
                       TIMED, card_gpus, card_metrics, derived_tags, beyond_context, gate_applies, generator_commit, gpu_context, gpu_memory, gpu_serve_args,
-                      gpu_view, has_results, load_info, load_json, load_package, metric_applies, native_context, over_context,
+                      gpu_view, has_results, has_runner, load_info, load_json, load_package, metric_applies, native_context, over_context,
                       package_facts, programs_sha256, require_valid, stale_metrics, with_gate_features)
 from matched_spec import TIE_BAND  # noqa: E402
 
@@ -334,6 +334,8 @@ def gpu_line(info, g):
     if dev.get("state") == "unsupported":
         return (f"{GPUS[g]['name']} ({gpu_arch(g)}): this package does not fit its "
                 f"{GPUS[g]['memory'] or 'memory'} (it needs about {dev['required_bytes'] / 1e9:.0f} GB).")
+    if not has_runner(g):   # no DevLab runner is registered for the device: it cannot be measured, so the card does not claim to serve it
+        return f"{GPUS[g]['name']} ({gpu_arch(g)}): not measured (no runner for this GPU yet)."
     return f"{GPUS[g]['name']} ({gpu_arch(g)}): the results for this package are not yet re-measured."
 
 
@@ -355,6 +357,29 @@ def serve_command(info, facts, feats, gpu, output):
     elif memory:
         serve.append(f"--memory_bytes={memory}")
     return " ".join(serve)
+
+
+
+def remeasure_lines(rm, g, sources, on):
+    """The card lines about a same-runner A/B re-measure block (`on`: what was re-measured, "this package" or "programs SHA")."""
+    L = []
+    exc = "".join(f", {k} {(r - 1) * 100:+.1f} %" for k, r in (rm.get("exceptions") or {}).items() if r)
+    imp = rm.get("improved") or {}
+    bands = sorted({round(b * 100, 1) for b in (rm.get("bands") or {}).values()})
+    within = (f"+-{round(rm['band'] * 100)} %" if len(bands) < 2 else
+              f"the per-row bands (methodology, {bands[0]:g}-{bands[-1]:g} %)")
+    srcs = ", ".join(src_text(sources[sid]) for sid in (rm.get("first_source"), rm["source"]) if sid)
+    L.append(f"- {GPUS[g]['short']} re-measured on {on} on {text(rm['date'])}: within {within} of "
+             + ("the published" if imp else "these") + " values"
+             + (f" except {', '.join(imp)} (faster, confirmed in 2 runs; new values shown)" if imp else "")
+             + (f"{', and' if imp else ' except'}{exc[1:]} (not repeated in the same direction by the first run)" if exc else "")
+             + f" ({srcs}).")
+    if imp:
+        runs = ", ".join("%s %.1f and %.1f" % (k, *v["runs"][:2]) for k, v in imp.items())
+        was = ", ".join("%s %.1f" % (k, v["published"]) for k, v in imp.items() if v.get("published"))
+        L.append(f"- {', '.join(imp)}: the card value is the mean of the two re-measure runs' medians (each the median of "
+                 f"3 sessions; {runs}); the published value was {was}; llama.cpp values are as published (not re-measured).")
+    return L
 
 
 def perf_section(L, info, facts, feats, d, g, here, ctx):
@@ -463,11 +488,15 @@ def perf_section(L, info, facts, feats, d, g, here, ctx):
         L.append(f"- {mark(i)} Measured {text(date)}; device {device_text(s['device'])}; hrx-loom {sdk_text(s['hrx_loom'])}; "
                  f"source: {src_text(s)}.")
     rm = view.get("remeasure")
-    if rm and rm["programs_sha256"] == here:   # a same-runner A/B of this package against the build the table measured
-        exc = "".join(f", {k} {(r - 1) * 100:+.1f} %" for k, r in (rm.get("exceptions") or {}).items() if r)
-        L.append(f"- {GPUS[g]['short']} re-measured on this package on {text(rm['date'])}: within +-{round(rm['band'] * 100)} % of "
-                 f"these values" + (f" except{exc[1:]} (not repeated in the same direction by the first run)" if exc else "")
-                 + f" ({src_text(sources[rm['source']])}).")
+    if rm and rm["programs_sha256"] == here and rm["result"] == "identical":   # the default-path stages equal the measured build's: no re-measure
+        pr = rm["proof"]
+        L.append(f"- {GPUS[g]['short']} performance measured on programs {short(rm['compared_programs'])}; the default path of this package "
+                 f"(sha256 {short(here)}) is identical after canonicalization ({pr['summary']}"
+                 + (f"; [proof]({pr['url']})" if pr.get("url") else "") + f"; checked {text(rm['date'])}).")
+        if rm.get("previous"):   # the build compared with was itself re-measured against the table's: that stays said
+            L.extend(remeasure_lines(rm["previous"], g, sources, f"programs {short(rm['compared_programs'])}"))
+    elif rm and rm["programs_sha256"] == here:   # a same-runner A/B of this package against the build the table measured
+        L.extend(remeasure_lines(rm, g, sources, "this package"))
     for b, x in extra.items():
         xb, xs = x["baseline"], x["session"]
         L.append(f"- {xnames[b]}: measured {text(xs['date'])}; source: {src_text(sources[xs['source']])}."
@@ -502,7 +531,7 @@ def render(d):
     gpus = card_gpus(info)
     solo = single_layout(info)
     live = [g for g in gpus if has_results(info["devices"][g])]
-    named = [g for g in gpus if info["devices"][g].get("state") != "unsupported"]
+    named = [g for g in gpus if info["devices"][g].get("state") != "unsupported" and (has_results(info["devices"][g]) or has_runner(g))]
     output = card.get("output") or facts["output"] or facts["name"]
     native = native_context(feats)
 
@@ -538,7 +567,9 @@ def render(d):
         install = [f'pip install "hrx-loom[hf]=={pin["hrx_loom"]}"']
     else:
         install = ['pip install "hrx-loom[hf]"']   # no SDK version recorded anywhere (cannot happen for a built card)
-    serving = [g for g in gpus if info["devices"][g].get("state") != "unsupported"] or [DEFAULT_GPU]
+    # a GPU with no runner and no results is not measured at all: no Quick start for it (its line below says so)
+    serving = [g for g in gpus if info["devices"][g].get("state") != "unsupported"
+               and (has_results(info["devices"][g]) or has_runner(g))] or [DEFAULT_GPU]
     if len(serving) == 1:
         L += ["## Quick start", "", "```bash", *install, fetch_for(serving[0]), serve_command(info, facts, feats, serving[0], output), "```", ""]
     elif len({fetch_for(g) for g in serving}) == 1:   # the same install and fetch; the serve line differs by the GPU's memory
@@ -619,14 +650,17 @@ def render(d):
     def gate_cell(g, name, desc):
         dev = info["devices"][g]
         if not has_results(dev):
-            return MISSING + (" not yet re-measured" if dev.get("state") == "not_measured" else " does not fit")
+            return MISSING + ((" not yet re-measured" if has_runner(g) else " not measured") if dev.get("state") == "not_measured" else " does not fit")
         gt = dev["gates"].get(name)
         if gt is None and beyond_context(gpu_view(info, g), name, gpu_context(info, g, native), native):
             return f"{FIT} (needs more context than the {gpu_context(info, g, native):,} tokens this GPU serves)"
         if gt is None:
-            return f"{NO} no evidence" if gate_applies(name, kind, feats) else f"{NA} not applicable"
+            return f"{NO} no evidence" if gate_applies(name, kind, feats, facts.get("logits", True)) else f"{NA} not applicable"
         key = (gt["source"], gt["level"], gt["date"])
         gsha = gt.get("programs_sha256")
+        rmg = dev.get("remeasure") or {}
+        if gsha and gsha != here and gsha in rmg.get("carried_programs", []) and rmg.get("programs_sha256") == here and gt["status"] == "pass":
+            gsha = here   # the default path is proven identical to the build this pass ran on (the performance line says so)
         if gsha and gsha != here and gt["status"] == "pass":   # a pass on other programs says nothing about this package
             return (f"{UNKNOWN} not re-run on this package (the last pass was on a previous build, sha256 {short(gsha)}; "
                     f"the nightly gates re-run it)")

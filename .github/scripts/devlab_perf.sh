@@ -3,7 +3,7 @@
 # build package variants from this checkout (or another ref), and compare them with each other and with llama.cpp
 # ON THIS RUNNER (runners differ from each other and from a dev machine: only same-job numbers are compared).
 # This is the single source of card performance: the card variant (active wait) and llama.cpp on the same runner,
-# ingested with make_info.py perf --source-kind devlab (loom-org SKILL.md step 3).
+# ingested with make_info.py perf --source-kind devlab (loom-fleet reference/publish.md step 3).
 #
 #   [WORK=~/devlab-perf] devlab_perf.sh EXPERIMENT.json JOB_NAME
 #
@@ -44,7 +44,8 @@
 #            "context": N: the served context of a reduced-context model on the R9700 (execution context_capacity / pool_capacity N;
 #            a rebuild also gets --context N --pool N); rows beyond it are refused by the server (HTTP 400) and skipped by perf.py.
 #            config: generator-config overrides for a rebuild (e.g. {"layers": 12}: timing only)
-#            build: build.py with these env vars (and extra flags); ref: build with that commit's starter;
+#            build: build.py with these env vars (and extra flags); ref: build with that commit's starter AND its knowledge base (skills/loom-kb:
+#            the choices the rebuild resolves; ab_jobs.py --base-ref/--head-ref --build writes fun/staging this way);
 # Job "require_preset_r9700": true (r9700_jobs.py, a package with a fit-row r9700_execution): serving fails unless the card has its <first>-r9700 preset.
 #            serve_args: extra loom-serve flags; execution: model.json overrides (every preset); double: ablation (each kernel.launch in PROGRAM matching REGEX twice).
 #            {"name": "parked", "active_wait": false}: the card's programs served with the SDK's default completion wait
@@ -65,6 +66,14 @@
 #          determinism:V:C:R    determinism.py (issue #39's script, when present)
 #          func:V               V served alone: the functional checks the card claims (chat, tool calling, image input;
 #                               r9700_func.py: the same checks as the Windows red-team harness), out/func_V.json
+#          logits:V[:N]         host logits readback (loom-skills#736): V's package through the Gufo bundle (loom-gufo-extension
+#                               validation/devlab/build_bundle.sh: gufo + libloom_text_embed.so with their own loader; $GUFO_BUNDLE, or job/
+#                               experiment "bundle": {"url": TARBALL, "sha256": H}; the devlab-perf workflow builds it in the run for a job with "bundle": {"build": {...}} and sets $GUFO_BUNDLE), logits_check.py: embed_probe (argmax of every returned row ==
+#                               the device's token), gufo's host-sampled logprobs vs llama.cpp (same GGUF, undrafted), greedy text unchanged by
+#                               the capability; logits_V.json (gate `logits`, make_info.py gates). N prompts (default 6). Without a bundle
+#                               the step is "not supported" (never replaced by another path).
+#          gufo:V               Gufo conformance on V's package served with --loom-logits=on (validation/devlab/run_conformance.sh: conformance.py
+#                               --logits + gufo's logits_check.py); conformance_V.json (gate `gufo`), the raw files in out/gufo_V/
 #          ktest:V              make_kernel_tests.py + run_kernel_tests.sh with V's kit
 #          gates:V:LEVEL        gates.sh against llama.cpp
 #            "elastic": true: on the R9700 serve with --memory_bytes (the elastic state backing) instead of the card's --pool_backing=fixed
@@ -89,6 +98,7 @@
 set -uo pipefail
 exp=$(cd "$(dirname "$1")" && pwd)/$(basename "$1"); job=${2:?usage: devlab_perf.sh EXPERIMENT.json JOB}
 here=$(cd "$(dirname "$0")/../.." && pwd); SK=$here/skills
+export LOOM_KB_ROOT=${LOOM_KB_ROOT:-$SK/loom-kb}   # kits copied out of the skills tree (ktest, --build) resolve choices from this checkout's knowledge base
 B=$SK/loom-benchmark/scripts; SV=$SK/loom-setup/scripts
 WORK=${WORK:-$HOME/devlab-perf}; mkdir -p "$WORK"; WORK=$(cd "$WORK" && pwd)
 D=$WORK/$job; out=$D/out; rm -rf "$D"; mkdir -p "$out"
@@ -97,7 +107,8 @@ PORT=${LOOM_PORT:-8161}; LLAMA_PORT=${LLAMA_PORT:-8131}; url=http://127.0.0.1:$P
 t0=$(date +%s); step() { echo "== $* ($(date +%T), +$(( $(date +%s) - t0 ))s)"; }
 q() { python3 -c "import json,sys; e=json.load(open('$exp')); j=next(j for j in e['jobs'] if j['name']=='$job'); $1"; }
 qv() { python3 -c "import json,sys; e=json.load(open('$exp')); j=next(j for j in e['jobs'] if j['name']=='$job'); v=next(v for v in j['variants'] if v['name']=='$1'); $2"; }
-repo=$(q "print(j.get('card') or e['card'])"); mem=$(q "print(j.get('memory_bytes') or e['memory_bytes'])")
+# a card reference is ORG/REPO or ORG/REPO@REV (job "card" and variant "card"): REV pins the commit fetched instead of main
+repo_ref=$(q "print(j.get('card') or e['card'])"); repo=${repo_ref%@*}; mem=$(q "print(j.get('memory_bytes') or e['memory_bytes'])")
 kit=$(q "print((j['kit'] if 'kit' in j else e.get('kit')) or '-')"); tag=$(q "print(j.get('llamacpp') or e.get('llamacpp') or '-')"); variants=$(q "print(' '.join(v['name'] for v in j['variants']))")
 steps=$(q "print(' '.join(j['steps']))")
 vtag=$(q "print(j.get('llamacpp_vulkan') or e.get('llamacpp_vulkan') or '-')")
@@ -109,15 +120,21 @@ rrows=$(q "print(j.get('repeat_rows') or e.get('repeat_rows') or 1)")
 RUNNER=$(q "print(j.get('runner') or e.get('runner') or 'strix')")
 # "env": {"NAME": "value"} on the experiment or a job: exported for every step (gates.sh switches; the job's wins)
 eval "$(q "import shlex; print('\n'.join(f'export {k}={shlex.quote(str(v))}' for k, v in {**(e.get('env') or {}), **(j.get('env') or {})}.items()))")"
-if [ "$RUNNER" = r9700 ]; then
-  rm9=$(q "print(j.get('memory_bytes_r9700') or e.get('memory_bytes_r9700') or '')")
-  if [ -n "$rm9" ]; then mem=$rm9; elif [ "$mem" -gt 34000000000 ]; then echo "r9700: memory_bytes $mem clamped to 34000000000 (the R9700 pool, card_lib.GPUS)"; mem=34000000000; fi
-  export LOOM_MEMORY_CAP_GIB=${LOOM_MEMORY_CAP_GIB:-34}   # the budget lives in VRAM: memcheck.sh's 60 %-of-host-RAM rule does not apply
+# a runner other than strix is a device with its own memory pool (the registry's device.json: skills/loom-kb, runner_device.py): RDEV is its
+# device key, RPOOL its memory_bytes, RSUF its preset suffix; the job's "memory_bytes_<runner>" / "require_preset_<runner>" are keyed by the runner
+RDEV=""; RPOOL=0; RSUF=-
+if [ "$RUNNER" != strix ]; then
+  read -r RDEV RPOOL RSUF < <(python3 -I "$here/.github/scripts/runner_device.py" "$RUNNER") || { echo "unknown runner $RUNNER"; exit 1; }
+fi
+if [ -n "$RDEV" ]; then
+  rm9=$(q "print(j.get('memory_bytes_$RUNNER') or e.get('memory_bytes_$RUNNER') or '')")
+  if [ -n "$rm9" ]; then mem=$rm9; elif [ "$RPOOL" -gt 0 ] && [ "$mem" -gt "$RPOOL" ]; then echo "$RUNNER: memory_bytes $mem clamped to $RPOOL (the $RDEV pool, card_lib.GPUS)"; mem=$RPOOL; fi
+  export LOOM_MEMORY_CAP_GIB=${LOOM_MEMORY_CAP_GIB:-$((RPOOL / 1000000000))}   # the budget lives in VRAM: memcheck.sh's 60 %-of-host-RAM rule does not apply
   if ! ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1' || ! ls /usr/share/vulkan/icd.d/radeon_icd*.json >/dev/null 2>&1; then
     { sudo -n apt-get install -y libvulkan1 mesa-vulkan-drivers || { sudo -n apt-get update -qq && sudo -n apt-get install -y libvulkan1 mesa-vulkan-drivers; }; } >/dev/null 2>&1 \
       || echo "WARNING: could not install libvulkan1 mesa-vulkan-drivers (the @vulkan steps will fail)"
   fi
-elif [ "$RUNNER" != strix ]; then echo "unknown runner $RUNNER (strix | r9700)"; exit 1; fi
+fi
 BK=rocm; bkt=-   # the llama.cpp backend of the step running (set by the "@vulkan" suffix) and its file-name infix
 echo "job $job: variants $variants; steps $steps; runner $RUNNER $(hostname); memory_bytes $mem"
 hostname > "$out/runner.txt"
@@ -132,17 +149,19 @@ trap cleanup EXIT
 
 # 1. Loom SDK + tools venv: the SDK the card pins in its llm_config.json (ensure_sdk.sh), else the default
 step "Loom SDK"
-curl -fsSL --retry 3 "https://huggingface.co/$repo/resolve/main/llm_config.json" -o "$out/llm_config.json" || { echo "FAIL: no llm_config.json in $repo"; exit 1; }
+curl -fsSL --retry 3 "https://huggingface.co/$repo/resolve/$([[ $repo_ref == *@* ]] && echo "${repo_ref#*@}" || echo main)/llm_config.json" -o "$out/llm_config.json" || { echo "FAIL: no llm_config.json in $repo"; exit 1; }
 root=$("$SV/ensure_sdk.sh" "${LOOM_ROOT:-$WORK/loom}" "$out/llm_config.json" 2> "$out/install.log") || { tail "$out/install.log"; exit 1; }
 export LOOM_ROOT=$root VENV=$root/.venv; T=$root/.tools/bin/python
 
 # 2. The card (fetched once per runner and card)
-fetch_card() {   # fetch_card REPO -> sets CARD_DIR: the card's files at one commit (a variant "card": ORG/REPO fetches another card)
-  local r=$1 rv bs
-  CARD_DIR=$WORK/_card/${r//\//_}; rv=$(curl -fsS --retry 3 "https://huggingface.co/api/models/$r/revision/main" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])') || rv=main
+fetch_card() {   # fetch_card REF -> sets CARD_DIR, CARD_BASE, CARD_REV: the card's files at one commit (REF = ORG/REPO[@REV]; a variant "card": REF fetches another card)
+  local ref=$1 r=${1%@*} want=main rv bs
+  [[ $ref == *@* ]] && want=${ref#*@}   # pinned: that revision instead of main (an old published revision, or a commit of the staging card)
+  CARD_DIR=$WORK/_card/${r//\//_}; rv=$(curl -fsS --retry 3 "https://huggingface.co/api/models/$r/revision/$want" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])') || rv=$want
+  [ "$want" = main ] || CARD_DIR=${CARD_DIR}@${rv:0:12}   # a pinned card has its own directory next to the same card at main
   # the files are fetched at one commit (resolve/main can serve an older revision for a while after a publish), and a card
   # directory left by an earlier job on this runner is reused only when it holds that commit
-  bs=https://huggingface.co/$r/resolve/$rv; CARD_BASE=$bs
+  bs=https://huggingface.co/$r/resolve/$rv; CARD_BASE=$bs; CARD_REV=$rv
   if [ "$rv" = main ] || [ "$(cat "$CARD_DIR/.fetched" 2>/dev/null)" != "$rv" ]; then
     step "fetch $r"; rm -rf "$CARD_DIR"
     # a card with several presets (the R9700's `<first>-r9700`) needs one named: install the first (the default), then add the others' blocks
@@ -164,7 +183,8 @@ EOF
     rm -rf "$WORK/fetch-cache" "$WORK/hf-home"; echo "$rv" > "$CARD_DIR/.fetched"
   fi
 }
-fetch_card "$repo"; card=$CARD_DIR; base=$CARD_BASE
+fetch_card "$repo_ref"; card=$CARD_DIR; base=$CARD_BASE
+echo "$repo@$CARD_REV" > "$out/card_revision.txt"   # the commit of the job's card this job fetched (a pinned REV resolved to the full sha)
 python3 - "$card" <<'EOF' || { echo "FAIL: the fetched card's model.json and llm_config.json disagree (a stale fetch?)"; exit 1; }
 import json, os, sys
 m = json.load(open(os.path.join(sys.argv[1], "model.json"))); c = json.load(open(os.path.join(sys.argv[1], "llm_config.json")))
@@ -212,14 +232,14 @@ a += (['--draft', d['kind'], '--draft-depth', str(d['depth'])] if d.get('kind') 
 print(' '.join(a))")
 
 # 3. Packages: D/<variant>/pkg (+ D/<variant>/kit for kernel tests)
-declare -A KIT
-kit_for() {   # kit_for VARIANT REF -> builds D/<variant>/kit from REF's starter (or this checkout)
+declare -A KIT KBV
+kit_for() {   # kit_for VARIANT REF -> builds D/<variant>/kit from REF's starter (or this checkout); KBV[v]: REF's knowledge base (the build resolves its choices from it)
   local v=$1 ref=$2 PL=$SK/loom-port-llm
   if [ -n "$ref" ]; then
     git -C "$here" fetch -q origin "${ref#origin/}" 2>/dev/null
     rm -rf "$D/$v/src"; mkdir -p "$D/$v/src"
-    git -C "$here" archive "$ref" skills/loom-port-llm | tar -x -C "$D/$v/src" || { echo "FAIL: no $ref"; return 1; }
-    PL=$D/$v/src/skills/loom-port-llm; echo "starter from $ref ($(git -C "$here" log -1 --format=%h:%s "$ref" | cut -c1-80))"
+    git -C "$here" archive "$ref" skills/loom-port-llm skills/loom-kb | tar -x -C "$D/$v/src" || { echo "FAIL: no $ref"; return 1; }
+    PL=$D/$v/src/skills/loom-port-llm; KBV[$v]=$D/$v/src/skills/loom-kb; echo "starter from $ref ($(git -C "$here" log -1 --format=%h:%s "$ref" | cut -c1-80))"
   fi
   if [ "$kit" != - ]; then "$PL/reference/apply_example.sh" "$kit" "$D/$v/kit" | tail -1 >/dev/null || return 1
   else cp -r "$PL/starter" "$D/$v/kit"; fi
@@ -239,13 +259,13 @@ for v in $variants; do
 import json, sys
 c = json.load(open(sys.argv[1])); c.update(json.loads(sys.argv[3])); json.dump(c, open(sys.argv[2], "w"), indent=1)
 EOF2
-    ( cd "${KIT[$v]}" && env $envs "$T" build.py "$D/$v/cfg.json" "$pkg" --tokenizer "$card/tokenizer.json" --model-id "$cardid" $cardargs $extra ) > "$out/build_$v.log" 2>&1 \
+    ( cd "${KIT[$v]}" && env $envs ${KBV[$v]:+LOOM_KB_ROOT=${KBV[$v]}} "$T" build.py "$D/$v/cfg.json" "$pkg" --tokenizer "$card/tokenizer.json" --model-id "$cardid" $cardargs $extra ) > "$out/build_$v.log" 2>&1 \
       || { tail -30 "$out/build_$v.log"; echo "FAIL: build $v"; exit 1; }
     tail -3 "$out/build_$v.log"
   else
     kit_for "$v" "" || exit 1
     vcard=$card; vrepo=$(qv "$v" "print(v.get('card') or '')")   # variant "card": ORG/REPO = that card's published programs (e.g. loom-fun's, next to the staging card's)
-    if [ -n "$vrepo" ]; then fetch_card "$vrepo"; vcard=$CARD_DIR; fi
+    if [ -n "$vrepo" ]; then fetch_card "$vrepo"; vcard=$CARD_DIR; echo "${vrepo%@*}@$CARD_REV" > "$out/card_revision_$v.txt"; fi
     mkdir -p "$pkg"; cp -r "$vcard/program" "$vcard/model.json" "$vcard/tokenizer.json" "$vcard"/*.loom "$pkg/" 2>/dev/null
     ln -sfn "$vcard/parameter" "$pkg/parameter"
     "$T" - "$vcard" "$pkg" <<'EOF'
@@ -277,11 +297,15 @@ if rules:
             out.append(ln); n += 1
     open(p, "w").write("\n".join(out)); print(f"ablation: doubled {n} launches")
 EOF
-  "$T" - "$pkg/model.json" "$(qv "$v" "print(json.dumps(v.get('execution') or {}))")" "$cardid-$v" <<'EOF'
+  "$T" - "$pkg/model.json" "$(qv "$v" "print(json.dumps(v.get('execution') or {}))")" "$cardid-$v" "$(qv "$v" "print(json.dumps(v.get('cap_pool')))")" <<'EOF'
 import json, sys
 m = json.load(open(sys.argv[1])); ex = next(iter(m["presets"].values()))["execution"]
+cap = json.loads(sys.argv[4])   # "cap_pool": N (R9700, fixed backing commits the pool eagerly): a pool above N shrinks to N, the context with it
 for pr in m["presets"].values():   # the overrides apply to every preset (build.py --prefill-r9700 adds a second one)
     pr["execution"].update(json.loads(sys.argv[2]))
+    if cap and (pr["execution"].get("pool_capacity") or 0) > cap:
+        pr["execution"]["pool_capacity"] = cap
+        pr["execution"]["context_capacity"] = min(pr["execution"]["context_capacity"], cap)
 json.dump(m, open(sys.argv[1], "w"), indent=1)
 # a small-context copy with its own model id, for several packages in one loom-serve (ab steps)
 m["model"]["id"] = sys.argv[3]; ex["context_capacity"] = 16384; ex["pool_capacity"] = 32768
@@ -291,29 +315,48 @@ EOF
   cp "$pkg/model.json" "$out/model_$v.json"; sha256sum "$pkg"/program/*.loom > "$out/programs_$v.sha256"
 done
 
+pkg_preset() {   # pkg_preset MODEL_JSON -> the preset this runner serves ("" for a card with one preset): the R9700's <first><suffix> when it has one, else the first
+  "$T" -c "import json,sys; p=list(json.load(open(sys.argv[1]))['presets']); r=p[0] + sys.argv[3]; print((r if sys.argv[2] and r in p else p[0]) if len(p) > 1 else '')" "$1" "$RDEV" "$RSUF"
+}
 serve_alone() { # serve_alone VARIANT
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
   "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
   local aw sa rp vmem; aw=$(qv "$1" "print(0 if v.get('active_wait') is False else 1)")
   sa=$(qv "$1" "print(' '.join(v.get('serve_args') or []))")   # "serve_args": extra loom-serve flags
   # a package with a `<first preset>-r9700` preset (build.py --prefill-r9700) serves it on the R9700, as the card's R9700 Quick start does
-  rp=""; [ "$RUNNER" = r9700 ] && rp=$("$T" -c "import json,sys; p=list(json.load(open(sys.argv[1]))['presets']); print(p[0] + '-r9700' if p[0] + '-r9700' in p else '')" "$D/$1/pkg/model.json")
-  if [ -z "$rp" ] && [ "$RUNNER" = r9700 ] && [ "$(q "print(j.get('require_preset_r9700') or '')")" = True ]; then
-    echo "FAIL: the card has no <first>-r9700 preset (its fit row has r9700_execution): publish the package with it first"; return 1; fi
+  rp=""; [ -n "$RDEV" ] && rp=$("$T" -c "import json,sys; p=list(json.load(open(sys.argv[1]))['presets']); print(p[0] + sys.argv[2] if p[0] + sys.argv[2] in p else '')" "$D/$1/pkg/model.json" "$RSUF")
+  # (the job's "require_preset_r9700" covers the job's own card; a variant of another card, e.g. the old package of an A/B, has no R9700 preset unless it sets the key itself)
+  if [ -z "$rp" ] && [ -n "$RDEV" ] && [ "$(qv "$1" "print(v['require_preset_$RUNNER'] if 'require_preset_$RUNNER' in v else (j.get('require_preset_$RUNNER') or '') if 'card' not in v else '')")" = True ]; then
+    echo "FAIL: the card has no <first>$RSUF preset (its fit row has ${RUNNER}_execution): publish the package with it first"; return 1; fi
   # elsewhere (Strix) a package with several presets serves its first (the default), as the card's Strix Quick start fetches --preset=<first>
-  [ -z "$rp" ] && [ "$RUNNER" != r9700 ] && rp=$("$T" -c "import json,sys; p=list(json.load(open(sys.argv[1]))['presets']); print(p[0] if len(p) > 1 else '')" "$D/$1/pkg/model.json")
+  [ -z "$rp" ] && [ -z "$RDEV" ] && rp=$("$T" -c "import json,sys; p=list(json.load(open(sys.argv[1]))['presets']); print(p[0] if len(p) > 1 else '')" "$D/$1/pkg/model.json")
   if [ -n "$rp" ] && [[ "$sa" != *--preset=* ]]; then sa="--preset=$rp $sa"; fi
   vmem=$(qv "$1" "print(v.get('memory_bytes') or '$mem')")   # variant "memory_bytes": "none" with --pool_backing=fixed
   # the R9700 is served as its card's Quick start serves it: card_lib.GPUS "serve_args" (--pool_backing=fixed, no --memory_bytes; the elastic
   # backing's trim + compaction stalls the long-prefill rows), unless the variant brings its own serve_args/memory_bytes or is "elastic": true
-  if [ "$RUNNER" = r9700 ] && [[ "$sa" != *--pool_backing=* ]] && [ "$(qv "$1" "print(bool(v.get('elastic') or v.get('memory_bytes')))")" = False ]; then
-    sa="$("$T" -I -c "import sys; sys.path.insert(0, sys.argv[1]); import card_lib; print(' '.join(card_lib.gpu_serve_args('radeon-r9700')))" "$here/skills/loom-benchmark/scripts/card") $sa"
+  gsa=""; if [ -n "$RDEV" ]; then gsa=$("$T" -I -c "import sys; sys.path.insert(0, sys.argv[1]); import card_lib; print(' '.join(card_lib.gpu_serve_args(sys.argv[2])))" "$here/skills/loom-benchmark/scripts/card" "$RDEV"); fi
+  if [ -n "$gsa" ] && [[ "$sa" != *--pool_backing=* ]] && [ "$(qv "$1" "print(bool(v.get('elastic') or v.get('memory_bytes')))")" = False ]; then
+    sa="$gsa $sa"
     vmem=none
   fi
   step "serve $1"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
   grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
   curl -sf "$url/v1/models" >/dev/null
 }
+gufo_bundle() {   # gufo_bundle -> exports GUFO_BUNDLE (the experiment's/job's "bundle" tarball, fetched once per runner), or fails
+  [ -n "${GUFO_BUNDLE:-}" ] && [ -x "$GUFO_BUNDLE/run.sh" ] && return 0
+  local u h d; u=$(q "print((j.get('bundle') or e.get('bundle') or {}).get('url') or '')"); h=$(q "print((j.get('bundle') or e.get('bundle') or {}).get('sha256') or '')")
+  [ -n "$u" ] && [ -n "$h" ] || return 1
+  d=$WORK/_gufo-bundle/${h:0:12}
+  if [ ! -x "$d/run.sh" ]; then
+    step "fetch gufo bundle $u"; rm -rf "$d"; mkdir -p "$d"
+    curl -fsSL --retry 5 ${HF_TOKEN:+-H "Authorization: Bearer $HF_TOKEN"} "$u" -o "$d.tgz" && [ "$(sha256sum "$d.tgz" | cut -d' ' -f1)" = "$h" ] \
+      && tar -xzf "$d.tgz" -C "$d" --strip-components=1 || { echo "FAIL: gufo bundle $u (fetch, sha256 or untar)"; rm -rf "$d" "$d.tgz"; return 1; }
+    rm -f "$d.tgz"
+  fi
+  export GUFO_BUNDLE=$d
+}
+free_gpu() { for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done; "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1; }
 LSPEC=""
 llama_up() {   # llama_up [N_MAX]: llama.cpp with the experiment's llama_spec (n-max overridden), restarted on change
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
@@ -364,7 +407,9 @@ llama_up() {   # llama_up [N_MAX]: llama.cpp with the experiment's llama_spec (n
 TH=$(q "print(j.get('thinking') or 'off')")   # chat_template_kwargs.enable_thinking sent to both engines
 echo "thinking: $TH (sent to both engines)"
 declare -A res
-for s in $steps; do
+queue=($steps); qi=0   # a queue, not a fixed list: the step extend:TO:HAVE:ROT appends sessions (ab_extend.py)
+while [ "$qi" -lt "${#queue[@]}" ]; do
+  s=${queue[$qi]}; qi=$((qi + 1))
   IFS=: read -r kind p1 p2 p3 <<< "$s"
   BK=rocm; bkt=; MODS=; case $kind in *@*) bkt=-${kind#*@}; BK=${kind#*@}; MODS=${BK#"${BK%%.*}"}; BK=${BK%%.*}; kind=${kind%@*};; esac   # llama@vulkan: the other backend's build
   [ "$BK" = rocm ] || [ "$vtag" != - ] || { echo "$s: set llamacpp_vulkan"; res[$s]=ERROR; continue; }
@@ -374,12 +419,16 @@ for s in $steps; do
       for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
       "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
       ms=(); ids=(); for v in $variants; do ms+=("$D/$v/pkg/model_ab.json"); ids+=("$cardid-$v"); done
-      nv=${#ms[@]}; abmem=$(( 11000000000 * nv + 4000000000 )); [ "$RUNNER" = r9700 ] && [ "$abmem" -gt "$mem" ] && abmem=$mem
+      nv=${#ms[@]}; abmem=$(( 11000000000 * nv + 4000000000 )); [ -n "$RDEV" ] && [ "$abmem" -gt "$mem" ] && abmem=$mem
       step "ab: one loom-serve with $nv packages ($abmem bytes)"
       "$SV/serve.sh" abserve "$PORT" amdgpu "$abmem" "${ms[@]}" | tail -2
       "$T" "$here/.github/scripts/ab_decode.py" "$url" "${ids[@]}" --rounds "$p1" --think "${p2:-$TH}" --log "$out/ab.jsonl" 2>&1 | tee "$out/ab.log"
       res[$s]=$(grep -c SUMMARY "$out/ab.log")" variants measured"
       "$SV/stop.sh" abserve >/dev/null 2>&1;;
+    extend)   # extend:TO:HAVE:ROT: methodology "sequential" (2+2 sessions -> 6+6 where a ratio is within 2 points of its reject threshold)
+      more=$("$T" "$here/.github/scripts/ab_extend.py" "$out" --to "$p1" --have "$p2" --rot "${p3:-0}" 2> "$out/extend.log"); cat "$out/extend.log"
+      queue+=($more); res[$s]="$(echo $more | wc -w) more sessions"
+      echo "$(echo "$more" | tr '\n' ' ')" > "$out/extended_steps.txt";;
     perf)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "perf $p1 x $p2 ${p3:-} (thinking $TH)"
@@ -469,6 +518,25 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       grep -v "^PASS" "$out/ktest_$p1.log" | tail -15
       tot=$(grep -oE "^[0-9]+/[0-9]+ passed" "$out/ktest_$p1.log" | tail -1)
       res[$s]="$([ $rc = 0 ] && [ -n "$tot" ] && [ "${tot%%/*}" = "$(echo "${tot#*/}" | cut -d' ' -f1)" ] && echo PASS || echo FAIL) ($tot; $(grep -c '^SKIP' "$out/ktest_$p1.log") skipped)";;
+    logits)   # logits:V[:N_PROMPTS]  (loom-skills#736): V's package through the Gufo bundle with the logits capability on, checked on this GPU
+      free_gpu   # the GPU is the bundle's (and the undrafted llama.cpp reference's) alone
+      gufo_bundle || { echo '{"verdict": "NOT_SUPPORTED", "note": "no gufo bundle on this job (set bundle or GUFO_BUNDLE)", "gates": {}}' > "$out/logits_$p1.json"; res[$s]="not supported (no gufo bundle)"; continue; }
+      LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR
+      ( unset LLAMA_SPEC; "$B/llamacpp_server.sh" "$gguf" "$LLAMA_PORT" 1 8192 | tail -1 ) || { res[$s]=ERROR; continue; }
+      step "logits $p1 (bundle $GUFO_BUNDLE)"
+      "$T" "$here/.github/scripts/logits_check.py" "$D/$p1/pkg" "$out/logits_$p1.json" --bundle "$GUFO_BUNDLE" --llama "$lurl" --llama-stop "$B/llamacpp_server.sh --stop $LLAMA_PORT" --prompts "${p2:-6}" --preset "$(pkg_preset "$D/$p1/pkg/model.json")" \
+        > "$out/logits_$p1.log" 2>&1; rc=$?
+      tail -3 "$out/logits_$p1.log" | cut -c1-300
+      "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
+      res[$s]=$(grep -h "^LOGITS" "$out/logits_$p1.log" | tail -1 | cut -c1-300); [ -n "${res[$s]}" ] || res[$s]="ERROR rc=$rc";;
+    gufo)   # gufo:V  Gufo conformance on V's package (gufo run_conformance.sh: --loom-logits=on, conformance.py --logits, logits_check.py)
+      free_gpu
+      gufo_bundle || { echo '{"verdict": "NOT_SUPPORTED", "note": "no gufo bundle on this job (set bundle or GUFO_BUNDLE)", "gates": {}}' > "$out/conformance_$p1.json"; res[$s]="not supported (no gufo bundle)"; continue; }
+      step "gufo conformance $p1 (bundle $GUFO_BUNDLE)"
+      gp=$(pkg_preset "$D/$p1/pkg/model.json")
+      EXTRA_GUFO_ARGS="${gp:+--loom-preset $gp}" BUNDLE=$GUFO_BUNDLE "$GUFO_BUNDLE/validation/devlab/run_conformance.sh" "$D/$p1/pkg" "$out/gufo_$p1" 8181 > "$out/gufo_$p1.log" 2>&1; rc=$?
+      tail -4 "$out/gufo_$p1.log" | cut -c1-300
+      res[$s]=$("$T" "$here/.github/scripts/gufo_gate.py" "$out/gufo_$p1" "$out/conformance_$p1.json" "$rc" 2>&1 | tail -1 | cut -c1-300);;
     func)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "functional checks $p1"
@@ -488,7 +556,7 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
   esac
   echo "RESULT $job $s: ${res[$s]}"
 done
-for s in $steps; do echo "$s	${res[$s]:-}"; done > "$out/results.tsv"
+for s in "${queue[@]}"; do echo "$s	${res[$s]:-}"; done > "$out/results.tsv"
 "$T" - "$job" "$out" <<'EOF'
 import json, os, sys
 name, out = sys.argv[1:]

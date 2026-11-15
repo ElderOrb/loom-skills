@@ -20,6 +20,12 @@ A generator that has a gfx12 version of a kernel K (WMMA fragments differ betwee
 A file without a twin is returned unchanged, as is every file when env LOOM_RDNA4 is "0". Applying the pass to its own
 output is a no-op.
 
+Selection level (env LOOM_DUAL_SELECT, choice target.dual.select): "launch" (default) selects per launch as above. "program"
+selects once per command program that launches a twin kernel: the program keeps its signature and becomes one
+`template.apply<@NAME_body>(<its launch parameters>)` followed by `command.return`; the @rdna3 provider of `@NAME_body` is the
+program's original body (plain `kernel.launch @K`, as in a gfx11-only build) and the @rdna4 provider the same body with every
+twin launch on `K_rdna4` (a launch group: its single rdna4 launch). Launches outside such programs stay per-launch.
+
 usage: dual_target.py FILE.loom [FILE.loom ...]     (rewrites in place; prints one line per file)
        from dual_target import apply; text = apply(text)
 """
@@ -27,13 +33,34 @@ import os
 import re
 import sys
 
-SUFFIX = "_rdna4"
+
+def _rows():
+    """(base target symbol, twin target symbol, twin suffix, header text, preset suffix of the twin family's device, {device: preset suffix}) from the device registry (skills/loom-kb/device/<family>/family.json).
+    The registry is found next to the skills (LOOM_SKILLS, else relative to this file); a kit copied outside the skills tree falls back to the
+    rows below, which tests/test_registry.py keeps equal to the registry's."""
+    try:
+        skills = os.environ.get("LOOM_SKILLS") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+        sys.path.insert(0, os.path.join(skills, "loom-kb"))
+        try:
+            import registry
+        finally:
+            sys.path.pop(0)
+        r = registry.dual_target()
+        suffixes = {k: d["preset_suffix"] for k, d in registry.devices().items() if d.get("preset_suffix")}
+        twin = registry.families()[next(f for f, v in registry.families().items() if v.get("dual_target") and not v.get("base"))]["devices"][0]
+        return r["base"], r["twins"][0], r["suffix"], r["header"], suffixes[twin], suffixes
+    except (ImportError, OSError, KeyError):
+        return ("rdna3", "rdna4", "_rdna4",
+                "target.decl @device\namdgpu.target<gfx11-generic> @rdna3\namdgpu.target<gfx12-generic> @rdna4\n\n", "-r9700",
+                {"radeon-rx7900xtx": "-rx7900xtx", "radeon-r9700": "-r9700"})
+
+
+BASE, TWIN, SUFFIX, HEADER, R9700_PRESET_SUFFIX, PRESET_SUFFIXES = _rows()
+# PRESET_SUFFIXES {device: suffix}: build.py's extra preset of a device `<preset><suffix>` (--prefill-device DEVICE=N); R9700_PRESET_SUFFIX is the twin
+# family's (gfx12) first device's, the alias of --prefill-r9700
 KERNEL_DEF = re.compile(r"^kernel\.def\b(?P<attrs>.*?)\s@(?P<sym>\w+)\(")
 LAUNCH = re.compile(r"^(\s*)kernel\.launch @(\w+)\[([^\]]*)\]\((.*)\) : \[([^\]]*)\]\((.*)\)\s*$")
 PROGRAM_DEF = re.compile(r"^(command\.program\.def\s+(?:public\s+)?)(?!target\()(@)", re.M)
-HEADER = ("target.decl @device\n"
-          "amdgpu.target<gfx11-generic> @rdna3\n"
-          "amdgpu.target<gfx12-generic> @rdna4\n\n")
 
 
 def enabled():
@@ -57,13 +84,84 @@ def _split_top(s):
     return parts
 
 
+def select_mode():
+    """"launch" (per-launch template.apply) or "program" (one template.apply per command program), from env LOOM_DUAL_SELECT."""
+    v = os.environ.get("LOOM_DUAL_SELECT", "launch").strip().lower()
+    if v not in ("launch", "program"):
+        raise ValueError(f"LOOM_DUAL_SELECT={v!r}: expected launch or program")
+    return v
+
+
+PROGRAM_HEAD = re.compile(r"^command\.program\.def\s+(?:public\s+)?@(\w+)\(\)\s+launch\((.*)\)\s*\{\s*$")
+
+
+def _program_blocks(lines, tw):
+    """[(start, end)] line ranges (end inclusive: the closing `}` at column 0) of the command programs that launch a twin
+    kernel of TW or carry a launch group."""
+    blocks, i = [], 0
+    while i < len(lines):
+        if lines[i].startswith("command.program.def"):
+            j = i + 1
+            while lines[j] != "}":
+                j += 1
+            if any(GROUP_BEGIN.match(l) or ((m := LAUNCH.match(l)) and m.group(2) in tw) for l in lines[i + 1:j]):
+                blocks.append((i, j))
+            i = j
+        i += 1
+    return blocks
+
+
+def _program_templates(block, tw, decls):
+    """The stub program for the command program BLOCK (its lines) and its template.decl / providers appended to DECLS."""
+    m = PROGRAM_HEAD.match(block[0])
+    if not m:
+        raise ValueError(f"dual-target select=program: cannot read the program header: {block[0][:120]}")
+    name, params = m.groups()
+    ps = _split_top(params)
+    names = ", ".join(p.split(":")[0].strip() for p in ps)
+    types = ", ".join(p.split(":", 1)[1].strip() for p in ps)
+    body = block[1:-1]
+    if not body or body[-1].strip() != "command.return":
+        raise ValueError(f"dual-target select=program: @{name} does not end in command.return")
+    body = body[:-1]
+    by = {BASE: [], TWIN: []}
+    i = 0
+    while i < len(body):
+        gm = GROUP_BEGIN.match(body[i])
+        if gm:
+            ind, alt = gm.groups()
+            j = i + 1
+            while not GROUP_END.match(body[j]):
+                by[BASE].append(body[j])
+                j += 1
+            by[TWIN].append(ind + alt)
+            i = j + 1
+            continue
+        lm = LAUNCH.match(body[i])
+        if lm and lm.group(2) in tw:
+            by[BASE].append(body[i])
+            ind, k, grid, args, gty, aty = lm.groups()
+            by[TWIN].append(f"{ind}kernel.launch @{k}{SUFFIX}[{grid}]({args}) : [{gty}]({aty})")
+        else:
+            by[BASE].append(body[i])
+            by[TWIN].append(body[i])
+        i += 1
+    tname = f"{name}_body"
+    decls.append(f"template.decl @{tname}({params})")
+    for tgt in (BASE, TWIN):
+        decls.append(f"template.def<@{tname}> target(@{tgt}) @{tname}_{tgt}({params}) {{")
+        decls += by[tgt]
+        decls.append("  template.return\n}")
+    return [block[0], f"  template.apply<@{tname}>({names}) : ({types})", "  command.return", "}"]
+
+
 def twins(text):
     """Symbols K of the kernels that have a `K_rdna4` kernel in TEXT."""
     syms = {m.group("sym") for l in text.split("\n") if (m := KERNEL_DEF.match(l))}
     return sorted(k for k in syms if k + SUFFIX in syms)
 
 
-GROUP_BEGIN = re.compile(r"^(\s*)// dual-group: rdna4 (kernel\.launch .*)$")
+GROUP_BEGIN = re.compile(r"^(\s*)// dual-group: " + TWIN + r" (kernel\.launch .*)$")
 GROUP_END = re.compile(r"^\s*// dual-group: end\s*$")
 
 
@@ -109,10 +207,10 @@ def _groups(lines, decls, sigs):
                 gp = [f"%p{next(pos)}" for _ in g]
                 ap = [f"%p{next(pos)}" for _ in a]
                 lines3.append(f"  kernel.launch @{k}[{', '.join(gp)}]({', '.join(ap)}) : [{', '.join(gt)}]({', '.join(at)})")
-            decls.append(f"template.def<@{name}> target(@rdna3) @{name}_rdna3({ps}) {{")
+            decls.append(f"template.def<@{name}> target(@{BASE}) @{name}_{BASE}({ps}) {{")
             decls += lines3[:-1]
             decls.append("  template.return\n}")
-            decls.append(f"template.def<@{name}> target(@rdna4) @{name}_rdna4({ps}) {{")
+            decls.append(f"template.def<@{name}> target(@{TWIN}) @{name}_{TWIN}({ps}) {{")
             decls.append(lines3[-1])
             decls.append("  template.return\n}")
         out.append(f"{ind}template.apply<@{sigs[key]}>({', '.join(names)}) : ({', '.join(types)})")
@@ -120,10 +218,13 @@ def _groups(lines, decls, sigs):
     return out
 
 
-def apply(text, enable=None):
-    """TEXT made dual-target; unchanged when it has no twin kernels (or the pass is off)."""
+def apply(text, enable=None, select=None):
+    """TEXT made dual-target; unchanged when it has no twin kernels (or the pass is off). SELECT: "launch" or "program"
+    (default: env LOOM_DUAL_SELECT)."""
     if enable is None:
         enable = enabled()
+    if select is None:
+        select = select_mode()
     if not enable or "target.decl @device" in text:
         return text
     tw = set(twins(text))
@@ -142,7 +243,7 @@ def apply(text, enable=None):
         sym = m.group("sym")
         base = sym[:-len(SUFFIX)] if sym.endswith(SUFFIX) and sym[:-len(SUFFIX)] in tw else sym
         if base in tw and "target(" not in m.group("attrs"):
-            l = l.replace("kernel.def ", f"kernel.def target(@{'rdna4' if sym != base else 'rdna3'}) ", 1)
+            l = l.replace("kernel.def ", f"kernel.def target(@{TWIN if sym != base else BASE}) ", 1)
         out.append(l)
         i += 1
         while lines[i] != "}":
@@ -153,6 +254,15 @@ def apply(text, enable=None):
         if base in tw or sym.endswith(SUFFIX):
             last_def_end = len(out)
     decls, sigs, res = [], {}, []
+    if select == "program":
+        stubs, rebuilt, pos = [], [], 0
+        for a, b in _program_blocks(out, tw):
+            if a < last_def_end:
+                raise ValueError(f"program {out[a][:80]} starts before the end of its twin kernels")
+            rebuilt += out[pos:a] + [f"\0PROGRAM{len(stubs)}\0"]
+            stubs.append(_program_templates(out[a:b + 1], tw, decls))
+            pos = b + 1
+        out = rebuilt + out[pos:]
     out = _groups(out, decls, sigs)
     for idx, l in enumerate(out):
         m = LAUNCH.match(l)
@@ -169,7 +279,7 @@ def apply(text, enable=None):
                 gv = ", ".join(f"%g{j}" for j in range(len(gt)))
                 av = ", ".join(f"%a{j}" for j in range(len(at)))
                 decls.append(f"template.decl @{name}({', '.join(ps)})")
-                for tgt, kk in (("rdna3", k), ("rdna4", k + SUFFIX)):
+                for tgt, kk in ((BASE, k), (TWIN, k + SUFFIX)):
                     decls.append(f"template.def<@{name}> target(@{tgt}) @{name}_{tgt}({', '.join(ps)}) {{")
                     decls.append(f"  kernel.launch @{kk}[{gv}]({av}) : [{', '.join(gt)}]({', '.join(at)})")
                     decls.append("  template.return\n}")
@@ -178,7 +288,11 @@ def apply(text, enable=None):
             res.append(l)
     # res has one line per line of out: the templates go right after the last twin kernel
     res = res[:last_def_end] + ([""] + decls if decls else []) + res[last_def_end:]
-    body = PROGRAM_DEF.sub(r"\1target(@device) \2", "\n".join(res))
+    body = "\n".join(res)
+    if select == "program":
+        for n, stub in enumerate(stubs):
+            body = body.replace(f"\0PROGRAM{n}\0", "\n".join(stub))
+    body = PROGRAM_DEF.sub(r"\1target(@device) \2", body)
     return HEADER + encodings_first(body)
 
 
@@ -224,7 +338,7 @@ def encodings_first(text):
 
 def apply_file(path):
     with open(path, encoding="utf-8", newline="") as f:
-        text = f.read()
+        text = f.read().replace("\r\n", "\n")   # a file written in text mode on Windows has CRLF line ends; the pass works on LF lines
     new = apply(text)
     if new != text:
         with open(path, "w", encoding="utf-8", newline="\n") as f:

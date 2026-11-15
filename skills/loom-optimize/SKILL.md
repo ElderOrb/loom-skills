@@ -14,34 +14,15 @@ and in every new shell; it is not the working directory or SDK root. On Windows,
 paths for file tools; `/c/...` paths belong to Git Bash. Never run an unresolved placeholder. Run bundled commands by quoted absolute path; do not run `scripts/...` from the working directory
 or change into the installed skill tree. Install the complete Loom suite: sibling paths are required.
 
-Before you start you need:
-- a package that passes the golden gate (`loom-port-llm` + `loom-benchmark`);
-- a baseline row in `perf_log.jsonl`;
-- llama.cpp ROCm numbers on the same GGUF and workloads;
-- **targets from `loom-roofline`** (`bench/roofline.json`; `qualify.sh` writes it in an
-  end-to-end job). If the user said "optimize this" with no target or time, run
-  `loom-roofline` first, announce the targets and the budget (section 0 there), then loop
-  here under its rate controller. Don't ask the user to pick a number, and don't stop
-  after the first win.
+Before you start you need a package that passes the golden gate (`loom-port-llm` + `loom-benchmark`), a baseline row in
+`perf_log.jsonl`, llama.cpp ROCm numbers on the same GGUF and workloads, and **targets from `loom-roofline`**
+(`bench/roofline.json`; `qualify.sh` writes it). If the user gave no target or time, run `loom-roofline` first, announce the
+targets and the budget (its section 0), then loop here under its rate controller: don't ask for a number, and don't stop
+after the first win.
 
-**Start from the reference.** Before measuring anything, read what the closest category A loom-fun package already
-settled (`loom-port-llm/find_reference.py show WORK/reference.json`, written by port.sh; or `show loom-fun/REPO`):
-its drafting choice and measured table, execution settings (prefill chunk), llama.cpp baseline arguments, margins
-per metric and gates. Try its kept settings first and skip A/Bs it already decided for the same architecture; its
-choices are a starting point to re-measure on this model, never a result to copy onto the card.
+**Start from the reference** (a published package's settled choices): loom-kb topic `reference`, "Optimizing".
 
-**Fast iteration (the budget is short).**
-- Build each variant into its own package dir with its own `--model-id`, and serve the
-  baseline and the variant in ONE loom-serve (`serve.sh NAME PORT amdgpu MEM a/model.json
-  b/model.json`), then alternate requests: an interleaved A/B is both faster and more
-  reliable than restarting servers between runs. Use `--context 8192` for A/B packages
-  (faster to serve, same kernels) and rebuild the winner at full context for the gates.
-  Give that server headroom: `--memory_bytes` well above the sum of build.py's per-package
-  figures (a tight budget skewed an A/B by model order).
-- Generator switches (env vars) make a variant a rebuild, not an edit: try those first.
-- `perf.py` takes 1–3 min; for a decision on one metric, time just that metric
-  (e.g. `bench_common.stream()` on the decode prompt, 3–5 interleaved rounds) and run the
-  full `perf.py` only on the build you keep.
+**Mechanics** (fast iteration, kernel A/B, gates, measuring and recording, pitfalls) are the loom-kb topic `optimize-loop`; levers: "Levers" below. Build every variant in its own package dir behind an env switch and A/B it interleaved on one server.
 
 ## The loop (one change at a time)
 
@@ -49,147 +30,27 @@ choices are a starting point to re-measure on this model, never a result to copy
    `c4_steady.py 4`. Work on the headline metric furthest below its
    `loom-roofline` target, measured in milliseconds per token of gap, not in
    percent.
-2. **Attribute by ablation.** Hardware counters are unavailable (`loom-benchmark`
-   counters are UNIMPLEMENTED on gfx1151). Instead, launch a kernel twice (or skip it)
-   and measure end to end: `"${LOOM_SKILL_DIR}/ablate.py" PKG pkg_abl '@attn_decode'`
-   writes the copy with its own model id; serve both in one loom-serve and run
-   `ab_perf.py URL <id> <id>-abl-<name>`. The delta is that kernel's cost. Wrong outputs
-   are fine for an ablation build; never ship one.
-3. **Change one thing** in the generator: kernel shape, fusion, tiling or dispatch.
-   Keep the old variant behind an env switch (like `GEMM_SKIP_PADDING`, `GEMM_N_FASTEST`,
-   `FLASH2_KT`; both GEMM switches are on by default, `=0` turns one off).
-4. **Kernel A/B test.** `python "${LOOM_SKILL_DIR}/ab_kernel.py" OLD/program/llm.loom
-   NEW/program/llm.loom KERNEL ab.loom-test` puts the old kernel next to the new one
-   as `KERNEL_old`; its docstring has a case skeleton. Launch both on identical
-   inputs in a `check.case` and compare with `check.expect.approximate`. Include a
-   **negative control**: an assertion that the output is not the initial fill,
-   because two kernels that both write nothing agree. Put it in a separate case that
-   is expected to fail and run `loom-test ab.loom-test --device=amdgpu
-   --xfail=@ab_negative_control=EXPECT/003`; the skeleton in ab_kernel.py shows it. Use the real shapes, including edge counts
-   (t=1, t=4, t=63/64, a partial last tile, mixed-sequence tiles, the full context).
-   Run it with `loom-test` (see the cookbook in `loom-port-llm/reference/`).
-   **No local GPU free?** A/B kernel timings on DevLab with the `devlab-kbench` workflow: put the
-   self-contained bench files (kernel plus a `check.case` and `check.benchmark`, kernels named `k_*`) in
-   `.github/devlab/kbench/<suite>/`, list them in `.github/devlab/kbench.json` (first file is the baseline), push a
-   branch and add the PR label `devlab-kbench` (`gh api -X POST repos/OWNER/REPO/issues/N/labels -f 'labels[]=devlab-kbench'`).
-   Each suite runs its variants interleaved on one runner and publishes a median-ms table with % vs base as a step
-   summary and artifact. Timing only: keep correctness checks in `loom-test`. See `.github/devlab/kbench/example/`.
-5. **End-to-end gates.** `LEVEL=dev gates.sh PKG URL GGUF BENCH_DIR` (`loom-benchmark`):
-   - `consistency.py`: concurrent outputs must equal sequential outputs, and a prompt repeated
-     alone must repeat exactly. This catches mixed-tile, padding and race bugs that single
-     requests never hit (3 of the 8 real bugs the gates ever caught).
-   - `agent_golden.py`: the multi-turn tool loop (rendering, history reuse, stop tokens; thinking
-     on and off). 3–4 of the 8.
-   - `compare.py` on 12 short prompts and the 1k/2k goldens. Every divergence must be a near-tie
-     (the compare rule, `bench_common.near_tie`). A new divergence with a large gap is a bug even
-     if the text "looks fine".
-   - a light touch of the rest: 2 images, 5–6 short drafted-vs-undrafted requests, sampling
-     semantics.
-   The llama.cpp goldens come from the cache `qualify.sh` filled, so this costs only the Loom
-   side (a few minutes; `loom-benchmark` has the measured times). Kernel tests (step 4) for every new or changed
-   kernel and `chat_probe --verify` for a chat-glue change come first: they are cheaper and
-   more specific. Run the gates only on a build you intend to keep (it won on perf): a reverted
-   build needs no gates. Don't run `LEVEL=quick`/`full` in the loop: they run nightly on the
-   published cards (a 24-run `quick` loop cost 6.6 GPU-hours and caught nothing `dev` misses).
-6. **Measure again** on the same workloads. Run `perf.py` from `bench/` with a
-   label for the build (add `--reverted` if you discard it). It logs the result
-   and prints the controller verdict by itself. Keep the change only if it wins on the
-   target metric and doesn't regress the others by more than noise (±2–3 %; run
-   twice when it's close). Commit it with the numbers in the message. Keep the work dir (cfg.json, any
-   generator copies you modified, the bench/ logs) under git: run `git init` once
-   in the work dir, and gitignore everything big or regenerated: `pkg*/ ktest*/ gguf/ tok/ llamacpp*/ state/
-bench/llama_cache/` (a trial staged 5 GB of ktest/ and llama.cpp builds and `git add` hung). If the user doesn't
-   want commits, skip git and rely on `bench/decisions.jsonl` plus a copy of each kept
-   generator (`starter_<label>/`); `perf.py` then logs commit `-`.
-   When you change the starter's generators, copy `starter/` into the work dir
-   first and edit the copy. Act on the verdict that `perf.py` prints:
-   - CONTINUE: keep going on this path;
-   - REVIEW: re-ablate, then pivot or stop. Forking from an earlier decision is an
-     option;
-   - BUDGET: wrap up;
-   - DONE: move to the next metric.
+2. **Attribute by ablation** (no hardware counters on gfx1151; `ablate.py` launches a kernel twice, the end-to-end delta is its cost): topic `optimize-loop`, "Steps 2 and 3".
+3. **Change one thing** in the generator, the old variant behind an env switch.
+4. **Kernel A/B test** (`ab_kernel.py`, with a negative control; DevLab `devlab-kbench` when no GPU is free): topic `optimize-loop`, "Step 4".
+5. **End-to-end gates** on a build you intend to keep (`LEVEL=dev gates.sh`; never `quick`/`full` in the loop): topic `optimize-loop`, "Step 5".
+6. **Measure again** with `perf.py` from `bench/` (label, `--reverted` for a discarded build); keep a change only if it wins the target metric
+   and regresses no other by more than noise. Act on the verdict it prints (CONTINUE, REVIEW, BUDGET, DONE) and record decisions in
+   `bench/decisions.jsonl`: topic `optimize-loop`, "Step 6".
 
-   Record design choices, including the rejected options and their numbers, in
-   `bench/decisions.jsonl`, one JSON object per line (report.py renders it):
-   `{"ts": "...", "decision": "prefill chunk", "chosen": "2048", "rejected": [{"option": "4096", "measured": "1k -12 %", "why": "slower short prefill"}]}`.
+Pitfalls (a busy GPU, microbenchmarks, prefix caching): topic `optimize-loop`; Strix-specific ones are in the device node.
 
-## Measurement pitfalls
+## Levers and what is known (loom-kb)
 
-- **A busy GPU makes single runs meaningless** (check `pgrep -a 'loom-serve|llama-server'`):
-  the same build swings 30–50 %. A/B interleaved (Fast iteration, above) with
-  `"${LOOM_SKILL_DIR}/ab_perf.py" URL MODEL_A MODEL_B --metrics decode,prefill_1k,prefill_2k --rounds 5`:
-  medians, B/A and a WINS/LOSES/TIE verdict against the noise band, logged to `ab_log.jsonl`. Always
-  include the shortest size you report (a chunk size that won at 2k/8k lost 12 % at 1k on flint).
-  Measure llama.cpp right next to the final Loom run, and say in the report that the GPU was shared.
+Every lever, its numbers and the "did not help" lists are in the knowledge base, at the most specific scope. Route
+`--config PKG/llm_config.json --device DEVICE --topic optimize-loop,decode,prefill` (`kb.py route`, `loom-kb`; add
+`speculative,spec-tuning,long-context,concurrency,roofline` for those levers) and read what it prints: do not re-run an A/B a
+node already settled. A lever you add goes to the node it was measured at, opt-in by scope.
 
-- **Microbenchmarks lie through the 32 MB MALL.** A kernel benchmark whose weights
-  or KV fit in 32 MB shows 2–5× the DRAM bandwidth. Use full-size tensors (all
-  layers) or end-to-end numbers.
-- **...and through constant data.** Strix Halo's GPU is power-limited: WMMA on constant operands runs
-  52–57 TOPS, on random operands ~40 (wave32) / ~43 (wave64), for f16 and int8 alike. A prefill GEMM fed
-  `check.generate.fill` constants read 36 TFLOP/s; with the GGUF's real weights and random activations
-  30 (the model measured 28). Feed compute-bound benchmarks real weights (`check.file.read.npy`) and
-  random activations before trusting a kernel A/B.
-- **Prefix caching.** Start every timed prompt with a nonce, as `perf.py` does.
-- Lazy weight load, stale servers on the port, server- vs client-side timing and near-tie
-  noise: see the `loom` hard rules and `loom-benchmark`.
+## Mandate
 
-## Catalog: what worked (Strix Halo gfx1151, measured end to end)
-
-`reference/optimization-catalog.md` has each lever with its rationale and numbers. Decode (bandwidth-
-bound): multi-token matvec, adaptive rows per workgroup, Q4_K scale/min folding, fused QKV and paired-row
-gate/up, argmax head, adaptive split-K attention, F16 KV. Prefill (compute/attention-bound): WMMA GEMMs on
-row-scaled f16 (N-fastest order: A/B it per port), padding-free tiles, flash2, listed fallback, per-token
-RoPE + KV store, fused norm + row scale, prefill chunk size. Apply them in catalog order.
-
-**Settled for starter ports (dense / Qwen3.5 hybrid, ≤ 4B): don't re-run these A/Bs.** Fresh-agent
-trials re-tested them on Qwen3.5-0.8B and the defaults won or tied every time:
-`GEMM_N_FASTEST=0` (slower prefill, 3 trials), `MV_WG1=1024` (no decode win), `--prefill 4096`
-(short prefill −20–37 %; 2048 ≈ 1024 within noise). On the R9700 (64 CUs) the larger chunk wins for small models (hidden size ≤ 2048: Qwen3-0.6B +7..+24 %, Gemma-4-E2B +5..+15 %, Qwen3-1.7B +11..+18 % from 8k) and loses at 1k/2k on big ones (Qwen3-14B −8/−5 %): `build.py --prefill-r9700 N` (or `prefill_capacity_r9700` in llm_config.json) adds a second preset `<preset>-r9700` that only the R9700 Quick start fetches. On a starter port, spend the budget on fusion
-(fewer launches per layer: fused QKV or norm fusion, which you write in a copy of the generator; pairing Qwen3.5's tiny GDN alpha/beta matvecs
-measured neutral) or on the long
-prefill path. Bigger or MoE models: the chunk size is worth one A/B measured at 1k too (4096 helped
-one MoE port; 2048 and 4096 both cost 12-18 % at 1k on flint).
-
-**Folded into the starter from trials** (already on; don't redo): the gated delta-net conv and
-history-commit kernels spread channels over `GDN_CB` workgroups per token when fewer than 64
-tokens are in flight (Qwen3.5-0.8B decode +18 %, identical output; `GDN_CB=1` restores the old grid).
-
-**Tried and did not help** (don't repeat without a new reason): see the catalog's "Did not help".
-
-**Speculative decoding** (on by default when the GGUF has an MTP block or a DFlash drafter exists;
-`loom-port-llm/starter/draft/README.md`; n-gram is opt-in, `TUNE_NGRAM=1`, never on a card). `qualify.sh` chose the method and depth by
-measurement (`bench/draft_tune.json`); card comparisons use the model's classified drafting choice on both engines
-(`loom-benchmark/reference/methodology.md`), so decode targets are drafting vs drafting; re-run `draft/tune.py WORKDIR PORT MEMORY_GIB MODEL_ID` after a change that moves
-the decode/verify balance (it rebuilds `pkg`). On a bandwidth-bound model it is the biggest decode lever
-(Qwen3.8-27B Q4_K_M: 12.8 -> 21.0 tok/s with MTP depth 3); on small launch-bound models it loses (Qwen3.5-0.8B:
-262 -> 208) and tune.py keeps it off. The multi-token target step that used to cap it (issue #21: f32 activations
-in the 4-token matvec, 192+ VGPRs per lane) is fixed in the starter: decode-shaped linears and the head use int8
-activations with integer dot4 contractions (`ACT_Q8`, llama.cpp's mul_mat_vec_q numerics), with 1-/4-/8-/16-token
-variants that round each token like 1-token decode (`draft/README.md` "Limits"). Remaining levers: verify epochs
-of 17+ tokens (many drafting streams) take the WMMA GEMM; long-context verify pays decode attention per token (draft/README.md), drafter catch-up cost at prefill, and the MoE expert
-matvecs (starter `gen_moe.py`, the lfm2moe kit), which still use f32 activations. Every change
-here must keep the `spec` gate exact.
-
-## Where the remaining gap usually is
-
-- **Prefill GEMM efficiency.** Q4_K GEMMs run ~28 TFLOP/s in the model (~30 on real data in isolation), ~70 %
-  of the real-data WMMA ceiling (~40–43 TOPS, see above); gufo (an engine tuned for this chip) reaches ~80 %
-  with int8 (W8A8 / K-quant×Q8_1) wave64 GEMMs, which halve LDS and activation traffic, and fused
-  norm/SwiGLU→Q8_1 epilogues. int8 WMMA is not faster per instruction here (same ~40 TOPS on real data), so
-  the gain is energy: fewer bytes moved per MAC. Tried here and slower on real data: a wave64 port of the f16
-  GEMM through transposed fragment loads (27.6 vs 30.5 TFLOP/s) and llama.cpp's mmq formulation
-  (`gen_gemm.gemm_q8`: Q8_1 activations x Q4_K codes on int8 WMMA, 20.7; 26.2 even with the per-block scaling
-  removed): the f16 kernel's staging pipeline is the better one; an int8 kernel would need gufo's deeper
-  pipelining to pay off.
-- **Gated delta-net prefill** (hybrids): the register recurrence steps through the chunk token by token
-  (Qwen3.8-27B: 0.14 ms/token of 2.3, all GDN kernels 0.27); a chunked (WY / parallel-scan) form is the lever.
-- **Small models** (≤ 1B), for example Qwen3-0.6B: decode at 2k context ran 179
-  vs 193 tok/s for llama.cpp. There, the attention and launch overhead per layer
-  dominates rather than weight bandwidth. Fewer, fused launches per layer, and
-  fewer splits when context is short, are the levers.
-- **MoE decode** is bound by the expert gather: batch the active experts' matvecs
-  per token group.
+Declare the scope first, work only inside it, opt in by scope, run `fleet/scope_lint.py` before the PR, stop on
+out-of-mandate needs: `loom-kb/SKILL.md` ("Mandate rules").
 
 ## Reporting a win
 
@@ -197,4 +58,4 @@ Report only numbers from the same machine, the same GGUF, the same workloads and
 the same session, with llama.cpp ROCm beside them, plus the correctness gate
 summary. See `loom-benchmark`. For each metric, include its target, its % of
 ceiling and whether it was met. Add the result to
-`loom-roofline/reference/calibration.md`.
+the loom-kb `roofline` topic (`kb.py route --topic roofline`).
