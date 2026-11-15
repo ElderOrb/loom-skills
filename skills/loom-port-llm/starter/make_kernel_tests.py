@@ -1220,6 +1220,102 @@ if (HEAD_Q8 and HEAD_FMT in ("q8_0", "bf16", "f16") and H % 32 == 0 and (cfg.get
 """ + phl("g_head_mv_q8_p40", "1") + "".join(phl(k, tag) for k, tag in pv) + f"""  check.expect.close actual(%l1) expected(%le) atol({tol:.3e}) rtol(0.0) nan(different) : tensor<{S * CHP}xf32>
 """ + "".join(f"  check.expect.close actual(%l{tag}) expected(%l1) atol(0.0) rtol(0.0) nan(different) : tensor<{S * CHP}xf32>\n"
               f"  check.expect.equal actual(%p{tag}) expected(%p1) : tensor<{S * CH * 2}xi32>\n" for _, tag in pv) + "  check.return\n}\n")
+# 3a'''. MTP proposals over a reduced draft vocabulary (draft/prep_weights.py, PROPOSE_HEAD_ROWS=N): g_prep_q6_k_q4_0 converts rows
+# [0, N) + the added-token rows of the Q6_K head to Q4_0 (llama.cpp dequantize_row_q6_K numerics, then quantize_row_q4_0), the int8
+# head runs over the copy (logits vs numpy), and g_head_select_p maps a winning row back to its token id (synthetic partials: a head
+# row, a tail row, an end-of-turn token). The split / shift the generator baked into g_head_select_p are read from the package's llm.loom.
+def _phead_params():
+    import glob, re
+    d = os.path.dirname(os.path.abspath(sys.argv[1]))
+    cands = [os.path.join(d, g) for g in ("pkg/program/llm.loom", "*/pkg/program/llm.loom")] \
+        + [os.path.join(os.path.dirname(d), g) for g in ("pkg/program/llm.loom", "*/pkg/program/llm.loom")]
+    for c in cands:
+        for f in glob.glob(c) if c else []:
+            t = open(f, errors="replace").read()
+            i = t.find("@g_head_select_p(")
+            m = re.search(r"%split = scalar\.constant (\d+) : i32\n\s*%shift = scalar\.constant (\d+) : i32", t[i:]) if i >= 0 else None
+            if m:
+                return int(m.group(1)), int(m.group(2))
+    return None
+
+
+_PH = _phead_params() if (HEAD_Q8 and HEAD_FMT == "q6_k" and H % 256 == 0 and (cfg.get("mtp") or cfg.get("drafter"))) else None
+if _PH:
+    split_rows, shift = _PH
+    base_tok = split_rows + shift                     # first added-token id; the copy holds rows [0, split_rows) + [base_tok, V)
+    V_ = cfg["vocab"]; rows_p = split_rows + V_ - base_tok; CHp = (rows_p + 127) // 128
+    sel = np.concatenate([np.arange(split_rows), np.arange(base_tok, V_)])
+    Wp = Wh[sel].astype(np.float32); blk = Wp.reshape(-1, 32)
+    m = blk[np.arange(len(blk)), np.abs(blk).argmax(1)]
+    d4 = m / np.float32(-8)
+    id4 = np.divide(np.float32(1), d4, out=np.zeros_like(d4), where=d4 != 0)
+    c4 = np.minimum(np.float32(15), np.floor(blk * id4[:, None] + np.float32(8.5)))
+    W4 = ((c4 - 8) * d4.astype(np.float16).astype(np.float32)[:, None]).reshape(Wp.shape)
+    del blk, c4, Wp
+    S, nb = 8, rows_p * H // 32
+    hm = np.zeros(4 + 9 * S, np.int32); hm[0] = S
+    for j in range(S):
+        hm[4 + 9 * j + 0] = 1; hm[4 + 9 * j + 4] = j; hm[4 + 9 * j + 6] = 1
+    hp = rng.standard_normal((S, H)).astype(np.float32)
+    lp = (q8_ref(hp) @ W4.T).astype(np.float32)
+    del W4
+    CHP = CHp * 128
+    lpad = np.full((S, CHP), -3.0e38, np.float32); lpad[:, :rows_p] = lp
+    save("pr_meta", hm); save("pr_h", hp); save("pr_l", lpad.reshape(-1))
+    mt, ht, w4t = f"tensor<{hm.size}xi32>", f"tensor<{S}x{H}xf32>", f"tensor<{nb * 18}xi8>"
+    tol = 3.0e-2 * float(np.abs(lp).max())
+    skip_blocks = (base_tok - split_rows) * H // 32
+    def prl(k, tag):
+        return (f"  %p{tag} = check.generate.fill value(0) : tensor<{S * CHp * 2}xi32>\n  %l{tag} = check.generate.fill value(0.0) : tensor<{S * CHP}xf32>\n"
+                f"  kernel.launch @{k}[%spans](%spans, %t, %meta, %hq, %w4, %p{tag}, %l{tag}) : [index](index, index, {mt}, tensor<{S}x{2 * H}xi8>, {w4t}, tensor<{S * CHp * 2}xi32>, tensor<{S * CHP}xf32>)\n")
+    pv = [("g_head_mv_t4_q8_p40", "4"), ("g_head_mv_t8_q8_p40", "8"), ("g_head_mv_t16_q8_p40", "16")]
+    cases.append(f"""check.case public @propose_head_rows {{
+  %spans = check.literal value({S}) : index
+  %t = check.literal value({S}) : index
+  %b = check.literal value({nb}) : index
+  %o = check.literal value(0) : i64
+  %sp = check.literal value({split_rows * H // 32}) : i64
+  %sk = check.literal value({skip_blocks}) : i64
+  %meta = check.file.read.npy path("pr_meta.npy") : {mt}
+  %h = check.file.read.npy path("pr_h.npy") : {ht}
+  %w = check.file.read.npy path("hd_w.npy") : {hwt}
+  %le = check.file.read.npy path("pr_l.npy") : tensor<{S * CHP}xf32>
+  %w4 = check.generate.fill value(0) : {w4t}
+  kernel.launch @g_prep_q6_k_q4_0[%b](%b, %o, %sp, %sk, %w4, %w) : [index](index, i64, i64, i64, {w4t}, {hwt})
+  %hk = check.literal value({H}) : index
+  %hq = check.generate.fill value(0) : tensor<{S}x{2 * H}xi8>
+  kernel.launch @g_quant_q8[%t, %hk](%t, %hk, %h, %hq) : [index, index](index, index, {ht}, tensor<{S}x{2 * H}xi8>)
+""" + prl("g_head_mv_q8_p40", "1") + "".join(prl(k, tag) for k, tag in pv) + f"""  check.expect.close actual(%l1) expected(%le) atol({tol:.3e}) rtol(0.0) nan(different) : tensor<{S * CHP}xf32>
+""" + "".join(f"  check.expect.close actual(%l{tag}) expected(%l1) atol(0.0) rtol(0.0) nan(different) : tensor<{S * CHP}xf32>\n"
+              f"  check.expect.equal actual(%p{tag}) expected(%p1) : tensor<{S * CHp * 2}xi32>\n" for _, tag in pv) + "  check.return\n}\n")
+    # g_head_select_p: span j's best row sits in chunk j (value 1 + j); span 0: a head row, span 1: a tail row, span 2: an end-of-turn
+    # token (-> the metadata's eos), span 3: the last row. Rows -> token ids: row < split is the id, from there + shift.
+    eos_ids = list(cfg.get("extra_eos_ids", []))
+    rowsel = [7, split_rows + 3, (split_rows + eos_ids[0] - base_tok) if eos_ids and eos_ids[0] >= base_tok else 11, rows_p - 1]
+    eosv = cfg["eos_id"]
+    want = [r if r < split_rows else r + shift for r in rowsel]
+    want = [eosv if w in eos_ids else w for w in want]
+    SS = len(rowsel)
+    part = np.zeros((SS, CHp, 2), np.int32)
+    part[:, :, 0] = np.float32(-1.0e30).view(np.int32)
+    for j, r in enumerate(rowsel):
+        part[j, r // 128, 0] = np.float32(1.0 + j).view(np.int32); part[j, r // 128, 1] = r
+    sm = np.zeros(4 + 9 * SS, np.int32); sm[0] = SS; sm[1] = eosv
+    for j in range(SS):
+        sm[4 + 9 * j + 6] = 1
+    save("ps_meta", sm); save("ps_part", part.reshape(-1)); save("ps_out", np.array(want, np.int32))
+    cases.append(f"""check.case public @propose_head_select {{
+  %spans = check.literal value({SS}) : index
+  %meta = check.file.read.npy path("ps_meta.npy") : tensor<{sm.size}xi32>
+  %part = check.file.read.npy path("ps_part.npy") : tensor<{part.size}xi32>
+  %want = check.file.read.npy path("ps_out.npy") : tensor<{SS}xi32>
+  %logits = check.generate.fill value(0.0) : tensor<{SS * CHP}xf32>
+  %got = check.generate.fill value(0) : tensor<{SS}xi32>
+  kernel.launch @g_head_select_p[%spans](%spans, %meta, %part, %logits, %got) : [index](index, tensor<{sm.size}xi32>, tensor<{part.size}xi32>, tensor<{SS * CHP}xf32>, tensor<{SS}xi32>)
+  check.expect.equal actual(%got) expected(%want) : tensor<{SS}xi32>
+  check.return
+}}
+""")
 # Drafter matrices without an int8 path (a vendor BF16/F16 DFlash drafter used as-is, cfg["drafter"]["gguf"]):
 # the f32-activation matvecs (1 and 4 tokens; gate/up pair) and the GEMMs (64-, 128- and 256-row tiles) the drafter's
 # propose / warm programs launch, one tensor per (format, K), vs float64 numpy on the dequantized weights. Rows per

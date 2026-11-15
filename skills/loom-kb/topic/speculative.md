@@ -89,6 +89,17 @@ parameter root, the target checkpoint through `head_weights.loom`, which convert
 the output does not change; only which drafts are proposed can (Bolt-E4B: acceptance 36 % -> 39 %, step 23.5 -> 22.1 ms
 on DevLab). `PROPOSE_HEAD=off` keeps the target's head. Kernel test `propose_head_q4`.
 
+**Reduced draft vocabulary (`PROPOSE_HEAD_ROWS=N`, choice `draft.propose.head_rows`, default 0 = off).** A Q6_K head
+(Qwen3.8-27B: 248320 x 5120, 1.04 GB) is read in full by every proposal round: depth 3 reads it 3 times per step on top
+of verification's own pass. With N > 0 the proposals read a load-time Q4_0 copy (18 bytes per 32 values) of head rows
+[0, N) plus the added-token rows (ids >= the tokenizer's base vocabulary: `<|im_end|>`, `<think>`, tool markers), so
+end-of-turn and tool markers stay proposable (FR-Spec / EAGLE-3 style draft vocabulary). `prep_weights.py` converts
+Q6_K (llama.cpp dequantize_row_q6_K, then quantize_row_q4_0) with a `split` / `skip` block map (`subset_entry`);
+`g_head_select_p` maps the winning row back to its token id (row < N: itself; else + base - N; DFlash2's `g_dfl_topk`
+does the same on its stored ids). Applies to `@llm_mtp_propose` and `@llm_dflash_propose`; verification keeps the
+target's head, so the output never changes, only which drafts are accepted. N = every row is a precision-only copy.
+Kernel tests `propose_head_rows`, `propose_head_select`.
+
 Files: `gen_draft.py` (verify, acceptance, GDN capture/replay, the generic replay hook, MTP), `gen_dflash.py`
 (DFlash/DFlash2), `gen_assist.py` (Gemma-4 assistant), `gen_ngram.py` (prompt lookup), `prep_weights.py` (load-time weight
 preparation: Q8_0 drafter, Q4_0 proposal head), `build_draft.py` (prepare/storage/control patches; ports without
