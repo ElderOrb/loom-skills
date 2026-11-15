@@ -1,5 +1,5 @@
 {
- "_comment": "phead round 3: N 80k-96k Q4_0 and Q6_K-kept subsets (q64, q96) vs base, two interleaved rounds, ktest of the Q6_K copy.",
+ "_comment": "phead round 4: N=72k/80k and depth 4 (R9700), then gates on N=80k; Strix Halo base vs N=80k.",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -15,6 +15,13 @@
      "context": 124928
     },
     {
+     "name": "ph72",
+     "build": {
+      "PROPOSE_HEAD_ROWS": "73728"
+     },
+     "context": 124928
+    },
+    {
      "name": "ph80",
      "build": {
       "PROPOSE_HEAD_ROWS": "81920"
@@ -22,50 +29,59 @@
      "context": 124928
     },
     {
-     "name": "ph88",
+     "name": "ph80d4",
      "build": {
-      "PROPOSE_HEAD_ROWS": "90112"
+      "PROPOSE_HEAD_ROWS": "81920"
      },
-     "context": 124928
+     "context": 124928,
+     "execution": {
+      "draft_depth": 4
+     }
     },
     {
-     "name": "ph96",
-     "build": {
-      "PROPOSE_HEAD_ROWS": "98304"
-     },
-     "context": 124928
+     "name": "based4",
+     "build": {},
+     "context": 124928,
+     "execution": {
+      "draft_depth": 4
+     }
+    }
+   ],
+   "steps": [
+    "perf:base:1",
+    "perf:ph72:1",
+    "perf:ph80:1",
+    "perf:ph80d4:1",
+    "perf:based4:1",
+    "perf:base:1",
+    "perf:ph72:1",
+    "perf:ph80:1",
+    "perf:ph80d4:1",
+    "perf:based4:1",
+    "gates:ph80:dev"
+   ]
+  },
+  {
+   "name": "phead-strix",
+   "runner": "strix",
+   "memory_bytes": 60000000000,
+   "variants": [
+    {
+     "name": "base",
+     "build": {}
     },
     {
-     "name": "q64",
+     "name": "ph80",
      "build": {
-      "PROPOSE_HEAD_ROWS": "65536",
-      "PROPOSE_HEAD": "q6_k"
-     },
-     "context": 124928
-    },
-    {
-     "name": "q96",
-     "build": {
-      "PROPOSE_HEAD_ROWS": "98304",
-      "PROPOSE_HEAD": "q6_k"
-     },
-     "context": 124928
+      "PROPOSE_HEAD_ROWS": "81920"
+     }
     }
    ],
    "steps": [
     "perf:base:1",
     "perf:ph80:1",
-    "perf:ph88:1",
-    "perf:ph96:1",
-    "perf:q64:1",
-    "perf:q96:1",
     "perf:base:1",
-    "perf:ph80:1",
-    "perf:ph88:1",
-    "perf:ph96:1",
-    "perf:q64:1",
-    "perf:q96:1",
-    "ktest:q96"
+    "perf:ph80:1"
    ]
   }
  ]
