@@ -5,39 +5,67 @@
  "llama_spec": "matched",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
+   "name": "llama-r9700",
    "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
    "kit": null,
    "llamacpp": "b1375",
    "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
    "variants": [
     {
      "name": "card",
      "build": {}
-    },
-    {
-     "name": "nodraft",
-     "build": {},
-     "execution": {
-      "draft_depth": 0
-     }
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
-   ]
+    "gates:card:dev"
+   ],
+   "runner": "r9700"
+  },
+  {
+   "name": "vllm-r9700",
+   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "llamacpp_vulkan": "b12211",
+   "variants": [
+    {
+     "name": "card",
+     "build": {}
+    }
+   ],
+   "steps": [
+    "vllmdet:card",
+    "gates:card:dev"
+   ],
+   "runner": "r9700",
+   "env": {
+    "REFERENCE_CHECKPOINT": "Qwen/Qwen3-0.6B",
+    "VLLM_VERSION": "0.18.0",
+    "VLLM_ROCM_VARIANT": "rocm700"
+   }
+  },
+  {
+   "name": "vllm-strix",
+   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "llamacpp_vulkan": "b12211",
+   "variants": [
+    {
+     "name": "card",
+     "build": {}
+    }
+   ],
+   "steps": [
+    "vllmdet:card",
+    "gates:card:dev"
+   ],
+   "runner": "strix",
+   "env": {
+    "REFERENCE_CHECKPOINT": "Qwen/Qwen3-0.6B",
+    "VLLM_VERSION": "0.18.0",
+    "VLLM_ROCM_VARIANT": "rocm700"
+   }
   }
  ],
  "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
