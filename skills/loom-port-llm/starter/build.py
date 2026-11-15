@@ -903,7 +903,7 @@ for part in GGUF_PARTS:
 DIALECT_KEYS = ("call_format", "call_arguments_key", "calls_open", "call_separator", "calls_close",
                 "thinking", "think_open", "think_end")
 dialect = {f"llm.chat.{k}": cfg["chat"][k] for k in DIALECT_KEYS
-           if isinstance(cfg.get("chat", {}).get(k), str)}
+           if isinstance(cfg.get("chat", {}).get(k), str) and cfg["chat"][k]}   # Loom refuses an empty config value
 card = {
     "schema_version": 1,
     "model": {"id": model_id, "name": f"{cfg.get('name', 'llm')} (Loom port, GGUF)"},

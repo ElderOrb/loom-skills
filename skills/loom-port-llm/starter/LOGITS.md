@@ -7,7 +7,7 @@ it is off at load and off per span, and the default stage compiles to the same c
 ## The chat dialect (for host grammars)
 A host that samples from the logits applies grammars (`tool_choice` required/named, strict schemas, response formats)
 to the model's own tokens, so it needs the model's native tool-call format and reasoning markers. `build.py` copies them
-from `llm_config.json`'s `chat` object into the same card config as `llm.chat.<key>` strings (`call_format`,
+from `llm_config.json`'s `chat` object into the same card config as `llm.chat.<key>` strings (non-empty: `call_format`,
 `call_arguments_key`, `calls_open`, `call_separator`, `calls_close`, `thinking`, `think_open`, `think_end`, when set):
 `model.json` is what loom-fetch delivers, `llm_config.json` is not. Loom and loom-serve ignore the keys.
 
