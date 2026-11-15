@@ -399,6 +399,7 @@ NOT("build input with a command-line twin: the drafting config of a package is l
 NOT("machine memory facts used to size context and pool in model.json (build.py memory_cap), not a model choice",
     "LOOM_MEMORY_CAP_GIB", "LOOM_RESERVED_GIB")
 NOT("checkpoint selection (the quantization is never a knob: plain Q4_K_M as on the cards)", "QUANT_TIER")
+NOT("credential of the Hugging Face range reads (inspect_safetensors.py), never part of a build", "HF_TOKEN")
 NOT("catalog build switch: hand-written catalog packages are exempt from resolution (build.py hands over before it)", "VISION")
 NOT("provenance of a snapshot build (the stamp records it), not a model choice", "LOOM_SKILLS_COMMIT")
 NOT("profiling ablation or debug switch, never part of a published build", "FLASH2_ABL", "DBG_NO_FLASH", "DBG_NO_GEMM")
