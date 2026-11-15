@@ -14,8 +14,17 @@ A policy's prepare_weight(key) returns the prepared byte length (0 = keep the fi
 program, llm_prep_<src>_<dst> (llm.loom), that reads the staged source tensor (llm.prep_input) and writes the prepared
 one: one lane per 32-value block, llama.cpp's quantize_row_q8_0 / quantize_row_q4_0 numerics."""
 
-SRC = {"bf16": 64, "f16": 64, "q8_0": 34}     # bytes per 32 values of a source the converter reads
-DST = {"q8_0": 34, "q4_0": 18}                # ... of a prepared format
+SRC = {"bf16": 64, "f16": 64, "q8_0": 34, "bf16e": 2}     # bytes per 32 values of a source the converter reads (bf16e: per element)
+DST = {"q8_0": 34, "q4_0": 18, "f32_copy": 4, "f32_add1": 4, "f32_negexp": 4}   # ... of a prepared format (f32_*: per element)
+
+# Elementwise bf16 -> f32 conversions of a safetensors checkpoint's small tensors (one lane per element; safetensors.py's name map
+# says which tensor takes which op): copy (conv1d, dt_bias, the gated norm), add1 (the zero-centred RMSNorm weights: w + 1 is
+# what llama.cpp's converter writes to the GGUF), negexp (A_log -> -exp(A_log)).
+ELEMENT_OPS = {
+    "f32_copy": "    %r = scalar.addf %v, %zero_f : f32\n",
+    "f32_add1": "    %one_f = scalar.constant 1.0 : f32\n    %r = scalar.addf %v, %one_f : f32\n",
+    "f32_negexp": "    %ex = scalar.expf<afn> %v : f32\n    %r = scalar.negf %ex : f32\n",
+}
 
 
 def dst_bytes(dst, blocks):
@@ -111,8 +120,23 @@ def _encode(dst):
 """
 
 
+def _element_decode_encode(dst):
+    return f"""    %zero_f = scalar.constant 0.0 : f32
+    %ib = index.constant 2 : offset
+    %io = index.scale %g, %ib : index, offset -> offset
+    %ia = index.add %in_origin, %io : offset
+    %src_view = buffer.view %input[%ia] : buffer -> view<1xbf16>
+    %raw = view.load %src_view[0] : view<1xbf16> -> bf16
+    %v = scalar.extf %raw : bf16 to f32
+{ELEMENT_OPS[dst]}    %ob = index.constant 4 : offset
+    %oo = index.scale %g, %ob : index, offset -> offset
+    %o_view = buffer.view %output[%oo] : buffer -> view<1xf32>
+    view.store %r, %o_view[0] : f32, view<1xf32>
+"""
+
+
 def kernel(src, dst):
-    """g_prep_<src>_<dst> (one lane per 32-value block) and its stage program llm_prep_<src>_<dst>."""
+    """g_prep_<src>_<dst> (one lane per 32-value block; per element for bf16e) and its stage program llm_prep_<src>_<dst>."""
     n = f"{src}_{dst}"
     return f"""
 // Load-time weight preparation (draft/prep_weights.py): staged {src.upper()} tensor (input + llm.prep_input) ->
@@ -135,7 +159,7 @@ kernel.def export("g_prep_{n}") @g_prep_{n}(%blocks: index) {{
   %g = index.add %base, %lane : index
   %live = index.cmp ult, %g, %blocks : index
   scf.if %live {{
-{_decode(src)}{_encode(dst)}  }}
+{_element_decode_encode(dst) if src == "bf16e" else _decode(src) + _encode(dst)}  }}
   kernel.return
 }}
 

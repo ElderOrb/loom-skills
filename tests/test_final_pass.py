@@ -101,7 +101,7 @@ class LogitsMode(unittest.TestCase):
                 for run, want in ((None, {"build": {"extension": pins["extension"], "gufo": pins["gufo"]}}), ("43700000000", {"run": "43700000000"})):
                     ns = argparse.Namespace(slugs=["x"], all=False, device=["strix-halo"], mode="logits", old=None, new_org="loom-fun-staging", gates="dev",
                                             batch=8, no_pin=True, work=d, state=os.path.join(d, "s.json"), force=True, replicas=1, sequential=False,
-                                            no_baselines=False, priority=False, bundle=None, bundle_build=None, bundle_run=run)
+                                            no_baselines=False, priority=False, bundle=None, bundle_build=None, bundle_run=run, base="r9700")
                     with contextlib.redirect_stdout(io.StringIO()):
                         regen.cmd_plan(ns)
                     self.assertEqual(json.load(open(ns.state))["opts"]["bundle"], want)
