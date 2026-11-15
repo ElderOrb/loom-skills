@@ -5,6 +5,10 @@ file (a test checks that the numbers stated here match it). Other skills link he
 two or three lines; if they disagree with this file, this file wins and the other text is a bug. Code: `scripts/card/matched_spec.py`
 (`TIE_BAND`, `outcome`, `tally`, `rule_violations`) and `data/drafting_classification.json`; tests: `scripts/card/test/check.sh`.
 
+## Contents
+
+Drafting (rules 1-2); which configuration each row runs (3-6); reading the result (7-9); card text and publishing (10-12); A/B verdicts and evidence (13-14); safetensors cards (15).
+
 ## Drafting (one choice per model)
 
 1. **One drafting choice per model, used by both Loom and llama.cpp (ROCm and Vulkan).** In order: an MTP head in the card's own
