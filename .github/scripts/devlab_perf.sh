@@ -141,7 +141,8 @@ hostname > "$out/runner.txt"
 
 cleanup() {
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
-  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
+  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
+  cp "$D"/vllm-state/vllm-*.{log,mem} "$out/" 2>/dev/null
   cp "$LOOM_SERVE_STATE"/*.log "$LLAMACPP_STATE"/*.log "$LLAMACPP_STATE"/*.mem "$out/" 2>/dev/null   # *.mem: MemAvailable/RssAnon of llama-server
   echo "devlab_perf.sh: servers stopped"
 }
@@ -203,19 +204,24 @@ sys.path.insert(0, starter)
 from formats import split_parts
 c = json.load(open(os.path.join(card, "llm_config.json")))
 par = lambda f: os.path.join(card, "parameter", os.path.basename(f))
-c["gguf"] = par(c["gguf"])
-if c.get("vision"):
-    c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
-for k in ("drafter", "assistant"):
-    if c.get(k) and c[k].get("gguf"):
-        c[k]["gguf"] = par(c[k]["gguf"]) if os.path.exists(par(c[k]["gguf"])) else None
-# every part of a split GGUF (the later layers' tensors are in the later parts)
-c["tensors"] = {t.name: {"type": t.tensor_type.name.lower(), "shape": [int(x) for x in t.shape]} for p in split_parts(c["gguf"]) for t in gguf.GGUFReader(p).tensors}
+if (c.get("source") or {}).get("kind") != "safetensors":   # a safetensors card's llm_config.json already carries its tensor table (inspect_safetensors.py)
+    c["gguf"] = par(c["gguf"])
+    if c.get("vision"):
+        c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
+    for k in ("drafter", "assistant"):
+        if c.get(k) and c[k].get("gguf"):
+            c[k]["gguf"] = par(c[k]["gguf"]) if os.path.exists(par(c[k]["gguf"])) else None
+    # every part of a split GGUF (the later layers' tensors are in the later parts)
+    c["tensors"] = {t.name: {"type": t.tensor_type.name.lower(), "shape": [int(x) for x in t.shape]} for p in split_parts(c["gguf"]) for t in gguf.GGUFReader(p).tensors}
+
 for k in ("model_id", "draft"):
     c.pop(k, None)
 json.dump(c, open(dst, "w"), indent=1)
 EOF
-gguf=$("$T" -c "import json; print(json.load(open('$D/cfg.json'))['gguf'])")
+# the reference's model: the GGUF llama.cpp loads, or (a safetensors card) the checkpoint repo vLLM loads, pinned to the card's source revision
+gguf=$("$T" -c "import json; c=json.load(open('$D/cfg.json')); s=c.get('source') or {}; print(s['repo'] if s.get('kind') == 'safetensors' else c['gguf'])")
+safetensors=$("$T" -c "import json; print(1 if (json.load(open('$D/cfg.json')).get('source') or {}).get('kind') == 'safetensors' else '')")
+[ -n "$safetensors" ] && export VLLM_REVISION=$("$T" -c "import json; print(json.load(open('$D/cfg.json'))['source'].get('revision') or '')") VLLM_STATE=$D/vllm-state
 drafter=$("$T" -I -c "
 import json, os, sys
 sys.path.insert(0, sys.argv[1]); from matched_spec import drafter_file
@@ -320,7 +326,7 @@ pkg_preset() {   # pkg_preset MODEL_JSON -> the preset this runner serves ("" fo
 }
 serve_alone() { # serve_alone VARIANT
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
-  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
+  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
   local aw sa rp vmem; aw=$(qv "$1" "print(0 if v.get('active_wait') is False else 1)")
   sa=$(qv "$1" "print(' '.join(v.get('serve_args') or []))")   # "serve_args": extra loom-serve flags
   # a package with a `<first preset>-r9700` preset (build.py --prefill-r9700) serves it on the R9700, as the card's R9700 Quick start does
@@ -546,11 +552,19 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       res[$s]=$(tail -1 "$out/func_$p1.log");;
     gates)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
-      LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
+      if [ -n "$safetensors" ]; then   # the reference is vLLM (gates.sh picks it from source.kind); VLLM_VERSION / VLLM_ROCM_VARIANT / VLLM_EXTRA_ENV come from the job's "env"
+        export VLLM_VENV=$WORK/vllm-venv-${VLLM_VERSION:-0.18.0}   # one install per runner and version, reused by later jobs
+      else
+        LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
+      fi
       export LOOM_KIT=${KIT[$p1]}
       step "gates $p1 LEVEL=$p2"
       ( unset LLAMA_SPEC; FORCE=1 LEVEL=$p2 "$B/gates.sh" "$D/$p1/pkg" "$url" "$gguf" "$D/$p1/bench" "$LLAMA_PORT" ) > "$out/gates_$p1.out" 2>&1; rc=$?
       mkdir -p "$out/gates_$p1"; cp "$D/$p1"/bench/gates.json "$D/$p1"/bench/gates_*.log "$out/gates_$p1/" 2>/dev/null
+      if [ -n "$safetensors" ]; then   # the recorded references (reusable: keyed by checkpoint revision + vLLM version + request), the card's reference statement, install/load/memory logs
+        cp "$D/$p1"/bench/reference.json "$D/vllm-state"/vllm-*.{log,mem,json} "$out/gates_$p1/" 2>/dev/null
+        tar -C "$D/$p1/bench" -czf "$out/gates_$p1/llama_cache.tgz" llama_cache 2>/dev/null
+      fi
       res[$s]=$(grep -h "^GATES" "$out/gates_$p1.out" | tail -1 | cut -c1-300); [ -n "${res[$s]}" ] || res[$s]="rc=$rc";;
     *) echo "unknown step $s"; res[$s]=ERROR;;
   esac

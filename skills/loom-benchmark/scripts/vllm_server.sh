@@ -1,0 +1,50 @@
+#!/bin/bash
+# Start / stop the vLLM ROCm reference (vllm_shim.py: a llama-server look-alike) for a safetensors package, the way
+# llamacpp_server.sh does for a GGUF. gates.sh and devlab_perf.sh use it when llm_config.json "source.kind" is "safetensors".
+# usage: vllm_server.sh CHECKPOINT_DIR_OR_REPO [PORT=8130] [MAX_MODEL_LEN=36864]
+#        vllm_server.sh --stop PORT
+#        vllm_server.sh --install       (only the install; prints the venv python)
+#   VLLM_VENV      the environment (default $VLLM_STATE/venv); created with uv (python 3.12) on first use
+#   VLLM_VERSION / VLLM_ROCM_VARIANT   the pinned wheel (defaults below: vllm.ai/rocm stable index); the cache key names it
+#   VLLM_REVISION  checkpoint revision passed to vLLM (recorded in /props and the card)
+#   VLLM_STATE     pid/log/mem dir (default /tmp; devlab_perf.sh sets a job dir)
+#   VLLM_EXTRA_ENV  space-separated NAME=VALUE for the engine (e.g. VLLM_QUARK_EMU_MEM_OPT=1)
+#   Writes $VLLM_STATE/vllm-PORT.{pid,log,mem,install.log}; MemAvailable / RssAnon every 10 s in .mem (memory findings).
+set -e
+state=${VLLM_STATE:-/tmp}; mkdir -p "$state"
+VLLM_VERSION=${VLLM_VERSION:-0.18.0}; VLLM_ROCM_VARIANT=${VLLM_ROCM_VARIANT:-rocm700}
+if [ "${1:-}" = --stop ]; then
+  f=$state/vllm-${2:?--stop PORT}.pid; [ -f "$f" ] || exit 0; pid=$(cat "$f")
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 120); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done; kill -9 "$pid" 2>/dev/null || true   # GPU memory is free once it is gone
+  rm -f "$f"; exit 0
+fi
+venv=${VLLM_VENV:-$state/venv}
+install() {
+  [ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import vllm,sys; sys.exit(0 if vllm.__version__.split('+')[0]=='$VLLM_VERSION' else 1)" 2>/dev/null && return 0
+  local t0=$(date +%s)
+  command -v uv >/dev/null || python3 -m pip install --user -q uv >/dev/null 2>&1 || true
+  export PATH=$HOME/.local/bin:$PATH
+  uv venv --python 3.12 "$venv" && uv pip install --python "$venv/bin/python" "vllm==$VLLM_VERSION" pillow \
+    --extra-index-url "https://wheels.vllm.ai/rocm/$VLLM_VERSION/$VLLM_ROCM_VARIANT" --index-strategy unsafe-best-match \
+    > "$state/vllm-install.log" 2>&1 || { echo "vLLM install failed:"; tail -20 "$state/vllm-install.log"; return 1; }
+  echo "INSTALLED vllm $VLLM_VERSION $VLLM_ROCM_VARIANT in $(( $(date +%s) - t0 )) s" | tee -a "$state/vllm-install.log"
+}
+if [ "${1:-}" = --install ]; then install && echo "$venv/bin/python"; exit; fi
+ckpt=${1:?usage: vllm_server.sh CHECKPOINT [PORT] [MAX_MODEL_LEN]}; port=${2:-8130}; mlen=${3:-36864}
+if curl -s -m 2 localhost:$port/health >/dev/null 2>&1; then echo "port $port is busy"; exit 1; fi
+install
+here=$(cd "$(dirname "$0")" && pwd)
+args=("$ckpt" --port "$port" --max-model-len "$mlen"); [ -n "${VLLM_REVISION:-}" ] && args+=(--revision "$VLLM_REVISION")
+
+env ${VLLM_EXTRA_ENV:-} VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} nohup "$venv/bin/python" "$here/vllm_shim.py" "${args[@]}" > "$state/vllm-$port.log" 2>&1 &
+echo $! > "$state/vllm-$port.pid"
+( p=$(cat "$state/vllm-$port.pid"); while kill -0 $p 2>/dev/null; do
+    echo "$(date +%T) MemAvailable_GiB $(awk '/^MemAvailable/{printf "%.1f", $2/1048576}' /proc/meminfo) RssAnon_GiB $(awk '/^RssAnon/{printf "%.1f", $2/1048576}' /proc/$p/status 2>/dev/null) vram_used_GiB $(cat /sys/class/drm/card*/device/mem_info_vram_used 2>/dev/null | awk '{s=$1>s?$1:s} END{printf "%.1f", s/1073741824}')"; sleep 10; done ) >> "$state/vllm-$port.mem" 2>/dev/null &
+t0=$(date +%s)
+for i in $(seq 1800); do   # a 20 GB checkpoint load + engine warmup: minutes
+  curl -s localhost:$port/health | grep -q ok && { echo "READY vLLM $VLLM_VERSION on :$port (pid $(cat "$state/vllm-$port.pid"), load $(( $(date +%s) - t0 )) s)"; curl -s localhost:$port/props > "$state/vllm-props.json"; exit 0; }
+  kill -0 $(cat "$state/vllm-$port.pid") 2>/dev/null || { echo "vLLM died:"; tail -30 "$state/vllm-$port.log"; exit 1; }
+  sleep 1
+done
+echo "timeout"; exit 1
