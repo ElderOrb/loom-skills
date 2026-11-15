@@ -212,15 +212,39 @@ def tensor_entries(src, fam, prod, layer_types, n_mtp):
 
 
 # ---------------------------------------------------------------------------------------------------------------- the config
+def rope_freq_factors(rp, rope_dims):
+    """llama3 rope scaling -> one factor per rotary pair (llama.cpp's converter writes these as rope_freqs.weight; a pair's frequency is
+    divided by its factor): 1 for high frequencies, `factor` for low ones, smoothly interpolated between."""
+    if not rp or rp.get("rope_type") != "llama3":
+        return None
+    import math
+    th, f = float(rp["rope_theta"]), float(rp["factor"])
+    lo, hi, old = float(rp["low_freq_factor"]), float(rp["high_freq_factor"]), float(rp["original_max_position_embeddings"])
+    out = []
+    for j in range(rope_dims // 2):
+        wavelen = 2 * math.pi * th ** (2 * j / rope_dims)
+        if wavelen < old / hi:
+            out.append(1.0)
+        elif wavelen > old / lo:
+            out.append(f)
+        else:
+            sm = (old / wavelen - lo) / (hi - lo)
+            out.append(1.0 / ((1 - sm) / f + sm))
+    return out
+
+
 def build_config(src, checkpoint=None, drop_chat=False, drop_vision=False):
     cfg_hf = src.config
     fam, prod = family_for(cfg_hf), producer_for(cfg_hf)
     tc = cfg_hf.get(fam["text_config"]) if fam.get("text_config") else cfg_hf
     c = {k: dig(tc, v) for k, v in fam["config"].items()}
     layers = c["layers"]
-    layer_types = [("linear_attention" if t == fam["recurrent_type"] else "full_attention") for t in tc[fam["layer_types"]]]
+    if fam.get("layer_types"):   # hybrid families name each layer's kind; a plain transformer has none
+        layer_types = [("linear_attention" if t == fam["recurrent_type"] else "full_attention") for t in tc[fam["layer_types"]]]
+    else:
+        layer_types = ["full_attention"] * layers
     assert len(layer_types) == layers, (len(layer_types), layers)
-    n_mtp = int(dig(tc, fam["mtp_layers"], 0) or 0) if any(k.startswith("mtp.") for k in src.header) else 0
+    n_mtp = int(dig(tc, fam["mtp_layers"], 0) or 0) if fam.get("mtp") and any(k.startswith("mtp.") for k in src.header) else 0
     tensors, used = tensor_entries(src, fam, prod, layer_types, n_mtp)
     name = (src.origin.get("repo") or os.path.basename(src.origin.get("path", "model"))).rpartition("/")[2]
     tokens = {t["content"]: t["id"] for t in src.added_tokens}
@@ -245,14 +269,18 @@ def build_config(src, checkpoint=None, drop_chat=False, drop_vision=False):
         "extra_eos_ids": sorted({i for i in (im_end, endoftext, *gen_eos) if i is not None and i != eos}),
         "bos_id": tokens.get(src.tokenizer_config.get("bos_token")) if src.tokenizer_config.get("add_bos_token") else None,
         "chat": None,
-        "rope_dims": int(dig(tc, rd["head_dim"]) * dig(tc, rd["factor"])),
-        "recurrent_layers": [i for i, k in enumerate(layer_types) if k == "linear_attention"],
+        "rope_dims": int(dig(tc, rd["head_dim"]) * (dig(tc, rd["factor"]) if rd.get("factor") else 1.0)),
     }
-    g = {k: dig(tc, v) for k, v in fam["gdn"].items() if k != "v_order"}
-    g["inner"] = g["v_heads"] * g["head_v"]
-    g["v_order"] = fam["gdn"]["v_order"]
-    cfg["gdn"] = g
-    cfg["kv_layers"] = layers - len(cfg["recurrent_layers"])
+    if fam.get("gdn"):
+        cfg["recurrent_layers"] = [i for i, k in enumerate(layer_types) if k == "linear_attention"]
+        g = {k: dig(tc, v) for k, v in fam["gdn"].items() if k != "v_order"}
+        g["inner"] = g["v_heads"] * g["head_v"]
+        g["v_order"] = fam["gdn"]["v_order"]
+        cfg["gdn"] = g
+        cfg["kv_layers"] = layers - len(cfg["recurrent_layers"])
+    ff = rope_freq_factors(dig(tc, "rope_parameters") or dig(tc, "rope_scaling"), cfg["rope_dims"])
+    if ff:
+        cfg["rope_freq_factors"] = ff
     cfg["ffn_norm_tensor"] = fam["fixed"]["ffn_norm_tensor"]
     if n_mtp:
         cfg["mtp"] = {"layers": [layers + j for j in range(n_mtp)]}
@@ -293,6 +321,8 @@ def build_config(src, checkpoint=None, drop_chat=False, drop_vision=False):
         for nm, ok, detail in chat_probe.verify(src.chat_template, chat, bos):
             print("chat", "OK  " if ok else "SKIP" if ok is None else "FAIL", nm, "-", detail)
         cfg["chat"] = chat
+        if cfg["bos_id"] is None and chat.get("bos") and chat["bos"] == bos:   # HF tokenizers often add bos in tokenizer.json, not add_bos_token
+            cfg["bos_id"] = tokens.get(bos)
     return cfg
 
 
