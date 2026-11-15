@@ -16,7 +16,7 @@
   },
   "devices_verified": {
     "rdna3": false,
-    "rdna4": false
+    "rdna4": true
   },
-  "evidence": "first card amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom: kernel tests and the functional run on the R9700 (DevLab); the planes are the Quark safetensors layout read in place (no repack)"
+  "evidence": "first card amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom on the R9700 (gfx1201, DevLab runs 43770308768, 43771486278, 43772073750): kernel tests 45/45 and 46/46 (mxfp4s matvec per output width, GEMM 128/256 rows, bf16 embed/head, grouped GDN chain), func chat + tools, consistency 2/2; not yet run on Strix Halo (gfx1151: kernels compile)"
 }
