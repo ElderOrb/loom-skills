@@ -47,6 +47,8 @@ defer=0
 # A package with image input: llama-server also loads its projector (MMPROJ), for the vision gate.
 MMPROJ=${MMPROJ:-$("$T" -c "import json; print((json.load(open('$pkg/llm_config.json')).get('vision') or {}).get('mmproj', ''))" 2>/dev/null)}; export MMPROJ
 safetensors=$("$T" -c "import json; print(1 if (json.load(open('$pkg/llm_config.json')).get('source') or {}).get('kind') == 'safetensors' else '')" 2>/dev/null)
+# REFERENCE_CHECKPOINT=ORG/REPO: use vLLM on that checkpoint for a GGUF package (checks of the adapter itself on a small model)
+[ -n "${REFERENCE_CHECKPOINT:-}" ] && { safetensors=1; gguf=$REFERENCE_CHECKPOINT; }
 if [ -n "$safetensors" ]; then   # vLLM reference: the projector is vLLM's own, so any package with a vision block gets the vision gate
   MMPROJ=$("$T" -c "import json; print(1 if json.load(open('$pkg/llm_config.json')).get('vision') else '')"); export MMPROJ
 fi

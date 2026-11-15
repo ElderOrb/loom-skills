@@ -194,6 +194,8 @@ def reference_identity(cfg):
     """Cache identity of a safetensors package's reference: its checkpoint repo@revision (llm_config.json "source"), or None
     for a GGUF package. The reference engine of such a package is vLLM (vllm_shim.py, a llama-server look-alike), the
     cached answers depend on the checkpoint revision and the request, not on the Loom build or the machine."""
+    if os.environ.get("REFERENCE_CHECKPOINT"):   # a vLLM reference forced on a GGUF package (adapter checks on small models)
+        return f"safetensors:{os.environ['REFERENCE_CHECKPOINT']}@{os.environ.get('VLLM_REVISION', '')}"
     src = cfg.get("source") or {}
     if src.get("kind") != "safetensors":
         return None

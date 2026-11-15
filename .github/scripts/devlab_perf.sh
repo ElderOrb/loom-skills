@@ -74,6 +74,8 @@
 #                               the step is "not supported" (never replaced by another path).
 #          gufo:V               Gufo conformance on V's package served with --loom-logits=on (validation/devlab/run_conformance.sh: conformance.py
 #                               --logits + gufo's logits_check.py); conformance_V.json (gate `gufo`), the raw files in out/gufo_V/
+#          vllmdet:V            (safetensors card, or env REFERENCE_CHECKPOINT=ORG/REPO on a GGUF card) vLLM's run-to-run determinism: the dev golden set recorded twice
+#          gates:V:LEVEL        with a safetensors card (llm_config source.kind) or REFERENCE_CHECKPOINT the reference is vLLM (vllm-reference.md), not llama.cpp
 #          ktest:V              make_kernel_tests.py + run_kernel_tests.sh with V's kit
 #          gates:V:LEVEL        gates.sh against llama.cpp
 #            "elastic": true: on the R9700 serve with --memory_bytes (the elastic state backing) instead of the card's --pool_backing=fixed
@@ -221,7 +223,9 @@ EOF
 # the reference's model: the GGUF llama.cpp loads, or (a safetensors card) the checkpoint repo vLLM loads, pinned to the card's source revision
 gguf=$("$T" -c "import json; c=json.load(open('$D/cfg.json')); s=c.get('source') or {}; print(s['repo'] if s.get('kind') == 'safetensors' else c['gguf'])")
 safetensors=$("$T" -c "import json; print(1 if (json.load(open('$D/cfg.json')).get('source') or {}).get('kind') == 'safetensors' else '')")
-[ -n "$safetensors" ] && export VLLM_REVISION=$("$T" -c "import json; print(json.load(open('$D/cfg.json'))['source'].get('revision') or '')") VLLM_STATE=$D/vllm-state
+[ -n "${REFERENCE_CHECKPOINT:-}" ] && { safetensors=1; gguf=$REFERENCE_CHECKPOINT; }   # vLLM forced on a GGUF package (adapter check)
+[ -n "$safetensors" ] && [ -z "${REFERENCE_CHECKPOINT:-}" ] && export VLLM_REVISION=$("$T" -c "import json; print(json.load(open('$D/cfg.json'))['source'].get('revision') or '')")
+[ -n "$safetensors" ] && export VLLM_STATE=$D/vllm-state
 drafter=$("$T" -I -c "
 import json, os, sys
 sys.path.insert(0, sys.argv[1]); from matched_spec import drafter_file
@@ -550,6 +554,22 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       fa=(); grep -q '"vision"' "$card/llm_config.json" && fa+=(--vision)
       "$T" "$here/.github/scripts/r9700_func.py" "$url" "$cardid" "$out/func_$p1.json" ${fa[@]+"${fa[@]}"} $([ -f "$out/info_card.json" ] && echo --info "$out/info_card.json") 2>&1 | tee "$out/func_$p1.log"
       res[$s]=$(tail -1 "$out/func_$p1.log");;
+    vllmdet)   # vllmdet:V : vLLM's run-to-run determinism: the dev golden prompt set recorded twice (salts a, b), token for token; the card's golden2 question
+      [ -n "$safetensors" ] || { res[$s]="ERROR: not a safetensors package"; continue; }
+      free_gpu   # nothing else on the GPU: only the reference runs
+      export VLLM_VENV=$WORK/vllm-venv-${VLLM_VERSION:-0.18.0} LLAMA_CACHE=$D/$p1/bench/det_cache LLAMA_CACHE_BUILD=vllm-${VLLM_VERSION:-0.18.0}
+      step "vLLM determinism $p1"; t1=$(date +%s)
+      "$B/vllm_server.sh" "$gguf" "$LLAMA_PORT" 4096 > "$out/vllm_start.log" 2>&1; tail -2 "$out/vllm_start.log"
+      ( cd "$D/$p1" && mkdir -p bench && cd bench && for salt in a b; do
+          "$T" "$B/golden.py" "$D/$p1/pkg" "det_$salt.json" --llama "$lurl" --short 20 --long 1000,2000 --salt $salt || exit 1; done
+        "$T" - <<'PY'
+import json
+a, b = (json.load(open(f"det_{s}.json")) for s in "ab")
+same = sum(x["ids"] == y["ids"] for x, y in zip(a, b)); print(f"DETERMINISM {same}/{len(a)} prompts identical across two recordings")
+PY
+      ) > "$out/vllmdet_$p1.log" 2>&1; tail -1 "$out/vllmdet_$p1.log"
+      cp "$D/$p1"/bench/det_*.json "$out/" 2>/dev/null; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT"
+      res[$s]="$(grep -h DETERMINISM "$out/vllmdet_$p1.log" | tail -1) ($(( $(date +%s) - t1 )) s incl. install+load)";;
     gates)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       if [ -n "$safetensors" ]; then   # the reference is vLLM (gates.sh picks it from source.kind); VLLM_VERSION / VLLM_ROCM_VARIANT / VLLM_EXTRA_ENV come from the job's "env"
