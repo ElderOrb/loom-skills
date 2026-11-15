@@ -132,7 +132,7 @@ class Config(unittest.TestCase):
         self.assertEqual(c["mtp"], {"layers": [4]})
         self.assertEqual((c["eos_id"], c["extra_eos_ids"]), (501, [500]))
         self.assertEqual(c["gdn"], {"conv_kernel": 4, "k_heads": 2, "v_heads": 4, "head_k": 32, "head_v": 32, "inner": 128, "v_order": "grouped"})
-        self.assertEqual(c["weights"], {"format": "safetensors", "files": ["/ck/model.safetensors"]})
+        self.assertEqual(c["weights"], {"format": "safetensors", "files": [os.path.abspath("/ck/model.safetensors")]})
         self.assertNotIn("mrope", c)   # image positions only: wired with the image component
         self.assertEqual(c["source"]["kind"], "safetensors")   # the keys loom-kb routes on: source, quark (the checkpoint's quantization_config), formats
         self.assertEqual(c["quark"], CONFIG["quantization_config"])
