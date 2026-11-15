@@ -17,6 +17,17 @@
     "exec.prefill_capacity": 1024
    },
    "evidence": "same R9700 serving setting as the bartowski Q4_K_M package of the same model (prefill_capacity 1024, run 43745471701 profile); the MXFP4 package keeps it until measured otherwise"
+  },
+  {
+   "when": {
+    "devices": [
+     "rdna4"
+    ]
+   },
+   "set": {
+    "prefill.gemm.mxfp4_f8": true
+   },
+   "evidence": "MXFP4 weights decode exactly to bf8 (every block exponent of this GGUF is 107..125, the kernel is exact for 107..132); the prefill GEMMs run on fp8 WMMA with e4m3 activations (q38r9700 mxfp4 task; A/B against the f16 path on the R9700 in the PR)"
   }
  ]
 }

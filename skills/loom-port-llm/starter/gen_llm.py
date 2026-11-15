@@ -5548,6 +5548,11 @@ if __name__ == "__main__":
         from f16o_fuse import fuse as _f16o_fuse
         text, _nf16o = _f16o_fuse(text)
         print("f16o groups:", _nf16o)
+    from gen_gemm_rdna4 import f8_enabled as _f8_on
+    if _f8_on():   # gfx12: the MXFP4 prefill GEMMs on fp8 WMMA (choice prefill.gemm.mxfp4_f8; gen_gemm_rdna4.fuse_mxfp4_f8)
+        from gen_gemm_rdna4 import fuse_mxfp4_f8 as _f8_fuse
+        text, _nf8 = _f8_fuse(text)
+        print("mxfp4 fp8 groups:", _nf8)
     if seg_tokens():
         text = seg_attention(text)
     out = os.path.join(out_dir, "model.loom")
