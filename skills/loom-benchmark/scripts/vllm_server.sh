@@ -20,7 +20,9 @@ if [ "${1:-}" = --stop ]; then
   rm -f "$f"; exit 0
 fi
 venv=${VLLM_VENV:-$state/venv}
+ldextra() { export LD_LIBRARY_PATH=$(ls -d "$venv"/extra/usr/lib/*/ "$venv"/extra/usr/lib/*/openmpi/lib 2>/dev/null | tr '\n' ':')${LD_LIBRARY_PATH:-}; }
 install() {
+  ldextra
   [ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import vllm,sys; sys.exit(0 if vllm.__version__.split('+')[0]=='$VLLM_VERSION' else 1)" 2>/dev/null && return 0
   local t0=$(date +%s)
   export PATH=$HOME/.local/bin:$PATH
@@ -37,6 +39,14 @@ install() {
     { sudo -n apt-get install -y libopenmpi3t64 libnuma1 || { sudo -n apt-get update -qq && sudo -n apt-get install -y libopenmpi3t64 libnuma1; }; } >> "$state/vllm-install.log" 2>&1 \
       || echo "WARNING: could not apt-install libopenmpi3t64 (torch import will fail)"
   fi
+  # no passwordless sudo (Strix runner): the missing .debs are downloaded (no root needed) and unpacked into $venv/extra, put on LD_LIBRARY_PATH
+  if ! "$venv/bin/python" -c "import torch" >/dev/null 2>&1; then
+    local x=$venv/extra dl=$venv/extra-debs; mkdir -p "$x" "$dl"
+    ( cd "$dl" && for pkg in $(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances libopenmpi3t64 libnuma1 2>/dev/null | grep '^[a-z0-9]'); do
+        dpkg -s "$pkg" >/dev/null 2>&1 || apt-get download "$pkg" >/dev/null 2>&1; done
+      for d in *.deb; do [ -f "$d" ] && dpkg -x "$d" "$x"; done ) >> "$state/vllm-install.log" 2>&1
+  fi
+  ldextra
   "$venv/bin/python" -c "import torch; print('torch', torch.__version__, 'hip', torch.version.hip, 'devices', torch.cuda.device_count())" 2>&1 | tee -a "$state/vllm-install.log" | tail -3
   echo "INSTALLED vllm $VLLM_VERSION $VLLM_ROCM_VARIANT in $(( $(date +%s) - t0 )) s" | tee -a "$state/vllm-install.log"
 }
@@ -47,6 +57,7 @@ install
 here=$(cd "$(dirname "$0")" && pwd)
 args=("$ckpt" --port "$port" --max-model-len "$mlen"); [ -n "${VLLM_REVISION:-}" ] && args+=(--revision "$VLLM_REVISION")
 
+ldextra
 env ${VLLM_EXTRA_ENV:-} VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} nohup "$venv/bin/python" "$here/vllm_shim.py" "${args[@]}" > "$state/vllm-$port.log" 2>&1 &
 echo $! > "$state/vllm-$port.pid"
 ( p=$(cat "$state/vllm-$port.pid"); while kill -0 $p 2>/dev/null; do
