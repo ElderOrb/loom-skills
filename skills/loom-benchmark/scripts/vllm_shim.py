@@ -69,12 +69,26 @@ def parse_request(body, placeholder=IMAGE_PLACEHOLDER):
     return eng, images, n_predict, n_probs
 
 
+def _derived_max_len(checkpoint, revision=None):
+    try:
+        from transformers import AutoConfig
+        c = AutoConfig.from_pretrained(checkpoint, revision=revision)
+        c = getattr(c, "text_config", None) or c
+        return int(getattr(c, "max_position_embeddings", 0) or 0) or None
+    except Exception:
+        return None
+
+
 class VllmEngine:
     """vLLM offline engine (imported lazily: the unit tests never load it)."""
 
     def __init__(self, checkpoint, max_model_len, revision=None, dtype="bfloat16", seed=0, extra=None):
         import vllm
         self.version = vllm.__version__
+        derived = _derived_max_len(checkpoint, revision)
+        if derived and max_model_len > derived:   # vLLM refuses a longer window than the checkpoint declares: longer goldens are skipped by golden.py
+            print(f"max_model_len {max_model_len} -> {derived} (the checkpoint's max_position_embeddings)", flush=True)
+            max_model_len = derived
         kw = dict(model=checkpoint, dtype=dtype, seed=seed, max_model_len=max_model_len, enable_prefix_caching=False,
                   limit_mm_per_prompt={"image": 4}, **(extra or {}))
         if revision:
