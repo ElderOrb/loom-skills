@@ -11,29 +11,32 @@
    "variants": [
     {
      "name": "base",
-     "build": {}
+     "build": {},
+     "context": 124928
     },
     {
      "name": "ph32",
      "build": {
       "PROPOSE_HEAD_ROWS": "32768"
-     }
+     },
+     "context": 124928
     },
     {
      "name": "ph64",
      "build": {
       "PROPOSE_HEAD_ROWS": "65536"
-     }
+     },
+     "context": 124928
     },
     {
      "name": "phall",
      "build": {
       "PROPOSE_HEAD_ROWS": "248320"
-     }
+     },
+     "context": 124928
     }
    ],
    "steps": [
-    "ktest:ph32",
     "perf:base:1",
     "perf:ph32:1",
     "perf:ph64:1",
