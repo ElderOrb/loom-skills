@@ -272,7 +272,7 @@ def build_config(src, checkpoint=None, drop_chat=False, drop_vision=False):
     if unmapped:
         print("NOTE: checkpoint tensors the name map does not use:", unmapped[:6], f"({len(unmapped)} total)")
     vis = sorted(k for k in src.header if k.startswith(fam.get("vision", {}).get("prefix", "model.visual.")))
-    if vis and fam.get("vision") and not drop_vision:
+    if vis and fam.get("vision") and not drop_vision and cfg_hf.get(fam["vision"]["config"]):
         sys.path.insert(0, os.path.join(HERE, "vision"))
         import st_source
         cfg["vision"] = st_source.block(cfg_hf, src.header, fam["vision"], src.preprocessor)
@@ -282,7 +282,7 @@ def build_config(src, checkpoint=None, drop_chat=False, drop_vision=False):
         print(f"vision: {fam['vision']['family']} tower {cfg['vision']['config']['layers']} x {cfg['vision']['config']['E']}, {len(cfg['vision']['tensors'])} tensors "
               f"({vprep} prepared f32 copies, matrices as stored), M-RoPE sections {cfg['mrope']['sections']}")
     elif vis:
-        print(f"NOTE: {len(vis)} vision tensors (model.visual.*): no image component (hf_names map has no vision block, or drop_vision)")
+        print(f"NOTE: {len(vis)} vision tensors (model.visual.*): no image component (the family's map has no vision block, config.json has no vision_config, or drop_vision)")
     if src.chat_template and not drop_chat:
         import chat_probe
         bos = src.tokenizer_config.get("bos_token") or ""
