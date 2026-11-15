@@ -1,47 +1,153 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
- "runner": "r9700",
+ "_comment": "q38r9700 campaign baseline profile on R9700: MTP depth sweep, undrafted decode, doubling ablations (undrafted: doubling in-place kernels changes outputs, timing only) of mv/gemm/gdn/attention/small kernels, 4-stream undrafted.",
+ "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "kit": null,
+ "llamacpp": "b1375",
+ "runner": "r9700",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "name": "q38-depth",
    "variants": [
     {
-     "name": "card",
-     "build": {}
+     "name": "card"
     },
     {
-     "name": "nodraft",
-     "build": {},
+     "name": "nd",
      "execution": {
       "draft_depth": 0
+     }
+    },
+    {
+     "name": "d1",
+     "execution": {
+      "draft_depth": 1
+     }
+    },
+    {
+     "name": "d2",
+     "execution": {
+      "draft_depth": 2
+     }
+    },
+    {
+     "name": "d4",
+     "execution": {
+      "draft_depth": 4
+     }
+    },
+    {
+     "name": "d5",
+     "execution": {
+      "draft_depth": 5
      }
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
+    "perf:card:1",
+    "perf:nd:1",
+    "perf:d1:1",
+    "perf:d2:1",
+    "perf:d4:1",
+    "perf:d5:1",
+    "perf:card:1",
+    "perf:card:1:long",
+    "c4:nd"
+   ]
+  },
+  {
+   "name": "q38-abl1",
+   "variants": [
+    {
+     "name": "nd",
+     "execution": {
+      "draft_depth": 0
+     }
+    },
+    {
+     "name": "nd_mvq",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:g_mv_q"
+     ]
+    },
+    {
+     "name": "nd_gemm",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:g_gemm"
+     ]
+    },
+    {
+     "name": "nd_gdn",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:g_gdn"
+     ]
+    }
+   ],
+   "steps": [
+    "perf:nd:1",
+    "perf:nd_mvq:1",
+    "perf:nd_gemm:1",
+    "perf:nd_gdn:1",
+    "perf:nd:1",
+    "c4:nd",
+    "c4:nd_mvq"
+   ]
+  },
+  {
+   "name": "q38-abl2",
+   "variants": [
+    {
+     "name": "nd",
+     "execution": {
+      "draft_depth": 0
+     }
+    },
+    {
+     "name": "nd_attn",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:attention|flash"
+     ]
+    },
+    {
+     "name": "nd_small",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:g_quant_q8|g_row_scale|g_post_add_norm|g_silu_mul|g_split_qgate|g_qk_rope|g_mv_f32|g_embed|g_token"
+     ]
+    },
+    {
+     "name": "nd_head",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:g_head"
+     ]
+    }
+   ],
+   "steps": [
+    "perf:nd:1",
+    "perf:nd_attn:1",
+    "perf:nd_small:1",
+    "perf:nd_head:1",
+    "perf:nd:1",
+    "perf:nd:1:long",
+    "perf:nd_attn:1:long"
    ]
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
