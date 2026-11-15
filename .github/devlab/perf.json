@@ -12,22 +12,18 @@
     {
      "name": "base",
      "build": {
-      "GDN_COPY_SPLIT__RDNA4": "1"
+      "GDN_COPY_SPLIT__RDNA4": "1",
+      "PROPOSE_HEAD_ROWS": "81920"
      },
      "context": 120832
     },
     {
      "name": "new",
-     "build": {},
+     "build": {
+      "GDN_COPY_SPLIT__RDNA4": "8",
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
      "context": 120832
-    },
-    {
-     "name": "nd",
-     "build": {},
-     "context": 120832,
-     "execution": {
-      "draft_depth": 0
-     }
     }
    ],
    "steps": [
@@ -38,8 +34,9 @@
     "perf:base:1",
     "perf:base:1:long",
     "perf:new:1:long",
-    "gates:new:dev",
-    "c4:nd"
+    "perf:new:1",
+    "perf:base:1",
+    "gates:new:dev"
    ]
   }
  ]
