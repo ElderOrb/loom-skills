@@ -350,6 +350,10 @@ CHOICE("hybrid.gdn.row_lanes", "int", 16, "GDN_ROW_LANES", derive=_mtp_rows, fro
        doc="Lanes per value column of the row-split recurrence (MTP-drafted hybrids: 8, one form for every span).", **_GD)
 CHOICE("hybrid.gdn.cols", "int", 2, "GDN_COLS", derive=_mtp_cols, from_pr="#350",
        doc="Value-column width of the row-split recurrence (MTP-drafted hybrids: 4).", **_GD)
+CHOICE("hybrid.gdn.chunk", "bool", False, "GDN_CHUNK", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_chunk_rdna4", "g_gdn_recurrence*"],
+       from_pr="q38r9700 gdnpf",
+       doc="gfx12 chunked (WY) gated delta-net prefill (gen_gdn_chunk.py): spans of 64+ tokens run g_gdn_chunk_rdna4 (f16 WMMA, f32 state), the "
+           "sequential kernel's gfx12 twin the shorter ones; the gfx11 kernels do not change (128 x 128 heads only).")
 
 # ======================================================================================================================
 # Speculative decoding (gen_llm.py, draft/)
