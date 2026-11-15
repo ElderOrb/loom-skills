@@ -1,5 +1,5 @@
 {
- "_comment": "phead round 2: N sweep (Q4_0 copy of rows [0,N) + added tokens) vs base, two interleaved rounds.",
+ "_comment": "phead round 3: N 80k-96k Q4_0 and Q6_K-kept subsets (q64, q96) vs base, two interleaved rounds, ktest of the Q6_K copy.",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -15,16 +15,16 @@
      "context": 124928
     },
     {
-     "name": "ph48",
+     "name": "ph80",
      "build": {
-      "PROPOSE_HEAD_ROWS": "49152"
+      "PROPOSE_HEAD_ROWS": "81920"
      },
      "context": 124928
     },
     {
-     "name": "ph64",
+     "name": "ph88",
      "build": {
-      "PROPOSE_HEAD_ROWS": "65536"
+      "PROPOSE_HEAD_ROWS": "90112"
      },
      "context": 124928
     },
@@ -36,33 +36,36 @@
      "context": 124928
     },
     {
-     "name": "ph128",
+     "name": "q64",
      "build": {
-      "PROPOSE_HEAD_ROWS": "131072"
+      "PROPOSE_HEAD_ROWS": "65536",
+      "PROPOSE_HEAD": "q6_k"
      },
      "context": 124928
     },
     {
-     "name": "ph160",
+     "name": "q96",
      "build": {
-      "PROPOSE_HEAD_ROWS": "163840"
+      "PROPOSE_HEAD_ROWS": "98304",
+      "PROPOSE_HEAD": "q6_k"
      },
      "context": 124928
     }
    ],
    "steps": [
     "perf:base:1",
-    "perf:ph48:1",
-    "perf:ph64:1",
+    "perf:ph80:1",
+    "perf:ph88:1",
     "perf:ph96:1",
-    "perf:ph128:1",
-    "perf:ph160:1",
+    "perf:q64:1",
+    "perf:q96:1",
     "perf:base:1",
-    "perf:ph48:1",
-    "perf:ph64:1",
+    "perf:ph80:1",
+    "perf:ph88:1",
     "perf:ph96:1",
-    "perf:ph128:1",
-    "perf:ph160:1"
+    "perf:q64:1",
+    "perf:q96:1",
+    "ktest:q96"
    ]
   }
  ]
