@@ -1,5 +1,5 @@
 {
- "_comment": "gdnpf final confirmation on the merged tree: scope default (chunk on for the 27B on rdna4) vs GDN_CHUNK=0",
+ "_comment": "gdnpf final confirmation on the merged tree: GDN_CHUNK=1 (what the scope rule resolves to in a fleet build) vs GDN_CHUNK=0",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "jobs": [
@@ -15,7 +15,9 @@
     },
     {
      "name": "on",
-     "build": {},
+     "build": {
+      "GDN_CHUNK": "1"
+     },
      "context": 124928
     }
    ],
