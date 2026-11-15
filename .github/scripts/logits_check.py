@@ -34,7 +34,9 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "skills", "loom-benchmark", "scripts"))
 
-LOGPROB_TOL = 0.30     # nats: Loom's and llama.cpp's log-prob of a token both list (quantized matmul numerics differ)
+LOGPROB_TOL = 1.0      # nats, the golden's near-tie gap (bench_common.near_tie max_gap): Loom's and llama.cpp's log-prob of a token both list.
+#                        The same GGUF through the two engines' quantized matmuls differs by up to ~0.7 nats on tail tokens (DevLab, Qwen3-0.6B,
+#                        both GPUs: 0.3-0.66 on tokens below p=0.1); the gate catches a wrong row (a shifted slot, a stale row: several nats).
 TOPK = 5
 MIN_COMPARED = 8       # greedy steps compared against llama.cpp on at least one prompt before the gate can pass
 NOTHINK = {"chat_template_kwargs": {"enable_thinking": False}}
@@ -42,22 +44,39 @@ NOTHINK = {"chat_template_kwargs": {"enable_thinking": False}}
 
 # ---------------------------------------------------------------- comparisons (pure)
 
+def special_key(key):
+    """A special token's text as the two engines print it: llama.cpp prints '' for <|im_end|>, Gufo the marker: both are one key."""
+    return "" if key.startswith("<|") and key.endswith("|>") else key
+
+
+def best_by_key(pairs):
+    """{key: best log-prob}: tokens that print as the same text (several special or empty-text tokens) count by their best entry."""
+    out = {}
+    for key, lp in pairs:
+        key = special_key(key)
+        if key not in out or lp > out[key]:
+            out[key] = lp
+    return out
+
+
 def check_vs_llama(loom_tops, llama_keys, llama_tops, near_tie, tol=LOGPROB_TOL):
     """Compare Loom's per-step top lists with llama.cpp's greedy continuation of the same prompt.
     loom_tops: per generated step [(key, logprob)] best first (key: the token's text); llama_keys: llama.cpp's greedy token per
     step; llama_tops: per step {key: logprob}. near_tie(top, gold, loom) -> bool (bench_common.near_tie).
     Returns (compared_steps, problems): stops at the first greedy divergence (judged as a near-tie, or a problem)."""
     compared, problems = 0, []
+    llama_keys = [special_key(k) for k in llama_keys]
+    llama_tops = [best_by_key(t.items()) for t in llama_tops]
     for k, (top, gkey, ltop) in enumerate(zip(loom_tops, llama_keys, llama_tops)):
         if not top:
             problems.append(f"step {k}: no top-logprobs")
             break
-        lkey = top[0][0]
+        lkey = special_key(top[0][0])
         if lkey != gkey:
             if not near_tie(ltop, gkey, lkey):
                 problems.append(f"step {k}: Loom top-1 {lkey!r} vs llama.cpp {gkey!r}, not a near-tie")
             break
-        for key, lp in top:
+        for key, lp in best_by_key(top).items():
             if key in ltop and abs(lp - ltop[key]) > tol:
                 problems.append(f"step {k}: token {key!r} logprob {lp:.3f} vs llama.cpp {ltop[key]:.3f}")
         compared += 1
@@ -169,8 +188,9 @@ def run(a):
     work = os.path.splitext(a.out)[0]
     checks, compared_max, stats = [], 0, {"steps": 0, "prompts": 0}
 
+    preset_args = ["--loom-preset", a.preset] if a.preset else []   # a card with several presets needs one named
     # (a) the embed layer alone
-    r = subprocess.run([os.path.join(bundle, "run-embed-probe.sh"), a.package, str(a.steps), "3"], capture_output=True, text=True, timeout=1800)
+    r = subprocess.run([os.path.join(bundle, "run-embed-probe.sh"), a.package, str(a.steps), "3", a.preset], capture_output=True, text=True, timeout=1800)
     ok, why = probe_check((r.stdout.strip().splitlines() or [""])[-1])
     checks.append({"name": "embed_probe", "ok": ok and r.returncode == 0, "why": why or (r.stderr.strip().splitlines() or [""])[-1][:200]})
     with open(work + ".embed_probe.json", "w") as f:
@@ -178,14 +198,14 @@ def run(a):
 
     # (c) capability off: the device path's text
     off = {}
-    g = Gufo(bundle, a.package, a.port, False, work + ".gufo_off.log")
+    g = Gufo(bundle, a.package, a.port, False, work + ".gufo_off.log", extra=preset_args)
     try:
         for p in prompts:
             off[p] = g.chat(p, a.steps, False)[0]
     finally:
         g.close()
     # (b) + (c): capability on
-    g = Gufo(bundle, a.package, a.port, True, work + ".gufo_on.log")
+    g = Gufo(bundle, a.package, a.port, True, work + ".gufo_on.log", extra=preset_args)
     try:
         for p in prompts:
             dev, _ = g.chat(p, a.steps, False)
@@ -199,7 +219,8 @@ def run(a):
                 tops = [[(t["token"], t["logprob"]) for t in e.get("top_logprobs") or []] for e in lp]
                 n, problems = check_vs_llama(tops, lkeys, ltops, near_tie)
                 compared_max = max(compared_max, n)
-                checks.append({"name": "llama", "prompt": p[:40], "ok": not problems, "compared": n, "why": "; ".join(problems[:3])})
+                checks.append({"name": "llama", "prompt": p[:40], "ok": not problems, "compared": n, "why": "; ".join(problems[:3]),
+                               "sample": {"loom": tops[:4], "llama": [[k, sorted(t.items(), key=lambda kv: -kv[1])[:5]] for k, t in zip(lkeys[:4], ltops[:4])]}})
     finally:
         g.close()
     ok, bad = verdict(checks, compared_max, bool(a.llama))
@@ -223,6 +244,7 @@ def main(argv=None):
     ap.add_argument("--steps", type=int, default=32)
     ap.add_argument("--prompts", type=int, default=6)
     ap.add_argument("--port", type=int, default=8181)
+    ap.add_argument("--preset", default="", help="the preset to open (required by a card with several: Strix = the first, the R9700 = <first>-r9700)")
     return run(ap.parse_args(argv))
 
 
