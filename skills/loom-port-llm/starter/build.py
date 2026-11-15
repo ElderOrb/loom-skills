@@ -123,8 +123,13 @@ if DRAFT and DRAFT["kind"] == "assist":   # the Gemma-4 assistant reads the targ
     kv_per_position += 4
 sys.path.insert(0, HERE)
 from formats import memory_cap, split_parts  # noqa: E402
-GGUF_PARTS = split_parts(os.path.abspath(cfg["gguf"]))   # a split GGUF: every part is a parameter file
-weights_bytes = sum(os.path.getsize(p) for p in GGUF_PARTS)
+SAFETENSORS = (cfg.get("weights") or {}).get("format") == "safetensors" or bool(cfg.get("source", {}).get("kind") == "safetensors")
+if SAFETENSORS:   # an HF safetensors checkpoint (inspect_safetensors.py): the files are parameter files, tensors by HF key
+    GGUF_PARTS = [os.path.abspath(p) for p in (cfg.get("weights") or {}).get("files", [])]
+    weights_bytes = sum(os.path.getsize(p) for p in GGUF_PARTS) if GGUF_PARTS and all(os.path.exists(p) for p in GGUF_PARTS) else cfg["source"]["bytes"]
+else:
+    GGUF_PARTS = split_parts(os.path.abspath(cfg["gguf"]))   # a split GGUF: every part is a parameter file
+    weights_bytes = sum(os.path.getsize(p) for p in GGUF_PARTS)
 if DRAFT and DRAFT["kind"] in ("dflash", "assist"):
     weights_bytes += os.path.getsize(DRAFT["gguf"])
 if os.path.isfile((cfg.get("vision") or {}).get("mmproj") or ""):   # the image component's projector, while it encodes
@@ -837,7 +842,10 @@ for name in ("prepare", "control", "storage", "service"):
         text = text.replace(k, v)
     assert "@@" not in text, (name, [l for l in text.splitlines() if "@@" in l])
     open(os.path.join(pkg, "program", name + ".loom"), "w", encoding="utf-8", newline="\n").write(text)
-open(os.path.join(pkg, "weights.loom"), "w", encoding="utf-8", newline="\n").write(open(os.path.join(HERE, "templates", "weights.loom"), encoding="utf-8").read())
+# the weight policy: a safetensors checkpoint's bf16 norms / A_log / dt_bias / conv1d are converted to f32 at load (gen_llm.py writes it)
+_policy = os.path.join(gen, "weights.loom")
+open(os.path.join(pkg, "weights.loom"), "w", encoding="utf-8", newline="\n").write(
+    open(_policy if os.path.exists(_policy) else os.path.join(HERE, "templates", "weights.loom"), encoding="utf-8").read())
 
 # 3. Tokenizer. loom-serve strips *special* added tokens from decoded text; any
 # structural token the control program must see in the output (channel tags,
@@ -900,7 +908,7 @@ for part in GGUF_PARTS:
             sys.exit(f"cannot link {part} into {link} ({e}): enable Windows Developer Mode, or put the package on the GGUF's drive")
 card = {
     "schema_version": 1,
-    "model": {"id": model_id, "name": f"{cfg.get('name', 'llm')} (Loom port, GGUF)"},
+    "model": {"id": model_id, "name": f"{cfg.get('name', 'llm')} (Loom port, {'safetensors' if SAFETENSORS else 'GGUF'})"},
     "programs": {"source": {
         "inputs": [{"path": "program/prepare.loom", "data": ["weights.loom"] + POLICIES},
                    "program/control.loom", "program/storage.loom", "program/service.loom"],
@@ -908,7 +916,7 @@ card = {
     "services": {"chat": {"kind": "text", "version": 1}},
     "variants": {"gguf": {"services": {"chat": {
         "programs": ["source"], "config": {"llm.card": True, **({"llm.logits": False} if os.environ.get("LLM_LOGITS", "1") != "0" else {})},   # llm.logits: key present = the package supports the logits readback (feature.logits_export)
-        "parameters": {"model": {"files": [{"path": f"parameter/{os.path.basename(p)}", "format": "gguf"} for p in GGUF_PARTS]}},
+        "parameters": {"model": {"files": [{"path": f"parameter/{os.path.basename(p)}", "format": "safetensors" if SAFETENSORS else "gguf"} for p in GGUF_PARTS]}},   # the variant key stays "gguf" (card tooling addresses it)
         "tokenizers": {"text": "tokenizer.json"}}}}},
     "presets": {"chat": {"service": "chat", "variant": "gguf", "programs": "source", "execution": {
         "rows": a.rows, "context_capacity": a.context, "pool_capacity": a.pool,

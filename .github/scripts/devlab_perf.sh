@@ -206,7 +206,12 @@ sys.path.insert(0, starter)
 from formats import split_parts
 c = json.load(open(os.path.join(card, "llm_config.json")))
 par = lambda f: os.path.join(card, "parameter", os.path.basename(f))
-if (c.get("source") or {}).get("kind") != "safetensors":   # a safetensors card's llm_config.json already carries its tensor table (inspect_safetensors.py)
+if (c.get("source") or {}).get("kind") == "safetensors":   # an HF safetensors checkpoint: the tensor table from its header (HTTP range reads), the weights as fetched
+    import inspect_safetensors
+    src = inspect_safetensors.load_hf(c["source"]["repo"], c["source"]["revision"])
+    c["tensors"] = inspect_safetensors.build_config(src, drop_chat=True)["tensors"]
+    c["weights"] = {"format": "safetensors", "files": [par(f) for f in c["source"]["files"]]}
+else:
     c["gguf"] = par(c["gguf"])
     if c.get("vision"):
         c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
@@ -215,13 +220,12 @@ if (c.get("source") or {}).get("kind") != "safetensors":   # a safetensors card'
             c[k]["gguf"] = par(c[k]["gguf"]) if os.path.exists(par(c[k]["gguf"])) else None
     # every part of a split GGUF (the later layers' tensors are in the later parts)
     c["tensors"] = {t.name: {"type": t.tensor_type.name.lower(), "shape": [int(x) for x in t.shape]} for p in split_parts(c["gguf"]) for t in gguf.GGUFReader(p).tensors}
-
 for k in ("model_id", "draft"):
     c.pop(k, None)
 json.dump(c, open(dst, "w"), indent=1)
 EOF
 # the reference's model: the GGUF llama.cpp loads, or (a safetensors card) the checkpoint repo vLLM loads, pinned to the card's source revision
-gguf=$("$T" -c "import json; c=json.load(open('$D/cfg.json')); s=c.get('source') or {}; print(s['repo'] if s.get('kind') == 'safetensors' else c['gguf'])")
+gguf=$("$T" -c "import json; c=json.load(open('$D/cfg.json')); s=c.get('source') or {}; print(s['repo'] if s.get('kind') == 'safetensors' else c.get('gguf') or '')")
 safetensors=$("$T" -c "import json; print(1 if (json.load(open('$D/cfg.json')).get('source') or {}).get('kind') == 'safetensors' else '')")
 [ -n "${REFERENCE_CHECKPOINT:-}" ] && { safetensors=1; gguf=$REFERENCE_CHECKPOINT; }   # vLLM forced on a GGUF package (adapter check)
 [ -n "$safetensors" ] && [ -z "${REFERENCE_CHECKPOINT:-}" ] && export VLLM_REVISION=$("$T" -c "import json; print(json.load(open('$D/cfg.json'))['source'].get('revision') or '')")
@@ -283,7 +287,10 @@ import json, os, sys
 card, pkg = sys.argv[1:]
 c = json.load(open(os.path.join(card, "llm_config.json")))
 par = lambda f: os.path.join(card, "parameter", os.path.basename(f))
-c["gguf"] = par(c["gguf"])
+if (c.get("source") or {}).get("kind") == "safetensors":
+    c["weights"] = {"format": "safetensors", "files": [par(f) for f in c["source"]["files"]]}
+else:
+    c["gguf"] = par(c["gguf"])
 if c.get("vision"):
     c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
 for k in ("draft", "drafter", "assistant"):

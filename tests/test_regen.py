@@ -53,7 +53,7 @@ class Base(unittest.TestCase):
     def plan(self, *args, slugs=(SLUG,), device="radeon-r9700"):
         with mock.patch.object(regen, "sh", self.gen), mock.patch.object(regen, "hf_head", lambda repo: "f" * 40), \
                 contextlib.redirect_stdout(io.StringIO()):
-            regen.main(["plan", "--device", device, "--state", self.state, *args, *slugs])
+            regen.main(["plan", "--base", "r9700", "--device", device, "--state", self.state, *args, *slugs])
         return regen.State(self.state)
 
     def collected(self, **over):
@@ -116,7 +116,7 @@ class PlanTest(Base):
         def gen(cmd, **kw):
             return subprocess.CompletedProcess(cmd, 1, "", "no job: x do not fit the R9700")
         with mock.patch.object(regen, "sh", gen), mock.patch.object(regen, "hf_head", lambda r: "f" * 40), contextlib.redirect_stdout(io.StringIO()):
-            regen.main(["plan", "--device", "radeon-r9700", "--state", self.state, SLUG])
+            regen.main(["plan", "--base", "r9700", "--device", "radeon-r9700", "--state", self.state, SLUG])
         st = regen.State(self.state)
         self.assertEqual(next(iter(st.jobs.values()))["stage"], "skipped")
 
@@ -127,7 +127,7 @@ class PlanTest(Base):
 
     def test_only_staging_is_a_target(self):
         with self.assertRaises(SystemExit), mock.patch.object(regen, "sh", self.gen):
-            regen.main(["plan", "--device", "radeon-r9700", "--state", self.state, "--new-org", "loom-fun", SLUG])
+            regen.main(["plan", "--base", "r9700", "--device", "radeon-r9700", "--state", self.state, "--new-org", "loom-fun", SLUG])
 
 
 class SubmitPollTest(Base):
@@ -148,9 +148,9 @@ class SubmitPollTest(Base):
             return {".object.sha": "a" * 40, ".sha": "b" * 40, ".number": "77"}.get(jq)
         with mock.patch.object(regen, "gh_api", api), contextlib.redirect_stdout(io.StringIO()):
             regen.main(["submit", self.state])
-        self.assertEqual([(m, p) for m, p, _ in seen], [("GET", "git/ref/heads/refactor"), ("POST", "git/refs"), ("GET", "contents/.github/devlab/perf.json"),
+        self.assertEqual([(m, p) for m, p, _ in seen], [("GET", "git/ref/heads/r9700"), ("POST", "git/refs"), ("GET", "contents/.github/devlab/perf.json"),
                                                          ("PUT", "contents/.github/devlab/perf.json"), ("POST", "pulls"), ("POST", "issues/77/labels")])
-        self.assertEqual(seen[4][2]["base"], "refactor")
+        self.assertEqual(seen[4][2]["base"], "r9700")   # plan --base: the experiment branch is cut from it and targets it
         self.assertIn("kind: tooling", seen[4][2]["body"])
         self.assertEqual(seen[5][2], {"labels[]": "devlab-perf"})
         st = regen.State(self.state)

@@ -10,6 +10,7 @@ published model, without a GPU and without any weights.
 | `<slug>/tokenizer_min.json` | the tokenizer's added tokens (content, id): all the programs read of the tokenizer (`gen_llm.py` stop-token restore) |
 | `<slug>/gguf/<file>.json.gz` + `blobs/` | GGUF header dumps (metadata, tensor infos, size, rope_freqs data); vocab arrays and chat templates in the shared content-addressed `blobs/` |
 | `gguf_stub.py` | `dump` a GGUF (file or URL, HTTP range reads) / `stub` a sparse header-only file `inspect_gguf.py` and `build.py` accept |
+| `st_stub.py` | `dump` an HF safetensors checkpoint (directory or repo, HTTP range reads of the headers) into `<slug>/safetensors/<file>.json.gz`: tensor table, config.json, generation_config, tokenizer_config, chat template, added tokens; `build_fleet.py` builds such a model with `inspect_safetensors.py` from the dump (manifest `files.<name>.kind: safetensors`) |
 | `add_model.py` | add or refresh a model from its package directory (reads only small files) |
 | `build_fleet.py` | `--ref REF` / `--tree PATH` `--out DIR`: programs-only build of the fleet, CPU only, both targets |
 | `diff_fleet.py` | `BASE_DIR HEAD_DIR --json --md`: per model changed files, blocks, GPU target, card rows, strata, model.json |
@@ -31,9 +32,9 @@ Adding a model: `python fleet/add_model.py SLUG PACKAGE_DIR --staging-revision R
 
 ## Regenerating cards: `regen.py`
 
-    regen.py plan --device radeon-r9700 --mode card --all --state S.json   # a new device: one card measurement per model, no A/B
+    regen.py plan --base BRANCH --device radeon-r9700 --mode card --all --state S.json   # BRANCH: the integration branch; a new device: one card measurement per model, no A/B
     regen.py submit S.json; (loop, >= 120 s:) regen.py poll S.json; regen.py collect S.json; regen.py ingest S.json
-    regen.py plan --device radeon-r9700 --replicas 2 --sequential --no-baselines --priority SLUG --state T.json   # a narrow change: the pair in ONE submission
+    regen.py plan --base BRANCH --device radeon-r9700 --replicas 2 --sequential --no-baselines --priority SLUG --state T.json   # a narrow change: the pair in ONE submission
     regen.py submit S.json --max-inflight auto                               # a sweep in waves (the device's runner count); a --priority plan waits one wave at most
     regen.py rerun S.json && regen.py submit S.json                          # ONE confirming -r2 job where the ratchet asks for it
     regen.py publish S.json --dry-run                                        # card-only upload to loom-fun-staging (no flag: uploads)

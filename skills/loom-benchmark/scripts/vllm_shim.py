@@ -112,7 +112,7 @@ class VllmEngine:
 
     def props(self):
         return {"engine": "vllm", "version": self.version, "checkpoint": self.checkpoint, "revision": self.revision,
-                "dtype": self.dtype, "quantization": self.quantization or "checkpoint config (quark)"}
+                "dtype": self.dtype, "quantization": self.quantization or "none (bf16 weights)"}
 
 
 class MockEngine:
