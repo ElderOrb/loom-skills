@@ -12,7 +12,7 @@ starter's reader against it on real rows.
 import json
 import struct
 
-import numpy as np
+import numpy as np  # noqa: E402  (tests that import this module skip without numpy)
 
 E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], np.float64)
 DTYPES = {"BF16": np.uint16, "F16": np.float16, "F32": np.float32, "U8": np.uint8, "I8": np.int8}
