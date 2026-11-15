@@ -36,11 +36,27 @@ def q8_ref(xs):
 
 
 cfg = json.load(open(sys.argv[1])); out = sys.argv[2]; os.makedirs(out, exist_ok=True)
-from formats import split_parts  # noqa: E402
-T = {t.name: t for p in split_parts(cfg["gguf"]) for t in GGUFReader(p).tensors}
-def raw(name): return np.asarray(T[name].data).view(np.int8).reshape(-1)
-def deq(name):
-    t = T[name]; return dequantize(np.asarray(t.data), t.tensor_type).reshape(int(t.shape[1]), int(t.shape[0])) if len(t.shape) == 2 else np.asarray(t.data, dtype=np.float32)
+from formats import split_parts, SPLIT  # noqa: E402
+if (cfg.get("source") or {}).get("kind") == "safetensors":   # an HF checkpoint (inspect_safetensors.py): its own bytes, numpy references
+    import st_tensors
+    T = st_tensors.load(cfg)
+    def raw(name): return np.asarray(T[name].data).view(np.int8).reshape(-1)
+    def deq(name):
+        t = T[name]; v = t.values()
+        return v.reshape(int(t.shape[1]), int(t.shape[0])) if len(t.shape) == 2 else np.asarray(v, dtype=np.float32)
+else:
+    T = {t.name: t for p in split_parts(cfg["gguf"]) for t in GGUFReader(p).tensors}
+    def raw(name): return np.asarray(T[name].data).view(np.int8).reshape(-1)
+    def deq(name):
+        t = T[name]; return dequantize(np.asarray(t.data), t.tensor_type).reshape(int(t.shape[1]), int(t.shape[0])) if len(t.shape) == 2 else np.asarray(t.data, dtype=np.float32)
+def raw_scale(name): return np.asarray(T[name].scale).view(np.int8).reshape(-1)   # the scale plane of a split-plane format (formats.SPLIT)
+def split_w(name, tag, key="w"):
+    """(file decl, launch arg, launch type) of a split-plane weight's scale operand, saved as <tag>_<key>s; empty for other formats."""
+    if T[name].tensor_type.name.lower() not in SPLIT:
+        return "", "", ""
+    ws = raw_scale(name); save(f"{tag}_{key}s", ws)
+    return f'  %{key}s = check.file.read.npy path("{tag}_{key}s.npy") : {ty(ws)}\n', f", %{key}s", ", " + ty(ws)
+G_GROUPED = (cfg.get("gdn") or {}).get("v_order") == "grouped"   # HF value heads are grouped by key head (gen_gdn.kh_line); GGUF files hold them tiled
 H, D, QH, KVH, eps = cfg["hidden"], cfg["head_dim"], cfg["heads"], cfg["kv_heads"], cfg["rms_eps"]
 rng = np.random.default_rng(0)
 
@@ -194,7 +210,7 @@ for li in range(cfg["layers"]):
         name = f"blk.{li}.{nm_}.weight"
         if name not in T:
             continue
-        key = (T[name].tensor_type.name.lower(), K)
+        key = (T[name].tensor_type.name.lower(), K) + ((int(T[name].shape[1]),) if T[name].tensor_type.name.lower() in SPLIT else ())   # split formats: every output width picks its own rows-per-workgroup kernel
         if key not in seen: seen.add(key); todo.append((name, K))
 for name, K in todo:
     fmt = T[name].tensor_type.name.lower(); W = deq(name); n = W.shape[0]
@@ -208,15 +224,16 @@ for name, K in todo:
         _R = pick_r(n, K, tg)   # the variant the model launches (gen_llm uses the same rule)
         if _R != 16: kern += f"_r{_R}"
         wt = ty(raw(name))
+        sd, sa, st = split_w(name, tag)
         cases.append(f"""check.case public @mv_{tag} {{
   %n = check.literal value({n}) : index
   %t = check.literal value({tg}) : index
   %acc = check.literal value(0) : i32
   %w = check.file.read.npy path("{tag}_w.npy") : {wt}
-  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{tg}x{K}xf32>
+{sd}  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{tg}x{K}xf32>
   %e = check.file.read.npy path("{tag}_y.npy") : tensor<{tg}x{n}xf32>
   %y = check.generate.fill value(0.0) : tensor<{tg}x{n}xf32>
-  kernel.launch @{kern}[%n, %t](%n, %t, %acc, %x, %w, %y) : [index, index](index, index, i32, tensor<{tg}x{K}xf32>, {wt}, tensor<{tg}x{n}xf32>)
+  kernel.launch @{kern}[%n, %t](%n, %t, %acc, %x, %w{sa}, %y) : [index, index](index, index, i32, tensor<{tg}x{K}xf32>, {wt}{st}, tensor<{tg}x{n}xf32>)
   check.expect.close actual(%y) expected(%e) atol(2.0e-3) rtol(2.0e-3) nan(different) : tensor<{tg}x{n}xf32>
   check.return
 }}
@@ -822,7 +839,7 @@ if cfg.get("recurrent_layers"):
     S = S0.astype(np.float64).copy(); raw_o = np.zeros((t, HV, DV))
     for i in range(t):
         for h in range(HV):
-            kh = h % HK; q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
+            kh = (h // (HV // HK) if G_GROUPED else h % HK); q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
             g = np.log1p(np.exp(alpha[i, h] + dt[h])) * a_log[h]
             St = S[h] * np.exp(g)                      # [b][a]
             d = (vs[i, h] - St @ k) / (1 + np.exp(-beta[i, h]))
@@ -900,7 +917,7 @@ if cfg.get("recurrent_layers"):
             arena[rd // 4:rd // 4 + SB // 4] = S0.reshape(-1); S = S0.astype(np.float64)
         for i in range(first, first + L):
             for h in range(HV):
-                kh = h % HK; q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
+                kh = (h // (HV // HK) if G_GROUPED else h % HK); q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
                 St = S[h] * np.exp(np.log1p(np.exp(float(alpha[i, h]) + dt[h])) * a_log[h])
                 d = (vs[i, h] - St @ k) / (1 + np.exp(-float(beta[i, h])))
                 S[h] = St + np.outer(d, k); raw_o[i, h] = S[h] @ q
@@ -1018,8 +1035,8 @@ def gemm_cases():
                 continue
             fmt = T[name].tensor_type.name.lower()
             up = f"blk.{li}.ffn_up.weight"
-            sw = nm_ == "ffn_gate" and up in T and T[up].tensor_type == T[name].tensor_type
-            if fmt not in (_GEMM_FMTS if os.environ.get("KTEST_GEMM_ALL", "0") not in ("", "0") else IQ_FMTS) or (fmt, sw) in seen_g:   # the formats with GEMM kernel tests (formats.ICODES; KTEST_GEMM_ALL=1: every GEMM format, e.g. bf16/f32/q4_0 on a new device)
+            sw = nm_ == "ffn_gate" and up in T and T[up].tensor_type == T[name].tensor_type and fmt not in SPLIT   # split formats: two projections + g_silu_mul
+            if (fmt not in (_GEMM_FMTS if os.environ.get("KTEST_GEMM_ALL", "0") not in ("", "0") else IQ_FMTS) and fmt not in SPLIT) or (fmt, sw) in seen_g:   # the formats with GEMM kernel tests (formats.ICODES; KTEST_GEMM_ALL=1: every GEMM format, e.g. bf16/f32/q4_0 on a new device)
                 continue
             seen_g.add((fmt, sw))
             yield name, fmt, sw
@@ -1061,6 +1078,9 @@ if os.environ.get("GEMM_TESTS", "1") == "1":
             save(tag + "_x", x16); save(tag + "_s", sc); save(tag + "_y", yv.astype(np.float32)); save(tag + "_w", Wr)
             wdecl = f'  %w = check.file.read.npy path("{tag}_w.npy") : {ty(Wr)}\n'
             wargs, wtys = "%w", ty(Wr)
+            if fmt in SPLIT:   # the scale plane of the slice of output rows
+                Sr = raw_scale(name).reshape(n, -1)[:n_use].reshape(-1); save(tag + "_ws", Sr)
+                wdecl += f'  %ws = check.file.read.npy path("{tag}_ws.npy") : {ty(Sr)}\n'; wargs += ", %ws"; wtys += ", " + ty(Sr)
             if swiglu:
                 save(tag + "_u", Ur); wdecl += f'  %u = check.file.read.npy path("{tag}_u.npy") : {ty(Ur)}\n'; wargs += ", %u"; wtys += ", " + ty(Ur)
             tol = 3.0e-2 * float(np.abs(yv).std() + 1e-6)

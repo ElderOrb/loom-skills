@@ -108,6 +108,8 @@ def cmd_prepare(a):
         if isinstance(d, dict) and isinstance(d.get(k), str):
             d[k] = os.path.basename(d[k])
     base(cfg, "gguf"); base(cfg.get("vision"), "mmproj")
+    if isinstance(cfg.get("weights"), dict):   # a safetensors package (inspect_safetensors.py): the file names only
+        cfg["weights"] = {"format": cfg["weights"]["format"], "files": [os.path.basename(p) for p in cfg["weights"]["files"]]}
     for k in ("draft", "drafter", "assistant", "mtp"):
         base(cfg.get(k), "gguf")
     json.dump(cfg, open(cfgp, "w", encoding="utf-8"), indent=1)

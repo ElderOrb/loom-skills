@@ -93,18 +93,25 @@ def build_one(slug, m, skills, out, rdna4, keep, real=None):
     os.makedirs(work)
     log = []
     try:
-        if real:
+        st = {n: f for n, f in m["files"].items() if f.get("kind") == "safetensors"}   # an HF safetensors checkpoint: header dump, no stub file
+        if real and not st:
             real_inputs(slug, m, work, real)
         else:
             for name, f in m["files"].items():
-                gguf_stub.write_stub(gguf_stub.load(os.path.join(HERE, f["dump"])), os.path.join(work, name))
+                if name not in st:
+                    gguf_stub.write_stub(gguf_stub.load(os.path.join(HERE, f["dump"])), os.path.join(work, name))
             shutil.copy(os.path.join(HERE, slug, "tokenizer_min.json"), work)
         kit = kit_dir(skills, m.get("kit"), work)
         pcfg = json.load(open(os.path.join(HERE, slug, "llm_config.json")))
-        rc, o = sh([sys.executable, os.path.join(kit, "inspect_gguf.py"), os.path.basename(pcfg["gguf"]), "fresh.json"], work)
+        if st:
+            (sname, sf), = st.items()
+            ck = os.path.join(work, sname)   # the package links it as parameter/<name>; never read when the build has no weights (cfg source.bytes)
+            rc, o = sh([sys.executable, os.path.join(kit, "inspect_safetensors.py"), os.path.join(HERE, sf["dump"]), "fresh.json", "--checkpoint", ck], work)
+        else:
+            rc, o = sh([sys.executable, os.path.join(kit, "inspect_gguf.py"), os.path.basename(pcfg["gguf"]), "fresh.json"], work)
         log.append(o)
         if rc:
-            raise RuntimeError("inspect_gguf: " + o.strip().splitlines()[-1][-300:])
+            raise RuntimeError("inspect: " + o.strip().splitlines()[-1][-300:])
         cfg = json.load(open(os.path.join(work, "fresh.json")))
         cfg.update(pcfg)
         json.dump(cfg, open(os.path.join(work, "cfg.json"), "w"), indent=1)

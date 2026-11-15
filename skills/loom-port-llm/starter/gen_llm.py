@@ -16,6 +16,7 @@ import json, math, os, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate  # noqa: E402
+from formats import SPLIT, SCALE_DIV  # noqa: E402
 
 CFG = json.load(open(os.environ.get("LLM_CONFIG") or sys.argv[1]))
 H = CFG["hidden"]; HG = H // 32          # hidden size, 32-value groups per hidden row
@@ -39,7 +40,7 @@ def nff(i):
     """index SSA of layer i's FFN width."""
     return "%nFF" if FF_UNIFORM else f"%nFF{FFL[i]}"
 # Layers whose ffn_gate and ffn_up use different formats (unsloth UD quants) run two projections + g_silu_mul.
-MIXED_FFN = any(n.endswith("ffn_gate.weight") and CFG["tensors"].get(n.replace("ffn_gate", "ffn_up"), {}).get("type") not in (None, t["type"])
+MIXED_FFN = any(t["type"] in SPLIT for t in CFG["tensors"].values()) or any(n.endswith("ffn_gate.weight") and CFG["tensors"].get(n.replace("ffn_gate", "ffn_up"), {}).get("type") not in (None, t["type"])
                 for n, t in CFG["tensors"].items())
 G = QH // KVH                             # query heads per KV head (waves per attention workgroup)
 # Prefill flash attention (gen_flash2.py) tiles head_dim over 32*G lanes: it needs a power-of-two group.
@@ -138,7 +139,7 @@ def yarn_constants(y, rd, theta):
     mscale = y.get("attn_factor", 1.0) * (1.0 + 0.1 * math.log(f))
     return low, 1.0 / max(0.001, high - low), 1.0 - 1.0 / f, mscale
 
-from formats import FMT, SB, LOWBIT, ICODES as IQ_FMTS  # noqa: E402  bytes / values per block of each decoded format
+from formats import FMT, SB, LOWBIT, ICODES as IQ_FMTS, SPLIT, SCALE_DIV  # noqa: E402  bytes / values per block of each decoded format
 
 
 def row_bytes(fmt, k):
@@ -800,6 +801,60 @@ func.def inline @g_mxfp4_values(%w: buffer, %origin: offset, %group: index) -> (
 """
 
 
+# emitted only when a split-plane MXFP4 tensor (safetensors, Quark; format mxfp4s) is used. The nibble plane holds 16 bytes per
+# 32 values (byte j: value 2j in the low nibble, 2j+1 in the high one: vLLM's mxfp4_w4a8_gemv_rdna3 and Quark's dq_mxfp4 read
+# the checkpoint the same way), the scale plane one E8M0 byte per 32 values: value = E2M1 * 2^(e - 127).
+MXFP4S = r"""
+// MXFP4, split planes: 32 values at nibble-plane offset `origin`, whose E8M0 scale byte is at scale-plane offset `scale_origin`.
+func.def inline @g_mxfp4s_values(%w: buffer, %ws: buffer, %origin: offset, %scale_origin: offset, %group: index) -> (vector<32xf32>) {
+  %e_view = buffer.view %ws[%scale_origin] : buffer -> view<1xi8>
+  %code_view = buffer.view %w[%origin] : buffer -> view<16xi8>
+  %e8 = view.load %e_view[0] : view<1xi8> -> i8
+  %e = scalar.extui %e8 : i8 to i32
+  %c1_i = scalar.constant 1 : i32
+  %c2_i = scalar.constant 2 : i32
+  %c23_i = scalar.constant 23 : i32
+  %tiny_base = scalar.constant 2097152 : i32
+  %e_low = scalar.cmpi ult, %e, %c2_i : i32
+  %tiny = scalar.shli %tiny_base, %e : i32
+  %em1 = scalar.subi %e, %c1_i : i32
+  %normal = scalar.shli %em1, %c23_i : i32
+  %bits = scf.select %e_low, %tiny, %normal : i32
+  %d = scalar.bitcast %bits : i32 to f32
+  %payload = vector.load %code_view[0] : view<16xi8> -> vector<16xi8>
+  %mask = vector.constant 15 : vector<16xi8>
+  %four = vector.constant 4 : vector<16xi8>
+  %lower = vector.andi %payload, %mask : vector<16xi8>
+  %shifted = vector.shrui %payload, %four : vector<16xi8>
+  %upper = vector.andi %shifted, %mask : vector<16xi8>
+  %k0 = scalar.constant 0 : i8
+  %k1 = scalar.constant 1 : i8
+  %k2 = scalar.constant 2 : i8
+  %k3 = scalar.constant 3 : i8
+  %k4 = scalar.constant 4 : i8
+  %k5 = scalar.constant 6 : i8
+  %k6 = scalar.constant 8 : i8
+  %k7 = scalar.constant 12 : i8
+  %k9 = scalar.constant -1 : i8
+  %k10 = scalar.constant -2 : i8
+  %k11 = scalar.constant -3 : i8
+  %k12 = scalar.constant -4 : i8
+  %k13 = scalar.constant -6 : i8
+  %k14 = scalar.constant -8 : i8
+  %k15 = scalar.constant -12 : i8
+  %codebook = vector.from_elements %k0, %k1, %k2, %k3, %k4, %k5, %k6, %k7, %k0, %k9, %k10, %k11, %k12, %k13, %k14, %k15 : vector<16xi8>
+  %lo_codes = vector.table.lookup %codebook[%lower] : vector<16xi8>, vector<16xi8> -> vector<16xi8>
+  %hi_codes = vector.table.lookup %codebook[%upper] : vector<16xi8>, vector<16xi8> -> vector<16xi8>
+  %lo = vector.sitofp %lo_codes : vector<16xi8> to vector<16xf32>
+  %hi = vector.sitofp %hi_codes : vector<16xi8> to vector<16xf32>
+  %codes = vector.interleave<0> %lo, %hi : vector<16xf32>, vector<16xf32> -> vector<32xf32>
+  %ds = vector.splat %d : vector<32xf32>
+  %values = vector.mulf %codes, %ds : vector<32xf32>
+  func.return %values : vector<32xf32>
+}
+"""
+
+
 # emitted only when a Q5_0 tensor is used (see main): llama.cpp's Q4_K_M keeps projections whose rows are not a multiple
 # of 256 in Q5_0 (Qwen2.5-0.5B: hidden 896). Integer codes for the int8 matvecs and head (ACT_Q8), values for the rest
 # (embedding, f32 matvecs, the GEMM's dequant16 through gen_gemm.HELPER).
@@ -1043,7 +1098,8 @@ def _mv(fmt, K, R=16, TG=1, swiglu=False, suffix="", iq=False, pair=False, chunk
     NCH = TG // CHK
     assert NCH * CHK == TG
     PERM = iq and nw == 2 and BFLY_PERM and CHK >= 8
-    wargs = "%w: buffer, %w2: buffer" if nw == 2 else "%w: buffer"
+    wargs = "%w: buffer, %w2: buffer" if nw == 2 else "%w: buffer" + (", %ws: buffer" if fmt in SPLIT else "")
+    assert not (fmt in SPLIT and (nw == 2 or iq)), f"{fmt}: split-plane weights have no swiglu / int8-activation matvec yet"
     yargs = "%y: buffer, %y2: buffer" if pair else "%y: buffer"
     L = [f"""
 kernel.def export("{name}") @{name}(%n: index, %tokens: index) {{
@@ -1164,8 +1220,15 @@ kernel.def export("{name}") @{name}(%n: index, %tokens: index) {{
       scf.yield %zero32, %zero_f, %zero_f : vector<32xf32>, f32, f32
     }}""")
         else:
+            sc_call = (f"%{w}, %ws, %o, %so" if fmt in SPLIT else f"%{w}, %o"), ("buffer, buffer, offset, offset" if fmt in SPLIT else "buffer, offset")
+            if fmt in SPLIT:   # the scale plane: one byte per 32 values, K // 32 bytes per row
+                L.append(f"""    %srow_bytes = index.constant {groups} : offset
+    %sro = index.scale %row, %srow_bytes : index, offset -> offset
+    %one_byte = index.constant 1 : offset
+    %sga = index.scale %g, %one_byte : index, offset -> offset
+    %so = index.add %sro, %sga : offset""")
             L.append(f"""    %wv{wi} = scf.if %ok -> (vector<32xf32>) {{
-      %v = func.call @g_{fmt}_values(%{w}, %o, %within) : (buffer, offset, index) -> (vector<32xf32>)
+      %v = func.call @g_{fmt}_values({sc_call[0]}, %within) : ({sc_call[1]}, index) -> (vector<32xf32>)
       scf.yield %v : vector<32xf32>
     }} else {{
       scf.yield %zero32 : vector<32xf32>
@@ -3840,11 +3903,17 @@ def linear(fmt, x, s, w, wsize, y, k, n, kval, mode="store", gemm_only=False, wi
     else the decode matrix-vector kernel (1-token or 4-token variant). n: the output width, a literal or an NVAL
     symbol; a symbol another generator defines (the drafters' %nDQ, %nE, ...) comes with its value as width."""
     base = f"g_mv_{fmt}_k{kval}" + ("_swiglu" if mode == "swiglu" else "")
+    assert not (fmt in SPLIT and mode == "swiglu"), f"{fmt}: no swiglu kernels (gate and up are two projections)"
     if mode == "swiglu":
         wa, wb = w
         args = f"%t, {k}, {n}, {x}, {s}, {wa}, {wb}, {y}"
         types = f"index, index, index, buffer, buffer, view<{wsize}xi8>, view<{wsize}xi8>, buffer"
         mv_args = f"({n}, %t, %zero_i32, {x}, {wa}, {wb}, {y}) : [index, index](index, index, i32, buffer, view<{wsize}xi8>, view<{wsize}xi8>, buffer)"
+    elif fmt in SPLIT:   # weight plane + scale plane (<w>_sc, declared beside it by par())
+        ws, wst = f"{w}, {w}_sc", f"view<{wsize}xi8>, view<{wsize // SCALE_DIV[fmt]}xi8>"
+        args = f"%t, {k}, {n}, {x}, {s}, {ws}, {y}"
+        types = f"index, index, index, buffer, buffer, {wst}, buffer"
+        mv_args = f"({n}, %t, %zero_i32, {x}, {ws}, {y}) : [index, index](index, index, i32, buffer, {wst}, buffer)"
     else:
         args = f"%t, {k}, {n}, {x}, {s}, {w}, {y}"
         types = f"index, index, index, buffer, buffer, view<{wsize}xi8>, buffer"
@@ -4413,7 +4482,11 @@ def lin2(fmt, x, s, wa, wb, wsize, ya, yb, k, n, kval, width=None):
 
 def lin_mv(fmt, x, w, wsize, y, n, kval):
     """Always the matrix-vector kernels (any token count): for tiny projections (n = 16)."""
-    a = f"({n}, %t, %zero_i32, {x}, {w}, {y}) : [index, index](index, index, i32, buffer, view<{wsize}xi8>, buffer)"
+    if fmt in SPLIT:
+        a = (f"({n}, %t, %zero_i32, {x}, {w}, {w}_sc, {y}) : [index, index](index, index, i32, buffer, view<{wsize}xi8>, "
+             f"view<{wsize // SCALE_DIV[fmt]}xi8>, buffer)")
+    else:
+        a = f"({n}, %t, %zero_i32, {x}, {w}, {y}) : [index, index](index, index, i32, buffer, view<{wsize}xi8>, buffer)"
     few = f"kernel.launch @{mv_name(fmt, kval, False, n, 4)}[{n}, %t]{a}"
     nv = NVAL.get(n, None) if isinstance(n, str) else n
     if nv and nv % 16 == 0 and mv_name(fmt, kval, False, n, 4).endswith(("_r1", "_r2", "_r4", "_r8")):
@@ -5087,6 +5160,34 @@ def rope_bias(block, tag, ind="  "):
             "".join(f", %{p}_bias_{tag}" for p in QKV_BIAS), "".join(f", view<{width[p]}xf32>" for p in QKV_BIAS))
 
 
+def hf_rename(text):
+    """A safetensors checkpoint addresses tensors by their HF names: every command.parameter of a tensor that the config maps
+    (cfg tensors[<internal name>]["hf"], and "<internal name>#scale" for the scale plane of a split-plane weight) takes its HF key.
+    The internal GGUF-style names stay the generator's vocabulary (llm_config.json, kernel tests)."""
+    import re as _re
+    names = {}
+    for n, t in TENS.items():
+        if t.get("hf"):
+            names[n] = t["hf"]
+        if t.get("hf_scale"):
+            names[n + "#scale"] = t["hf_scale"]
+    if not names:
+        return text
+    unmapped = set()
+    assert not (gen_draft.enabled() and gen_draft.DRAFT["kind"] in ("dflash", "assist")), \
+        "a safetensors target with a separate drafter checkpoint: the drafter's parameter names would collide with the map"
+
+    def sub(m):
+        if m.group(3) in names:
+            return m.group(1) + names[m.group(3)] + m.group(4)
+        if m.group(2) == "%weights":
+            unmapped.add(m.group(3))
+        return m.group(0)
+    text = _re.sub(r'(command\.parameter (%\w+), ")([^"]+)(")', sub, text)
+    assert not unmapped, f"safetensors: parameters with no HF key in the config: {sorted(unmapped)[:8]}"
+    return text
+
+
 def model():
     """Command program: embed, then a statically unrolled layer loop (each
     layer's tensor formats come from the GGUF), then the argmax head."""
@@ -5234,7 +5335,9 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
         b = f"blk.{i}."
         nm = lambda n: b + n + ".weight"
         sz = lambda n: tensor_bytes(nm(n))
-        par = lambda var, n, ty=None: f'    %{var}_{i} = command.parameter %weights, "{nm(n)}" : {ty or f"view<{sz(n)}xi8>"}\n'
+        par = lambda var, n, ty=None: (f'    %{var}_{i} = command.parameter %weights, "{nm(n)}" : {ty or f"view<{sz(n)}xi8>"}\n'
+                                       + (f'    %{var}_{i}_sc = command.parameter %weights, "{nm(n)}#scale" : view<{sz(n) // SCALE_DIV[fmt_of(nm(n))]}xi8>\n'
+                                          if fmt_of(nm(n)) in SPLIT else ""))
         nq, nqh, qd = ("%nQ", "%nQH", QD) if LH[i] == QH else (f"%nQ{LH[i]}", f"%nQH{LH[i]}", LH[i] * D)
         kind = kind_note or (" (gated delta-net)" if i in RECUR else (" (sliding)" if i in sliding else "") + (" (no RoPE)" if i in nope else ""))
         T = [f"  // ---- layer {i}{kind}\n  scf.if %gemm {{\n    kernel.launch @g_row_scale_f16[%t](%t, %nH, %h, %s_h, %h16) : [index](index, index, buffer, buffer, buffer)\n  }}\n",
@@ -5318,7 +5421,7 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
           T.append(moe_layer(i, b, nm, sz, par))
         else:
           fg, fu = fmt_of(nm("ffn_gate")), fmt_of(nm("ffn_up"))
-          if fg == fu:
+          if fg == fu and fg not in SPLIT:
               T.append("  " + lin(fg, "%h", "%s_h", (f"%w_gate_{i}", f"%w_up_{i}"), sz("ffn_gate"), "%f", "%nH", nff(i), H, mode="swiglu") + "\n")
           else:   # gate and up in different formats (unsloth UD mixes): two projections, then silu(gate) * up
               T.append("  " + lin(fg, "%h", "%s_h", f"%w_gate_{i}", sz("ffn_gate"), "%f", "%nH", nff(i), H) + "\n")
@@ -5450,6 +5553,10 @@ if __name__ == "__main__":
         COMMON += Q5_0
     if any(t["type"] == "mxfp4" for t in TENS.values()):
         COMMON += MXFP4
+    if any(t["type"] in SPLIT for t in TENS.values()):
+        COMMON += MXFP4S
+    if any(t["type"] == "bf16" for t in TENS.values()) and "func.def inline @g_bf16_values" not in COMMON:   # bf16 embedding / head / MTP block (safetensors)
+        COMMON += BF16_VALUES
     if USED_MVQ or USED_MOEQ:   # ACT_Q8: int8-activation matvecs, their weight-code helpers and g_quant_q8
         COMMON += ICODES + "".join(mv(fmt, K, R=R, TG=TG, swiglu=sw == 1, pair=sw == 2, suffix=f"_r{R}" if R != 16 else "", iq=True)
                                    for fmt, K, sw, R, TG in sorted(USED_MVQ))
@@ -5531,8 +5638,17 @@ if __name__ == "__main__":
                            env=dict(os.environ, FLASH2_TARGET="llm", FLASH2_OUT=hout, LLM_CONFIG=hcfg))
             parts.append(with_heads(h, lambda: open(hout).read()))
             os.remove(hcfg)
+    SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in program}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
+    if SRC_PREP:
+        import prep_weights
+        entries = {t["hf"]: ("bf16e", "f32_" + t["prep"]["op"], int(math.prod(t["shape"]))) for t in SRC_PREP.values()}
+        assert all(t["prep"]["src"] == "bf16" for t in SRC_PREP.values()), "prepared tensors are bf16 in the checkpoint"
+        parts.append(prep_weights.library({(s_, d_) for s_, d_, _ in entries.values()}))
+        open(os.path.join(out_dir, "weights.loom"), "w", newline="\n").write(
+            prep_weights.policy(entries, "the safetensors checkpoint's bf16 norms, A_log, dt_bias and conv1d"))
     parts.append(program)
     text = "\n".join(parts)
+    text = hf_rename(text)
     if "_attention_flash2_partial\")" in text:   # the blocks a run covers in part: their kernel after each launch
         text = re.sub(r"^( *)kernel\.launch @(\w+)_attention_flash2(_h\d+)?\[(.*)$",
                       r"\g<0>\n\1kernel.launch @\2_attention_flash2_partial\3[\4",

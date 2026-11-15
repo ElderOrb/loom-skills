@@ -203,19 +203,25 @@ sys.path.insert(0, starter)
 from formats import split_parts
 c = json.load(open(os.path.join(card, "llm_config.json")))
 par = lambda f: os.path.join(card, "parameter", os.path.basename(f))
-c["gguf"] = par(c["gguf"])
-if c.get("vision"):
-    c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
-for k in ("drafter", "assistant"):
-    if c.get(k) and c[k].get("gguf"):
-        c[k]["gguf"] = par(c[k]["gguf"]) if os.path.exists(par(c[k]["gguf"])) else None
-# every part of a split GGUF (the later layers' tensors are in the later parts)
-c["tensors"] = {t.name: {"type": t.tensor_type.name.lower(), "shape": [int(x) for x in t.shape]} for p in split_parts(c["gguf"]) for t in gguf.GGUFReader(p).tensors}
+if (c.get("source") or {}).get("kind") == "safetensors":   # an HF safetensors checkpoint: the tensor table from its header (HTTP range reads), the weights as fetched
+    import inspect_safetensors
+    src = inspect_safetensors.load_hf(c["source"]["repo"], c["source"]["revision"])
+    c["tensors"] = inspect_safetensors.build_config(src, drop_chat=True)["tensors"]
+    c["weights"] = {"format": "safetensors", "files": [par(f) for f in c["source"]["files"]]}
+else:
+    c["gguf"] = par(c["gguf"])
+    if c.get("vision"):
+        c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
+    for k in ("drafter", "assistant"):
+        if c.get(k) and c[k].get("gguf"):
+            c[k]["gguf"] = par(c[k]["gguf"]) if os.path.exists(par(c[k]["gguf"])) else None
+    # every part of a split GGUF (the later layers' tensors are in the later parts)
+    c["tensors"] = {t.name: {"type": t.tensor_type.name.lower(), "shape": [int(x) for x in t.shape]} for p in split_parts(c["gguf"]) for t in gguf.GGUFReader(p).tensors}
 for k in ("model_id", "draft"):
     c.pop(k, None)
 json.dump(c, open(dst, "w"), indent=1)
 EOF
-gguf=$("$T" -c "import json; print(json.load(open('$D/cfg.json'))['gguf'])")
+gguf=$("$T" -c "import json; print(json.load(open('$D/cfg.json')).get('gguf') or '')")   # safetensors cards have none (their llama.cpp steps are not supported)
 drafter=$("$T" -I -c "
 import json, os, sys
 sys.path.insert(0, sys.argv[1]); from matched_spec import drafter_file
@@ -273,7 +279,10 @@ import json, os, sys
 card, pkg = sys.argv[1:]
 c = json.load(open(os.path.join(card, "llm_config.json")))
 par = lambda f: os.path.join(card, "parameter", os.path.basename(f))
-c["gguf"] = par(c["gguf"])
+if (c.get("source") or {}).get("kind") == "safetensors":
+    c["weights"] = {"format": "safetensors", "files": [par(f) for f in c["source"]["files"]]}
+else:
+    c["gguf"] = par(c["gguf"])
 if c.get("vision"):
     c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
 for k in ("draft", "drafter", "assistant"):

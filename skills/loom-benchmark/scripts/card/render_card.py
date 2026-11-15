@@ -539,15 +539,18 @@ def render(d):
     if card.get("license"):
         L.append(f"license: {card['license']}")
     tags = derived_tags(feats, named) + [t for t in card.get("tags") or [] if t not in derived_tags(feats, named)]
+    st = c["file"].endswith(".safetensors")   # an HF safetensors checkpoint (inspect_safetensors.py), not a GGUF
+    if st:
+        tags = ["safetensors" if t == "gguf" else t for t in tags]
     L += ["tags:", *[f"- {t}" for t in tags], "---", ""]
 
     quant = f" ({c['quant']})" if c["quant"] else ""
     where = " and ".join(GPUS[g]["name"] for g in named) if named else GPUS[DEFAULT_GPU]["name"]
     L += [f"# {facts['name']}{quant} for AMD Loom", "",
-          f"A [Loom]({LOOM_URL}) package (`.loom` programs and a `model.json` card) for the unmodified GGUF checkpoint "
+          f"A [Loom]({LOOM_URL}) package (`.loom` programs and a `model.json` card) for the unmodified {'safetensors' if st else 'GGUF'} checkpoint "
           f"{hf(c['repo'])} (`{c['file']}`), generated on an {where} with the "
           f"[loom-skills]({SKILLS_URL}) workflow. {LEARN_MORE}" if solo or len(named) < 2 else
-          f"A [Loom]({LOOM_URL}) package (`.loom` programs and a `model.json` card) for the unmodified GGUF checkpoint "
+          f"A [Loom]({LOOM_URL}) package (`.loom` programs and a `model.json` card) for the unmodified {'safetensors' if st else 'GGUF'} checkpoint "
           f"{hf(c['repo'])} (`{c['file']}`), for the {where} GPUs, generated with the "
           f"[loom-skills]({SKILLS_URL}) workflow. {LEARN_MORE}", ""]
 
