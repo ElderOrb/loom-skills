@@ -50,3 +50,15 @@ Prefill GEMM shapes of the 27B (hidden 5120, ffn 17408, gdn qkv 10240, attention
   (1024*s + m needs more than 11 bits; the rounding error is about half a quantization step), so the 3 ops per 2 values stay. Removing the pk_add would be ~2 % of the kernel at best.
 - Prefill chunk (`prefill_capacity`, execution override, context 65536 so the bigger chunk fits; 124928 context + chunk 2048 exhausts device memory): 1k/2k/8k/16k/32k tok/s
   card (1024) 1547/1634 (ABBA 1521/1609), 1708, 1645, 1521; 1536: 1462/1628 (1457/1624), 1691, 1634, 1512; 2048: 1454/1627 (1445/1616), 1715, 1651, 1529. 1k loses 5-6 %, 2k ties, 8k-32k +-0.5 %: keep 1024.
+
+## MXFP4 weights on fp8 WMMA (R9700; choice `prefill.gemm.mxfp4_f8`, quark75 Qwen3.8-27B MXFP4 package; runs 43760335511, 43761307081)
+- **Exact weights in bf8.** An MXFP4 value is fp4 (0 .5 1 1.5 2 3 4 6, sign) x 2^(e-127), and every such value is an e5m2 number while its exponent field fits, so the
+  weight side loses nothing: held at 2^8 x its value (`MXFP4_F8_SHIFT`, the epilogue's row factor carries 2^-8), a block with E8M0 byte e in 107..132 decodes to the byte
+  `sign | base[m] + 4 (e - 107)` (base 8 12 14 16 18 20 22 for m = 1..7, zero stays zero). The decode is one `v_perm_b32` per four weights from a per-block 8-byte table
+  (two adds and a multiply per block) plus the sign OR: about 10 VALU per 8 weights. The Qwen3.8-27B MXFP4 GGUF has e = 107..125 in every block (99.99 % at 119/120;
+  rows differ by up to 12 exponents between rows, 6 within a row, so one global shift serves every tensor); `mxfp4_f8_range` + make_kernel_tests check a GGUF.
+- **Activations are the lossy side**: e4m3 with a per-row power-of-two scale 2^(7 - exponent of the row max) written by the row-scale producers' `_f8_rdna4` twins
+  (one more output next to the f16 row the Q8_0 attention GEMMs still read); relative rounding about 2 % per element. `v_wmma_f32_16x16x16_fp8_bf8` takes activations as lhs,
+  weights as rhs. 256 x 128 tiles, K step 128 (four MXFP4 blocks), LDS 54 KB (two workgroups per WGP), 250 VGPRs, no scratch.
+- **Result (R9700, 1024-row chunks)**: prefill 1k/2k 1.90k/2.30k tok/s on the fp8 path vs 0.91k/0.94k on the f16 path (the 64-row f16 kernel; MXFP4 has no f16 m256
+  kernel), the Q4_K_M card's 1.52k/1.60k. The Q8_0 attention layers (16 of 64) stay on the f16 m256 kernel.
