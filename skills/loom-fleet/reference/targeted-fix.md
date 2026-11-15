@@ -60,7 +60,7 @@ the measurement, and the ratchet's second run used to queue a second time. The p
 |---|---|---|
 | 1 route + scope rule (+ code) | `kb.py route`, `scope.json` rule | engineer time, as before |
 | 2 fleet diff + scope lint | `build_fleet.py` x2, `diff_fleet.py`, `scope_lint.py --local` | ~5 min CPU |
-| 3 submit the touched model on the touched GPU only | `regen.py plan --device D --replicas 2 --sequential --no-baselines --priority SLUG --state S.json` then `regen.py submit S.json` (or by hand: `ab_jobs.py --device D --replicas 2 --sequential SLUG`) | 1 min |
+| 3 submit the touched model on the touched GPU only | `regen.py plan --base BRANCH --device D --replicas 2 --sequential --no-baselines --priority SLUG --state S.json` then `regen.py submit S.json` (or by hand: `ab_jobs.py --device D --replicas 2 --sequential SLUG`) | 1 min |
 | 4 wait: queue + ONE job (two replica jobs in parallel on two runners) | `regen.py poll` loop, >= 120 s | queue (see below) + ~15 min with 2+2 sessions and no llama.cpp re-measure (an A/B compares Loom with Loom; the baselines are 40 % of a small model's job) |
 | 5 `regen.py collect` (the pair is read together: first = replica 1, confirming = replica 2) then `promote_check.py` | `collect` runs `strix_ab_compare.py` per job and the ratchet on the pair | 1 min |
 | 6 `regen.py ingest` / `publish` | | ~2 min |
