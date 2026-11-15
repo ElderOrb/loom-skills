@@ -35,5 +35,14 @@ Format data: `format.json` (owned by the port PR); `starter/formats.py` stays th
 Matvec, f16 GEMM and the gfx12 fp8 WMMA GEMM read the two planes (a weight-operand abstraction at the generator's call sites gives one view per GGUF
 format and two for `mxfp4s`); the fp8 prefill path is choice-selected per device and its measured results go to `device/rdna4`.
 
-PLACEHOLDER (filled by the kern PR): kernel names, choices, throughput and the roofline of the split-plane layout (two streams per row: scale plane
-is 1/16 of the nibble plane).
+Kernels (generator `starter/gen_mxfp4s.py`; choices `prefill.gemm.mxfp4s_f8`, `decode.mxfp4s.act_q8`; kernel tests in the `gemm_mxfp4s` kbench suite and in
+make_kernel_tests):
+- `g_gemm_mxfp4s_{store,swiglu}_f8_m256_rdna4`: gfx12 prefill GEMM on `v_wmma_f32_16x16x16_fp8_bf8`. Weights: the thread that stages a weight row-half loads 2 x 16
+  nibble bytes (two vector loads) and 2 scale bytes of its row per 128-value step, decodes to bf8 exactly in LDS (`device/rdna4/prefill.md`, "MXFP4 split planes on fp8
+  WMMA"). The fused swiglu kernel takes gate and up as two operand pairs (the checkpoint stores them as two tensors). 256 x 128 tile (swiglu: 64 columns of each),
+  activation fragments straight from global memory.
+- `g_mv_mxfp4s_k*_q8*`: decode and verify matvecs on int8 activations (dot4); `@g_mxfp4s_icodes(%w, %ws, %origin, %scale_origin, %group)` decodes 32 values to the signed codes 2 x fp4
+  and the block scale 2^(e - 128). The f32 matvec of the simple kernels is ALU-bound at the 4-row verify width.
+- Exactness: `scan_mxfp4s_exponents.py` (local or HF range read) reports the E8M0 range of a checkpoint; the AMD Qwen3.8-27B checkpoint has e = 107..128 in all 760,954,880
+  blocks, so the bf8 decode (exact for 107..132) loses nothing. A checkpoint outside the range needs a wider shift or the f16 path (not built).
+- Bytes: nibble plane 16 B + scale plane 1 B per 32 weights = 4.25 bits per weight, the same as ggml's 17-byte blocks; the planes are two streams per row.
