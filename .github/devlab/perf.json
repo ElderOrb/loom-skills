@@ -10,7 +10,9 @@
    "name": "mv-c4",
    "variants": [
     {
-     "name": "card_nd",
+     "name": "base_nd",
+     "build": {},
+     "context": 124928,
      "execution": {
       "draft_depth": 0
      }
@@ -21,6 +23,7 @@
       "MV_Q8_WG4": "2048",
       "MV_Q8_WG8": "2048"
      },
+     "context": 124928,
      "execution": {
       "draft_depth": 0
      }
@@ -31,6 +34,7 @@
       "MV_Q8_WG4": "512",
       "MV_Q8_WG8": "512"
      },
+     "context": 124928,
      "execution": {
       "draft_depth": 0
      }
@@ -41,6 +45,7 @@
       "MV_Q8_WG4": "8192",
       "MV_Q8_WG8": "8192"
      },
+     "context": 124928,
      "execution": {
       "draft_depth": 0
      }
@@ -51,62 +56,69 @@
       "MV_Q8_WG4": "1",
       "MV_Q8_WG8": "1"
      },
+     "context": 124928,
      "execution": {
       "draft_depth": 0
      }
     }
    ],
    "steps": [
-    "c4:card_nd",
+    "c4:base_nd",
     "c4:w2048_nd",
     "c4:w512_nd",
     "c4:w8192_nd",
     "c4:w1_nd",
-    "c4:card_nd"
+    "c4:base_nd"
    ]
   },
   {
    "name": "mv-dec",
    "variants": [
     {
-     "name": "card"
+     "name": "base",
+     "build": {},
+     "context": 124928
     },
     {
      "name": "w2048",
      "build": {
       "MV_Q8_WG4": "2048",
       "MV_Q8_WG8": "2048"
-     }
+     },
+     "context": 124928
     },
     {
      "name": "w512",
      "build": {
       "MV_Q8_WG4": "512",
       "MV_Q8_WG8": "512"
-     }
+     },
+     "context": 124928
     },
     {
      "name": "w8192",
      "build": {
       "MV_Q8_WG4": "8192",
       "MV_Q8_WG8": "8192"
-     }
+     },
+     "context": 124928
     },
     {
      "name": "w1",
      "build": {
       "MV_Q8_WG4": "1",
       "MV_Q8_WG8": "1"
-     }
+     },
+     "context": 124928
     }
    ],
    "steps": [
-    "perf:card:1",
+    "perf:base:1",
     "perf:w2048:1",
     "perf:w512:1",
     "perf:w8192:1",
     "perf:w1:1",
-    "perf:card:1"
+    "perf:base:1"
    ]
   }
  ]
