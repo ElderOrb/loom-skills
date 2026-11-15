@@ -34,21 +34,23 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False, kmult=1, rf=4, a_pf=False, nt=256):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
     store: 256 x 128 outputs, swiglu: 256 x 64 of each of gate and up. K advances 128 values (four MXFP4 blocks) per stage.
     dbuf (with a_direct): the weight stage is double-buffered, one barrier per step: the next step is decoded into the other buffer while this one is multiplied.
     a_pf (with a_direct, not dbuf): the next step's activation fragments are loaded during this step (carried in registers).
-    a_direct: the activation fragments are loaded from global memory straight into registers (no LDS staging of the activations)."""
+    a_direct (default): the activation fragments are loaded from global memory straight into registers (no LDS staging of the activations): -11 % GEMM time on
+    the R9700 against the staged variant (a_direct=False). rf: 16-row activation fragments per wave (default 4 for store, 2 for swiglu: measured best, see
+    device/rdna4/prefill.md); kmult 2 doubles the K step; nt 128 halves the workgroup; a_pf / dbuf are measured non-wins kept for the record."""
     two_w = mode == "swiglu"
     NT = nt                       # threads = waves * 32; the workgroup tile has NT rows (nt = 128 needs a_direct)
     BM = NT
     assert nt == 256 or a_direct
     TW = 128                      # weight rows staged per tile (swiglu: 64 gate + 64 up)
     TN = 64 if two_w else 128     # output columns per tile
-    RF = rf                       # 16-row A fragments per wave (rf = 4: 64 rows); the accumulators are rf * cfr * (1 or 2 weights) = 16 fragments
+    RF = rf or (2 if two_w else 4)   # 16-row A fragments per wave (rf = 4: 64 rows); the accumulators are rf * cfr * (1 or 2 weights) = 16 fragments
     cfr = (8 if two_w else 16) // RF   # 16-column B fragments per wave and weight
     NWV = NT // 32
     WR = BM // (16 * RF)          # waves stacked along the rows, WC = NWV // WR along the columns
@@ -269,7 +271,9 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
         return t
     if a_direct:
         for r in range(RF):
-            A(f"  %xrow{r}_v = index.add %row_origin, {'%wave_row' if r == 0 else f'%wave_row{r}'} : index\n  %xrow{r} = index.assume %xrow{r}_v [lt(%xrow{r}_v, %rows)] : index")
+            if r == 0:
+                A("  %c15 = index.constant 15 : index\n  %rows_m15 = index.sub %rows, %c15 : index")
+            A(f"  %xrow{r}_v = index.add %row_origin, {'%wave_row' if r == 0 else f'%wave_row{r}'} : index\n  %xrow{r} = index.assume %xrow{r}_v [lt(%xrow{r}_v, %rows_m15)] : index")
     A(loads("p", "%c0"))
     if a_pf:
         assert a_direct and not dbuf

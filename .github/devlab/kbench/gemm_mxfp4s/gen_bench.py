@@ -69,7 +69,7 @@ def _nox(t, mode):
     return re.sub(r"^\s*vector\.store %cr_x\d, %x_stage_st[^\n]*\n", "", t, flags=re.M)
 
 
-GEN = {"adirect": {"a_direct": True}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}, "adr8": {"a_direct": True, "rf": 8}, "adr2": {"a_direct": True, "rf": 2}, "adr2pf": {"a_direct": True, "rf": 2, "a_pf": True}, "adn128": {"a_direct": True, "nt": 128}, "adn128r2": {"a_direct": True, "nt": 128, "rf": 2}, "adr2k2": {"a_direct": True, "rf": 2, "kmult": 2}}   # variants that are generator parameters (the levers), not text ablations
+GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf": 4}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}, "adr8": {"a_direct": True, "rf": 8}, "adr2": {"a_direct": True, "rf": 2}, "adr2pf": {"a_direct": True, "rf": 2, "a_pf": True}, "adn128": {"a_direct": True, "nt": 128}, "adn128r2": {"a_direct": True, "nt": 128, "rf": 2}, "adr2k2": {"a_direct": True, "rf": 2, "kmult": 2}}   # variants that are generator parameters (the levers), not text ablations
 
 
 def kernel(mode, kn, variant="", order="pairs"):

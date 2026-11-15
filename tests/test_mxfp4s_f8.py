@@ -98,7 +98,7 @@ class KernelTests(unittest.TestCase):
             self.assertIn("%rows_arg: index, %k_arg: index, %n_arg: index, %x: buffer, %scales: buffer, %w: buffer, %ws: buffer", t)   # the f16 kernels' leading arguments, then the two planes
             self.assertIn("%s_view = buffer.view %scales[%origin] : buffer -> view<[%rows]x2xf32>", t)   # gen_gemm's skip-padding anchor
             self.assertTrue(t.endswith("  kernel.return\n}\n"))
-            self.assertIn("%row_origin = index.mul %row_group, %c256 : index", t)
+            self.assertIn("%row_origin = index.mul %row_group, %cbm : index", t)
 
 
 class IcodesTests(unittest.TestCase):
