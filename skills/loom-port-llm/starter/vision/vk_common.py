@@ -34,6 +34,9 @@ def run(src, cases, d):
     try: res = json.loads(r.stdout)
     except ValueError:
         print("COMPILE FAIL\n", "\n".join(l for l in (r.stderr + r.stdout).splitlines() if not l.startswith('{"format'))[-4000:]); return False
+    if not res.get("samples"):   # loom-test ran but reported no case: say why (a device error shows in stderr / the top-level keys)
+        print("NO SAMPLES from loom-test; keys", sorted(res), "\n", "\n".join(l for l in r.stderr.splitlines() if not l.startswith('{"format'))[-3000:], "\n", json.dumps({k: v for k, v in res.items() if k != "samples"})[:2000])
+        return False
     ok = True
     for smp in res["samples"]:
         f = smp["expectations"].get("failures", [])

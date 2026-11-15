@@ -569,7 +569,7 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "functional checks $p1"
       curl -fsSL --retry 2 "$base/info.json" -o "$out/info_card.json" 2>/dev/null || rm -f "$out/info_card.json"
-      fa=(); grep -q '"vision"' "$card/llm_config.json" && fa+=(--vision)
+      fa=(); { grep -q '"vision"' "$card/llm_config.json" || grep -q '"vision"' "$D/$p1/pkg/llm_config.json"; } 2>/dev/null && fa+=(--vision)   # the card's, or the rebuilt package's image input
       "$T" "$here/.github/scripts/r9700_func.py" "$url" "$cardid" "$out/func_$p1.json" ${fa[@]+"${fa[@]}"} $([ -f "$out/info_card.json" ] && echo --info "$out/info_card.json") 2>&1 | tee "$out/func_$p1.log"
       res[$s]=$(tail -1 "$out/func_$p1.log");;
     gates)
