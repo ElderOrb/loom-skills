@@ -1,5 +1,5 @@
 {
- "_comment": "phead round 4: N=72k/80k and depth 4 (R9700), then gates on N=80k; Strix Halo base vs N=80k.",
+ "_comment": "phead round 5: dev gates on the published card, base rebuild and N=80k.",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -7,18 +7,14 @@
  "runner": "r9700",
  "jobs": [
   {
-   "name": "phead-r9700",
+   "name": "phead-gates",
    "variants": [
+    {
+     "name": "card"
+    },
     {
      "name": "base",
      "build": {},
-     "context": 124928
-    },
-    {
-     "name": "ph72",
-     "build": {
-      "PROPOSE_HEAD_ROWS": "73728"
-     },
      "context": 124928
     },
     {
@@ -27,61 +23,12 @@
       "PROPOSE_HEAD_ROWS": "81920"
      },
      "context": 124928
-    },
-    {
-     "name": "ph80d4",
-     "build": {
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "context": 124928,
-     "execution": {
-      "draft_depth": 4
-     }
-    },
-    {
-     "name": "based4",
-     "build": {},
-     "context": 124928,
-     "execution": {
-      "draft_depth": 4
-     }
     }
    ],
    "steps": [
-    "perf:base:1",
-    "perf:ph72:1",
-    "perf:ph80:1",
-    "perf:ph80d4:1",
-    "perf:based4:1",
-    "perf:base:1",
-    "perf:ph72:1",
-    "perf:ph80:1",
-    "perf:ph80d4:1",
-    "perf:based4:1",
+    "gates:card:dev",
+    "gates:base:dev",
     "gates:ph80:dev"
-   ]
-  },
-  {
-   "name": "phead-strix",
-   "runner": "strix",
-   "memory_bytes": 60000000000,
-   "variants": [
-    {
-     "name": "base",
-     "build": {}
-    },
-    {
-     "name": "ph80",
-     "build": {
-      "PROPOSE_HEAD_ROWS": "81920"
-     }
-    }
-   ],
-   "steps": [
-    "perf:base:1",
-    "perf:ph80:1",
-    "perf:base:1",
-    "perf:ph80:1"
    ]
   }
  ]
