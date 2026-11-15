@@ -1,46 +1,54 @@
 {
- "_comment": "MXFP4 R9700: prefill chunk 1024 vs 2048 (tile tail), same build.",
+ "_comment": "R9700 per-model measurement (device_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "llama_spec": "matched",
- "card": "loom-fun-staging/quark75-Qwen3.8-27B-MXFP4-loom",
- "kit": null,
- "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "mxfp4-chunk",
+   "name": "rc-quark75-qwen3-8-27b-mxfp4-loom",
+   "card": "loom-fun-staging/quark75-Qwen3.8-27B-MXFP4-loom",
+   "require_preset_r9700": true,
+   "kit": null,
+   "llamacpp": "b1375",
+   "llamacpp_vulkan": "b12211",
    "memory_bytes_r9700": 34000000000,
+   "served_context": 134144,
    "variants": [
     {
-     "name": "p1024",
-     "build": {
-      "GEMM_MXFP4_F8": "1",
-      "MXFP4_Q8": "1"
-     },
-     "context": 90112
+     "name": "card",
+     "context": 134144
     },
     {
-     "name": "p2048",
-     "build": {
-      "GEMM_MXFP4_F8": "1",
-      "MXFP4_Q8": "1"
-     },
-     "context": 90112,
-     "build_args": [
-      "--prefill",
-      "2048"
-     ],
+     "name": "nodraft",
+     "context": 134144,
      "execution": {
-      "prefill_capacity": 2048
+      "draft_depth": 0
      }
     }
    ],
    "steps": [
-    "perf:p1024:1",
-    "perf:p2048:1",
-    "perf:p2048:1:long",
-    "perf:p1024:1:long"
-   ]
+    "func:card",
+    "ktest:card",
+    "gates:card:dev",
+    "perf:card:1",
+    "perf:card:1",
+    "perf:card:1",
+    "perf:card:1:long",
+    "perf:card:1:long",
+    "perf:card:1:long",
+    "c4:nodraft",
+    "llama@rocm.np1:3",
+    "llama@rocm.np1:3:long",
+    "llamac4@rocm.nodraft",
+    "llama@vulkan.np1:3",
+    "llama@vulkan.np1:3:long",
+    "llamac4@vulkan.perslot.nodraft"
+   ],
+   "runner": "r9700"
   }
- ]
+ ],
+ "card": "loom-fun-staging/quark75-Qwen3.8-27B-MXFP4-loom",
+ "kit": null,
+ "llamacpp": "b1375",
+ "llamacpp_vulkan": "b12211"
 }
