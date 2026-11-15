@@ -1,5 +1,5 @@
 {
- "_comment": "phead round 5: dev gates on the published card, base rebuild and N=80k.",
+ "_comment": "phead round 6: dev gates of N=80k at reduced served contexts (the image component was unavailable at 124928).",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -7,28 +7,42 @@
  "runner": "r9700",
  "jobs": [
   {
-   "name": "phead-gates",
+   "name": "phead-ctx",
    "variants": [
     {
-     "name": "card"
-    },
-    {
-     "name": "base",
-     "build": {},
-     "context": 124928
-    },
-    {
-     "name": "ph80",
+     "name": "c116",
      "build": {
       "PROPOSE_HEAD_ROWS": "81920"
      },
-     "context": 124928
+     "context": 118784
+    },
+    {
+     "name": "c112",
+     "build": {
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "context": 114688
+    },
+    {
+     "name": "c104",
+     "build": {
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "context": 106496
+    },
+    {
+     "name": "c96",
+     "build": {
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "context": 98304
     }
    ],
    "steps": [
-    "gates:card:dev",
-    "gates:base:dev",
-    "gates:ph80:dev"
+    "gates:c116:dev",
+    "gates:c112:dev",
+    "gates:c104:dev",
+    "gates:c96:dev"
    ]
   }
  ]
