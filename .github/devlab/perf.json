@@ -2,7 +2,6 @@
  "_comment": "gdnpf final confirmation on the merged tree: scope default (chunk on for the 27B on rdna4) vs GDN_CHUNK=0",
  "runner": "r9700",
  "memory_bytes": 34000000000,
- "llama_spec": "matched",
  "jobs": [
   {
    "name": "gdnpf-final",
@@ -29,8 +28,7 @@
    ]
   }
  ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+ "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ "llamacpp": "b1375"
 }
