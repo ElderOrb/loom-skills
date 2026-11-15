@@ -100,13 +100,13 @@ class Comparisons(unittest.TestCase):
         line = '{"opened": true, "width": 1000, "failures": 2}'
         err = ("FAIL x.c:1: step 10 row 1: argmax(row)=5 (12.250) but the device selected 7 (12.250)\n"
                "FAIL x.c:1: step 12 row 0: argmax(row)=5 (12.250) but the device selected 9 (12.220)\n")
-        ok, why, gaps, problems = lc.probe_judge(line, err)
+        ok, why, gaps, problems, ends = lc.probe_judge(line, err)
         self.assertEqual((ok, why, gaps, problems), (True, "", [(10, 1, 0.0), (12, 0, 0.03)], []))
         self.assertTrue(lc.probe_check(line, err)[0])
         # a gap above the margin is a finding with step/row/gap (every gap is still recorded), not a pass
         far = ("FAIL x.c:1: step 3 row 0: argmax(row)=5 (12.250) but the device selected 7 (12.000)\n"
                "FAIL x.c:1: step 4 row 2: argmax(row)=5 (12.250) but the device selected 7 (12.250)\n")
-        ok, why, gaps, problems = lc.probe_judge('{"opened": true, "width": 1000, "failures": 2}', far)
+        ok, why, gaps, problems, ends = lc.probe_judge('{"opened": true, "width": 1000, "failures": 2}', far)
         self.assertFalse(ok)
         self.assertIn("step 3 row 0: device token 0.250 nats below the row maximum", why)
         self.assertEqual(gaps, [(3, 0, 0.25), (4, 2, 0.0)])
@@ -116,6 +116,36 @@ class Comparisons(unittest.TestCase):
         self.assertFalse(lc.probe_judge('{"opened": true, "width": 1000, "failures": 1}', pad)[0])
         self.assertFalse(lc.probe_judge('{"opened": true, "width": 1000, "failures": 1}', "")[0])   # no stderr: nothing to judge
         self.assertFalse(lc.probe_judge('{"opened": true, "width": 1000, "failures": 3}', err)[0])  # a failure not accounted for
+
+    def test_probe_end_tokens(self):
+        # Qwen: the host's argmax is <|endoftext|> (151643, logit 34), the device reports the chat's terminal <|im_end|> (151645, logit 1.4):
+        # both end the generation, whatever their exported logits; a pair with one ordinary token is not that
+        line = '{"opened": true, "width": 152000, "failures": 2}'
+        err = ("FAIL x.c:127: step 9 row 0: argmax(row)=151643 (34.122) but the device selected 151645 (1.367)\n"
+               "FAIL x.c:127: step 10 row 0: argmax(row)=151643 (24.807) but the device selected 151645 (6.312)\n")
+        ok, why, gaps, problems, ends = lc.probe_judge(line, err, eog={151643, 151645})
+        self.assertEqual((ok, gaps, problems, len(ends)), (True, [], [], 2))
+        self.assertEqual(ends[0], (9, 0, 151643, 151645, 34.122, 1.367))
+        self.assertFalse(lc.probe_judge(line, err, eog={151643})[0])                      # the device token is not an end token
+        self.assertFalse(lc.probe_judge(line, err.replace("151645", "42"), eog={151643, 151645})[0])
+        self.assertEqual(lc.eog_ids({"eos_id": 1, "extra_eos_ids": [106], "chat": {}}), {1, 106})
+
+        class Tok:
+            def token_to_id(self, t):
+                return {"<end_of_turn>": 106}[t]
+        self.assertEqual(lc.eog_ids({"eos_id": 1, "chat": {"terminal": "<end_of_turn>"}}, Tok()), {1, 106})
+
+    def test_rejudge_from_saved_probe_output(self):
+        out = {"verdict": "FAIL", "level": "dev", "stats": {"steps": 10, "prompts": 2},
+               "checks": [{"name": "embed_probe", "ok": False, "why": "x"}, {"name": "llama", "ok": True, "compared": 12}]}
+        line = '{"opened": true, "width": 152000, "failures": 1}'
+        err = "FAIL x.c:127: step 9 row 0: argmax(row)=151643 (34.122) but the device selected 151645 (1.367)\n"
+        new = lc.rejudge(out, line + "\n", err, 1, {151643, 151645})
+        self.assertEqual(new["verdict"], "PASS")
+        self.assertEqual(new["stats"]["probe_end_pairs"], 1)
+        self.assertLessEqual(len(new["gates"]["logits"]["detail"]), lc.DETAIL_MAX)
+        self.assertEqual(lc.rejudge(out, line + "\n", err, 1, set())["verdict"], "FAIL")    # without the end tokens it is a finding
+        self.assertIn("nats below the row maximum", lc.rejudge(out, line + "\n", err, 1, set())["gates"]["logits"]["detail"] + lc.rejudge(out, line, err, 1, set())["checks"][0]["why"])
 
     def test_detail_is_one_short_line(self):
         self.assertEqual(lc.clip("a" * 61), "a" * 59 + "…")

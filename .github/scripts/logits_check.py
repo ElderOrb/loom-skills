@@ -166,12 +166,54 @@ def first_diff(a, b):
 PROBE_ARGMAX = re.compile(r"step (\d+) row (\d+): argmax\(row\)=(\d+) \((-?[\d.]+)\) but the device selected (-?\d+) \((-?[\d.]+)\)")
 
 
-def probe_ties(err, width, margin=PROBE_MARGIN):
-    """embed_probe's stderr FAIL lines: (gaps, problems). Every 'argmax(row)=A (x) but the device selected D (y)' line whose device token D is
-    a row index gives a gap x - y (nats; the probe prints both exported logits): gaps = [(step, row, gap)], ALL of them recorded. problems:
-    a gap above `margin`, a device token outside the row, a failure of another kind (a padding hit, an unreadable row): findings, each
-    with model-independent step/row/gap text."""
-    gaps, problems = [], []
+def eog_ids(cfg, tok=None):
+    """The token ids that end a generation: llm_config.json (cfg) eos_id and extra_eos_ids, and the chat's terminal marker (needs tok)."""
+    ids = {i for i in [cfg.get("eos_id"), *(cfg.get("extra_eos_ids") or [])] if isinstance(i, int) and i >= 0}
+    t = tok.token_to_id(cfg["chat"]["terminal"]) if tok is not None and (cfg.get("chat") or {}).get("terminal") else None
+    return ids | ({t} if t is not None else set())
+
+
+def probe_entry(stdout, stderr, returncode, eog=()):
+    """The embed_probe check of its stdout JSON line, stderr and exit status (judged by probe_judge; every gap and end pair recorded)."""
+    line = (stdout.strip().splitlines() or [""])[-1]
+    ok, why, gaps, findings, ends = probe_judge(line, stderr, eog=eog)
+    return {"name": "embed_probe", "ok": ok and returncode in (0, 1), "why": why or ("" if ok else (stderr.strip().splitlines() or [""])[-1][:200]),
+            "gaps": gaps, "max_gap": max((g[2] for g in gaps), default=0.0), "margin": PROBE_MARGIN, "end_pairs": ends, "findings": findings,
+            "probe": line[:2000], "returncode": returncode}
+
+
+def conclude(out, checks, stats, compared_max, llama_used):
+    """The gate from the checks: fills out (verdict, checks, stats, findings, gates.logits with a detail of at most DETAIL_MAX characters);
+    returns (ok, detail)."""
+    ok, bad = verdict(checks, compared_max, llama_used)
+    gaps = sum(len(c.get("gaps") or []) for c in checks)
+    ends = sum(len(c.get("end_pairs") or []) for c in checks)
+    top = max((c.get("max_gap", 0.0) for c in checks), default=0.0)
+    note = (f" ({ends} EOG steps)" if ends else "") + (f" ({gaps} ties, max {top:.3f} nats)" if gaps else "")
+    detail = clip("argmax = device token" + note + (f"; top-{TOPK} = llama.cpp's" if llama_used else ""))
+    out.update({"verdict": "PASS" if ok else "FAIL", "checks": checks, "stats": {**stats, "probe_gaps": gaps, "probe_end_pairs": ends, "probe_max_gap": top},
+                "findings": [f for c in checks for f in (c.get("findings") or [])],
+                "gates": {"logits": {"pass": ok, "detail": detail if ok else clip("; ".join(f"{b.get('name')}: {b.get('why')}" for b in bad))}}})
+    return ok, detail
+
+
+def rejudge(out, stdout, stderr, returncode, eog):
+    """A finished OUT.json judged again from the probe's saved stdout/stderr (no GPU): the embed_probe check is rebuilt with the end-token
+    set `eog`, every other check stands, the gate is concluded again. Returns the new out."""
+    checks = [probe_entry(stdout, stderr, returncode, eog) if c["name"] == "embed_probe" else c for c in out["checks"]]
+    compared = max((c.get("compared", 0) for c in checks if c["name"] == "llama"), default=0)
+    new = {k: v for k, v in out.items() if k not in ("verdict", "checks", "stats", "findings", "gates")}
+    conclude(new, checks, {k: v for k, v in (out.get("stats") or {}).items() if k in ("steps", "prompts")}, compared, any(c["name"] == "llama" for c in checks))
+    return new
+
+
+def probe_ties(err, width, margin=PROBE_MARGIN, eog=()):
+    """embed_probe's stderr FAIL lines: (gaps, problems, ends). Every 'argmax(row)=A (x) but the device selected D (y)' line is one of:
+    both A and D end-of-generation tokens (`eog`: the device reports the chat's terminal token for any of the model's end tokens, e.g.
+    Qwen's <|endoftext|> as <|im_end|>; the same token, whatever the exported logits of the two): ends = [(step, row, A, D, x, y)];
+    a tie within `margin` (x - y, nats; the probe prints both exported logits): gaps = [(step, row, gap)], every one recorded; or a
+    finding in problems: a gap above `margin`, a device token outside the row, a failure of another kind (a padding hit, an unreadable row)."""
+    gaps, problems, ends = [], [], []
     for line in err.splitlines():
         if not line.startswith("FAIL "):
             continue
@@ -179,34 +221,36 @@ def probe_ties(err, width, margin=PROBE_MARGIN):
         if not m:
             problems.append(f"embed_probe: {line.split(': ', 1)[-1][:120]}")
             continue
-        step, row, x, dev, y = int(m[1]), int(m[2]), float(m[4]), int(m[5]), float(m[6])
+        step, row, top, x, dev, y = int(m[1]), int(m[2]), int(m[3]), float(m[4]), int(m[5]), float(m[6])
         if not 0 <= dev < width:
             problems.append(f"embed_probe: step {step} row {row}: device token {dev} outside the row")
-            continue
-        gaps.append((step, row, round(x - y, 4)))
-        if x - y > margin:
-            problems.append(f"embed_probe: step {step} row {row}: device token {x - y:.3f} nats below the row maximum (limit {margin})")
-    return gaps, problems
+        elif top in eog and dev in eog:
+            ends.append((step, row, top, dev, x, y))
+        else:
+            gaps.append((step, row, round(x - y, 4)))
+            if x - y > margin:
+                problems.append(f"embed_probe: step {step} row {row}: device token {x - y:.3f} nats below the row maximum (limit {margin})")
+    return gaps, problems, ends
 
 
-def probe_judge(line, err="", margin=PROBE_MARGIN):
-    """(ok, why, gaps, problems) of embed_probe's one JSON line and its stderr: opened, and every failure a tie of the device token with the
-    row maximum within `margin` (probe_ties); gaps = [(step, row, gap)] of every mismatch, problems = the findings."""
+def probe_judge(line, err="", margin=PROBE_MARGIN, eog=()):
+    """(ok, why, gaps, problems, ends) of embed_probe's one JSON line and its stderr (probe_ties): opened, and every failure an end-token
+    pair or a tie of the device token with the row maximum within `margin`; problems = the findings."""
     try:
         j = json.loads(line)
     except ValueError:
-        return False, f"embed_probe printed no JSON: {line[:120]!r}", [], []
+        return False, f"embed_probe printed no JSON: {line[:120]!r}", [], [], []
     if not j.get("opened"):
-        return False, f"embed_probe: open failed: {j.get('error')}", [], []
+        return False, f"embed_probe: open failed: {j.get('error')}", [], [], []
     n = j.get("failures", 1)
     if n == 0:
-        return True, "", [], []
-    gaps, problems = probe_ties(err, j.get("width") or 0, margin)
-    if not problems and len(gaps) != n:
-        problems.append(f"embed_probe: {n} failure(s), {len(gaps)} accounted for by a gap (stderr incomplete)")
+        return True, "", [], [], []
+    gaps, problems, ends = probe_ties(err, j.get("width") or 0, margin, eog)
+    if not problems and len(gaps) + len(ends) != n:
+        problems.append(f"embed_probe: {n} failure(s), {len(gaps) + len(ends)} accounted for (stderr incomplete)")
     if problems:
-        return False, problems[0] + (f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""), gaps, problems
-    return True, "", gaps, []
+        return False, problems[0] + (f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""), gaps, problems, ends
+    return True, "", gaps, [], ends
 
 
 def probe_check(line, err=""):
@@ -337,10 +381,7 @@ def run(a):
     preset_args = ["--loom-preset", a.preset] if a.preset else []   # a card with several presets needs one named
     # (a) the embed layer alone
     r = subprocess.run([os.path.join(bundle, "run-embed-probe.sh"), a.package, str(a.steps), "3", a.preset], capture_output=True, text=True, timeout=1800)
-    ok, why, gaps, findings = probe_judge((r.stdout.strip().splitlines() or [""])[-1], r.stderr)
-    checks.append({"name": "embed_probe", "ok": ok and r.returncode in (0, 1), "why": why or ("" if ok else (r.stderr.strip().splitlines() or [""])[-1][:200]),
-                   "gaps": gaps, "max_gap": max((g[2] for g in gaps), default=0.0), "margin": PROBE_MARGIN, "findings": findings,
-                   "probe": (r.stdout.strip().splitlines() or [""])[-1][:2000], "returncode": r.returncode})
+    checks.append(probe_entry(r.stdout, r.stderr, r.returncode, eog_ids(pkg.cfg, pkg.tok)))
     with open(work + ".embed_probe.json", "w") as f:
         f.write(r.stdout)
     with open(work + ".embed_probe.err", "w") as f:   # the probe's FAIL lines carry the exported logits of every tie: the data the near-tie judge needs
@@ -376,15 +417,8 @@ def run(a):
         g.close()
     with open(work + ".raw.json", "w") as f:
         json.dump(raw, f)
-    ok, bad = verdict(checks, compared_max, bool(a.llama))
     n_ok = sum(1 for c in checks if c["ok"])
-    ties = sum(len(c.get("gaps") or []) for c in checks)
-    margin = max((c.get("max_gap", 0.0) for c in checks), default=0.0)
-    detail = clip("argmax = device token" + (f" ({ties} exact-tie steps)" if ties and not margin else f" ({ties} ties, max gap {margin:.3f} nats)" if ties else "")
-                  + (f"; top-{TOPK} = llama.cpp's" if a.llama else ""))
-    out.update({"verdict": "PASS" if ok else "FAIL", "checks": checks, "stats": {**stats, "probe_gaps": ties, "probe_max_gap": margin},
-                "findings": [f for c in checks for f in (c.get("findings") or [])],
-                "gates": {"logits": {"pass": ok, "detail": detail if ok else clip("; ".join(f"{b.get('name')}: {b.get('why')}" for b in bad))}}})
+    ok, detail = conclude(out, checks, stats, compared_max, bool(a.llama))
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
     print(f"LOGITS {out['verdict']} {n_ok}/{len(checks)} checks; {detail}")
