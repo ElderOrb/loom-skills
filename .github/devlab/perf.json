@@ -1,5 +1,5 @@
 {
- "_comment": "phead round 6: dev gates of N=80k at reduced served contexts (the image component was unavailable at 124928).",
+ "_comment": "phead round 7: depth 3/4/5 with N=80k incl. decode_32k (perf long), base alongside; dev gates at contexts 120832 / 122880.",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -7,42 +7,66 @@
  "runner": "r9700",
  "jobs": [
   {
-   "name": "phead-ctx",
+   "name": "phead-depth",
    "variants": [
     {
-     "name": "c116",
-     "build": {
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "context": 118784
+     "name": "base",
+     "build": {},
+     "context": 120832
     },
     {
-     "name": "c112",
+     "name": "ph80",
      "build": {
       "PROPOSE_HEAD_ROWS": "81920"
      },
-     "context": 114688
+     "context": 120832
     },
     {
-     "name": "c104",
+     "name": "ph80d4",
      "build": {
       "PROPOSE_HEAD_ROWS": "81920"
      },
-     "context": 106496
+     "context": 120832,
+     "execution": {
+      "draft_depth": 4
+     }
     },
     {
-     "name": "c96",
+     "name": "ph80d5",
      "build": {
       "PROPOSE_HEAD_ROWS": "81920"
      },
-     "context": 98304
+     "context": 120832,
+     "execution": {
+      "draft_depth": 5
+     }
+    },
+    {
+     "name": "g120",
+     "build": {
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "context": 120832
+    },
+    {
+     "name": "g122",
+     "build": {
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "context": 122880
     }
    ],
    "steps": [
-    "gates:c116:dev",
-    "gates:c112:dev",
-    "gates:c104:dev",
-    "gates:c96:dev"
+    "perf:base:1:long",
+    "perf:ph80:1:long",
+    "perf:ph80d4:1:long",
+    "perf:ph80d5:1:long",
+    "perf:base:1:long",
+    "perf:ph80:1:long",
+    "perf:ph80d4:1:long",
+    "perf:ph80d5:1:long",
+    "gates:g120:dev",
+    "gates:g122:dev"
    ]
   }
  ]
