@@ -37,3 +37,11 @@ instead of a GGUF path, the build writes `weights.loom` with the conversions of 
 takes the HF repo as `--source` unchanged; a fleet entry keeps a header dump (`fleet/st_stub.py`, `fleet/add_model.py`) instead of a GGUF stub; kernel tests read the file with `st_tensors.py`.
 Dry run of the first model (amd/Qwen3.8-27B-Quark-AWQ-MXFP4, CPU only): inspect 1 s, build 1.5 s, the 54 kernels compile for gfx1201 and gfx1151 (the two `g_silu_mul` artifacts of a standalone root aside), the
 command programs type-check; DevLab runs are the first execution.
+
+Second model (dry run 2026-11-15, amd/Llama-3.1-8B-Instruct-MXFP4-W4A4-MLCAL-C1000-GPTQ, a Quark smooth + GPTQ MXFP4 export of a different family, `LlamaForCausalLM`): the kb route, the
+producer node, the `mxfp4s` kernels and the build were unchanged; the only per-model work was `hf_names/llama.json` (a data file) plus the inspector generalizations a plain
+transformer needed (no `layer_types` / `gdn` / `mtp` in the map; llama3 `rope_parameters` -> `rope_freq_factors`; `bos_id` from the chat template when `add_bos_token` is absent).
+Gotchas: run the starter with the system python (the SDK venv's `python3` has no jinja2, which `chat_probe.py` needs), keep the SDK `bin` on PATH only for `loom-compile` / `loom-opt`;
+HF llama q/k rows are rotate_half (neox) ordered, so `rope_type` is `neox` and nothing is permuted (a GGUF llama says `norm`); `*.k_proj.output_scale` / `v_proj.output_scale`
+(KV-cache scales of the export) are listed as unused: Loom's KV cache is its own. A build without weights links a placeholder checkpoint (`--checkpoint` of an empty file) and a header dump
+(`fleet/st_stub.py dump REPO OUT.json.gz`, then `inspect_safetensors.py OUT.json.gz ...`); `build.py` then reports `weights 0.0 GiB`.
