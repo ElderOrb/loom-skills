@@ -1,5 +1,5 @@
 {
- "_comment": "gdnpf: per-kernel doubling in prefill (2k/1k ms/token) on R9700, undrafted",
+ "_comment": "gdnpf round 2: recurrence row-lane/column splits on R9700 (card drafting MTP; env GDN_ROW_LANES/GDN_COLS), rebuilt from this branch",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -7,154 +7,76 @@
  "runner": "r9700",
  "jobs": [
   {
-   "name": "gdnpf-dbl",
+   "name": "gdnpf-rec",
    "variants": [
     {
-     "name": "nd",
-     "execution": {
-      "draft_depth": 0
+     "name": "base",
+     "build": {}
+    },
+    {
+     "name": "rl16c2",
+     "build": {
+      "GDN_ROW_LANES": "16",
+      "GDN_COLS": "2"
      }
     },
     {
-     "name": "d_conv",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_gdn_conv\\b"
-     ]
-    },
-    {
-     "name": "d_qkn",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_gdn_qk_norm"
-     ]
-    },
-    {
-     "name": "d_rec",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_gdn_recurrence"
-     ]
-    },
-    {
-     "name": "d_ng",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_gdn_norm_gate"
-     ]
-    },
-    {
-     "name": "d_quant",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_quant_q8"
-     ]
-    },
-    {
-     "name": "d_rs",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_row_scale_f16"
-     ]
-    },
-    {
-     "name": "d_pan",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_post_add_norm"
-     ]
-    },
-    {
-     "name": "d_silu",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_silu_mul"
-     ]
-    },
-    {
-     "name": "d_mvf",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@g_mv_f32"
-     ]
-    },
-    {
-     "name": "d_g4st",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@sel\\d+_g_gemm_q4_k_store_m256"
-     ]
-    },
-    {
-     "name": "d_g4sw",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@sel\\d+_g_gemm_q4_k_swiglu_m256"
-     ]
-    },
-    {
-     "name": "d_g6",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@sel\\d+_g_gemm_q6_k_store_m256"
-     ]
-    },
-    {
-     "name": "d_g8",
-     "execution": {
-      "draft_depth": 0
-     },
-     "double": [
-      "llm_advance:@sel\\d+_g_gemm_q8_0_store_m256"
-     ]
-    },
-    {
-     "name": "nd2",
-     "execution": {
-      "draft_depth": 0
+     "name": "rl16c4",
+     "build": {
+      "GDN_ROW_LANES": "16",
+      "GDN_COLS": "4"
      }
+    },
+    {
+     "name": "rl8c8",
+     "build": {
+      "GDN_ROW_LANES": "8",
+      "GDN_COLS": "8"
+     }
+    },
+    {
+     "name": "rl8c2",
+     "build": {
+      "GDN_ROW_LANES": "8",
+      "GDN_COLS": "2"
+     }
+    },
+    {
+     "name": "rl4c4",
+     "build": {
+      "GDN_ROW_LANES": "4",
+      "GDN_COLS": "4"
+     }
+    },
+    {
+     "name": "rl16c8",
+     "build": {
+      "GDN_ROW_LANES": "16",
+      "GDN_COLS": "8"
+     }
+    },
+    {
+     "name": "rl32c4",
+     "build": {
+      "GDN_ROW_LANES": "32",
+      "GDN_COLS": "4"
+     }
+    },
+    {
+     "name": "base2",
+     "build": {}
     }
    ],
    "steps": [
-    "perf:nd:1",
-    "perf:d_conv:1",
-    "perf:d_qkn:1",
-    "perf:d_rec:1",
-    "perf:d_ng:1",
-    "perf:d_quant:1",
-    "perf:d_rs:1",
-    "perf:d_pan:1",
-    "perf:d_silu:1",
-    "perf:d_mvf:1",
-    "perf:d_g4st:1",
-    "perf:d_g4sw:1",
-    "perf:d_g6:1",
-    "perf:d_g8:1",
-    "perf:nd2:1"
+    "perf:base:1",
+    "perf:rl16c2:1",
+    "perf:rl16c4:1",
+    "perf:rl8c8:1",
+    "perf:rl8c2:1",
+    "perf:rl4c4:1",
+    "perf:rl16c8:1",
+    "perf:rl32c4:1",
+    "perf:base2:1"
    ]
   }
  ]
