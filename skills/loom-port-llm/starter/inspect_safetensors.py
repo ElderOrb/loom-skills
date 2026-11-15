@@ -32,20 +32,22 @@ class Source:
     """What the config needs of a checkpoint: header (name -> {dtype, shape}), file sizes, config.json, generation_config.json,
     tokenizer_config.json, the chat template text, the tokenizer's added tokens, and where it came from."""
 
-    def __init__(self, header, config, generation_config, tokenizer_config, chat_template, added_tokens, origin, files):
+    def __init__(self, header, config, generation_config, tokenizer_config, chat_template, added_tokens, origin, files, preprocessor=None):
         self.header, self.config, self.generation_config = header, config, generation_config or {}
+        self.preprocessor = preprocessor or {}   # preprocessor_config.json (image mean / std, patch and merge size), when the repo has one
         self.tokenizer_config, self.chat_template, self.added_tokens = tokenizer_config or {}, chat_template or "", added_tokens
         self.origin, self.files = origin, files   # files: {name: size}
 
     def dump(self):
         return {"format": "safetensors-header-dump", "header": self.header, "files": self.files, "config": self.config,
+                **({"preprocessor_config": self.preprocessor} if self.preprocessor else {}),
                 "generation_config": self.generation_config, "tokenizer_config": self.tokenizer_config,
                 "chat_template": self.chat_template, "added_tokens": self.added_tokens, "origin": self.origin}
 
     @classmethod
     def from_dump(cls, d):
         return cls(d["header"], d["config"], d["generation_config"], d["tokenizer_config"], d["chat_template"], d["added_tokens"],
-                   d["origin"], d["files"])
+                   d["origin"], d["files"], d.get("preprocessor_config"))
 
 
 def parse_header(read):
@@ -82,7 +84,8 @@ def load_local(path):
     ct = os.path.join(path, "chat_template.jinja")
     tok = rd("tokenizer.json") or {}
     return Source(header, rd("config.json"), rd("generation_config.json"), rd("tokenizer_config.json"),
-                  open(ct).read() if os.path.exists(ct) else None, _added(tok), {"kind": "safetensors", "path": os.path.abspath(path)}, sizes)
+                  open(ct).read() if os.path.exists(ct) else None, _added(tok), {"kind": "safetensors", "path": os.path.abspath(path)}, sizes,
+                  rd("preprocessor_config.json"))
 
 
 def load_hf(repo, revision="main"):
@@ -99,7 +102,7 @@ def load_hf(repo, revision="main"):
     tok = getj("tokenizer.json") or {}
     return Source(header, getj("config.json"), getj("generation_config.json"), getj("tokenizer_config.json"),
                   get("chat_template.jinja").decode() if "chat_template.jinja" in names else None, _added(tok),
-                  {"kind": "safetensors", "repo": repo, "revision": sha}, sizes)
+                  {"kind": "safetensors", "repo": repo, "revision": sha}, sizes, getj("preprocessor_config.json"))
 
 
 def load_source(spec, revision="main"):
@@ -209,7 +212,7 @@ def tensor_entries(src, fam, prod, layer_types, n_mtp):
 
 
 # ---------------------------------------------------------------------------------------------------------------- the config
-def build_config(src, checkpoint=None, drop_chat=False):
+def build_config(src, checkpoint=None, drop_chat=False, drop_vision=False):
     cfg_hf = src.config
     fam, prod = family_for(cfg_hf), producer_for(cfg_hf)
     tc = cfg_hf.get(fam["text_config"]) if fam.get("text_config") else cfg_hf
@@ -254,8 +257,8 @@ def build_config(src, checkpoint=None, drop_chat=False):
     if n_mtp:
         cfg["mtp"] = {"layers": [layers + j for j in range(n_mtp)]}
     cfg["attn_sinks"] = fam["fixed"]["attn_sinks"]
-    # mrope (image positions) is wired only with the image component (cfg["vision"], not yet for safetensors): text positions are
-    # sequential on all three axes, which plain neox RoPE over the rotary dims computes.
+    # mrope (image positions) belongs to the image component (cfg["vision"] below); without it text positions are sequential on all
+    # three axes, which plain neox RoPE over the rotary dims computes.
     cfg["tensors"] = tensors
     cfg["formats"] = sorted({t["type"] for t in tensors.values()})   # the weight formats in the file (the knowledge base routes quant nodes on them)
     if prod:   # the producer's quantization_config as the checkpoint states it (loom-kb facet/quark routes on this key)
@@ -268,9 +271,18 @@ def build_config(src, checkpoint=None, drop_chat=False):
     unmapped = sorted(k for k in src.header if k not in used and not k.startswith("model.visual.") and not k.startswith("mtp."))
     if unmapped:
         print("NOTE: checkpoint tensors the name map does not use:", unmapped[:6], f"({len(unmapped)} total)")
-    vis = sorted(k for k in src.header if k.startswith("model.visual."))
-    if vis:
-        print(f"NOTE: {len(vis)} vision tensors (model.visual.*): the image component is not wired for safetensors yet (text only)")
+    vis = sorted(k for k in src.header if k.startswith(fam.get("vision", {}).get("prefix", "model.visual.")))
+    if vis and fam.get("vision") and not drop_vision:
+        sys.path.insert(0, os.path.join(HERE, "vision"))
+        import st_source
+        cfg["vision"] = st_source.block(cfg_hf, src.header, fam["vision"], src.preprocessor)
+        mr = {k: dig(tc, v) for k, v in fam["mrope"].items() if k != "pad_to"}   # image positions: (t, h, w) rotary sections
+        cfg["mrope"] = {"sections": list(mr["sections"]) + [0] * (fam["mrope"].get("pad_to", 4) - len(mr["sections"])), "interleaved": bool(mr["interleaved"])}
+        vprep = sum(1 for t in cfg["vision"]["tensors"].values() if t.get("prep"))
+        print(f"vision: {fam['vision']['family']} tower {cfg['vision']['config']['layers']} x {cfg['vision']['config']['E']}, {len(cfg['vision']['tensors'])} tensors "
+              f"({vprep} prepared f32 copies, matrices as stored), M-RoPE sections {cfg['mrope']['sections']}")
+    elif vis:
+        print(f"NOTE: {len(vis)} vision tensors (model.visual.*): no image component (hf_names map has no vision block, or drop_vision)")
     if src.chat_template and not drop_chat:
         import chat_probe
         bos = src.tokenizer_config.get("bos_token") or ""

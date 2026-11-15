@@ -1,5 +1,5 @@
 """Tiny harness: write npy inputs + a check.case, run loom-test with given kernel source."""
-import os, json, subprocess, numpy as np
+import os, sys, json, subprocess, numpy as np
 VENV = os.environ.get("VENV", os.path.expanduser("~/loom/.venv"))
 BIN = os.path.join(VENV, "bin") if os.path.isdir(os.path.join(VENV, "bin")) else os.path.join(VENV, "Scripts")
 def ty(a):
@@ -24,7 +24,12 @@ class Case:
         s.lines.append(f"  check.expect.approximate actual({actual[0]}) expected({e[0]}) atol({atol:e}) rtol({rtol:e}) nan(different) : {actual[1]}, {e[1]}")
     def text(s): return f"check.case public @{s.name} {{\n" + "\n".join(s.lines) + "\n  check.return\n}\n"
 def run(src, cases, d):
-    open(os.path.join(d, "combined.loom"), "w").write(src + "\n" + "".join(c.text() for c in cases))
+    text = src + "\n" + "".join(c.text() for c in cases)
+    if "@rdna4" in text and "gfx12-generic" not in text:   # the gfx12 twins (gen_gemm_rdna4.with_twins) need dual_target's header and per-launch selection
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        import dual_target
+        text = dual_target.apply(text)
+    open(os.path.join(d, "combined.loom"), "w").write(text)
     r = subprocess.run([os.path.join(BIN, "loom-test"), "combined.loom", "--device=amdgpu", "--file-output-root=."], cwd=d, capture_output=True, text=True)
     try: res = json.loads(r.stdout)
     except ValueError:

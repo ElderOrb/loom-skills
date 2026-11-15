@@ -50,7 +50,25 @@ qwen35, per tensor (HF -> internal; "prep" is the load-time conversion bf16 -> f
 | `mtp.fc`, `mtp.pre_fc_norm_embedding` / `_hidden`, `mtp.norm`, `mtp.layers.0.*` | `blk.L.nextn.eh_proj`, `enorm`, `hnorm`, `shared_head_norm`, `blk.L.*` | bf16 (excluded from quantization), MTP depth 3 as the GGUF card |
 | `embed_tokens`, `lm_head` | `token_embd`, `output` | bf16, untied |
 | rope | `rope_dims` 64 of 256, neox, theta 1e7 | mrope sections only matter for image positions |
-| `model.visual.*` | none | **gap**: the image component is built from a GGUF mmproj; the safetensors tower (27 blocks, bf16) needs its own mapping (wave 2) |
+| `rope` mrope_section [11, 11, 10] interleaved | cfg `mrope` sections [11, 11, 10, 0], interleaved | image positions (t, h, w): written with the vision block, as the GGUF's `rope.dimension_sections` |
+| `model.visual.*` (27-block ViT, bf16) | cfg `vision` (the image component) | see "Image tower" below |
+
+### Image tower (`model.visual.*`)
+
+`inspect_safetensors.py` writes `cfg["vision"]` when the map has a `vision` block and the header has the prefix: the encoder config from `config.json` `vision_config`
+(+ `preprocessor_config.json` mean / std), and the tensor table under the **mmproj converter's names** (`v.blk.N.attn_qkv.weight`, `mm.0.weight`, ...), each with its HF key, so the
+encoder plan (`starter/vision/encoder.py`, family `qwen3vl_merger`) is shared with the GGUF path. The image programs read HF keys; the card's `parameters.vision` is the checkpoint file itself (no projector file).
+`st_source.py` builds the block (stdlib only); `encoder.config_st()` turns it into the plan's config. Per tensor (map: `hf_names/qwen35.json` "vision"):
+
+| HF tensor | decision |
+|---|---|
+| `blocks.N.attn.qkv`, `attn.proj`, `mlp.linear_fc1/2`, `merger.linear_fc1/2` weights | bf16 as stored (llama.cpp rounds them to f16; the file's own values are read, the kernels take bf16) |
+| biases, `norm1/2`, `merger.norm`, `pos_embed.weight` | prepared f32 copies (bf16 -> f32 at load, op `copy`; policy `vision_weights.loom`, bound by `vision_prepare.loom`): the encoder kernels read f32 there (10 MB for the position table) |
+| `patch_embed.proj.weight` [E, 3, 2, P, P] (conv3d) | read natively (kernel layout `hf3d`: sum of the two temporal taps, i.e. the converter's `patch_embd.weight` + `.1`, one tensor) |
+| `deepstack_visual_indexes` | `deepstack_merger_list.K.*` -> `v.deepstack.I.*` (empty for this model) |
+
+Preprocessing (resize, 2x2 token blocks, `<|vision_start|>` / `<|vision_end|>`, token limits 8..4096) is the llama.cpp / mtmd rule of the family, as for the GGUF package; the HF processor's `size` (min 65536 px, max 16777216 px) differs only for images under 256x256.
+Checks: `tests/test_safetensors_vision.py` (names and shapes equal the mmproj's; on the real files the tensors equal the mmproj values to 1e-6 and `ref_vit.py` gives the same rows from either, cos > 0.99999), kernel case `vision/tests/test_embed.py` (hf3d), whole encoder on device `vision/test_encoder.py CFG.json CHECKPOINT H W`.
 
 Test: `tests/test_safetensors_source.py`; the dequant of real rows against a scalar reimplementation of vLLM's decode runs when the checkpoint is in the HF cache.
 

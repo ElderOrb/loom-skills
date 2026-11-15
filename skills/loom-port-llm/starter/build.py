@@ -831,7 +831,7 @@ for name in ("prepare", "control", "storage", "service"):
     if name == "control" and cfg.get("vision"):   # image input (vision/README.md)
         sys.path.insert(0, os.path.join(HERE, "vision"))
         import build_vision, encoder as vision_encoder
-        vision_cfg = vision_encoder.config(cfg["vision"]["mmproj"])
+        vision_cfg = vision_encoder.config_st(cfg["vision"]) if cfg["vision"].get("source") == "safetensors" else vision_encoder.config(cfg["vision"]["mmproj"])
         text = build_vision.patch_control(text, custom_chat, cfg["vision"], vision_cfg)
     if DRAFT:   # speculative decoding glue (draft/build_draft.py)
         text = {"prepare": lambda t: build_draft.patch_prepare(t, DRAFT, cfg), "storage": lambda t: build_draft.patch_storage(t, cfg, DRAFT),
@@ -846,6 +846,20 @@ for name in ("prepare", "control", "storage", "service"):
 _policy = os.path.join(gen, "weights.loom")
 open(os.path.join(pkg, "weights.loom"), "w", encoding="utf-8", newline="\n").write(
     open(_policy if os.path.exists(_policy) else os.path.join(HERE, "templates", "weights.loom"), encoding="utf-8").read())
+VISION_POLICY = []
+if (cfg.get("vision") or {}).get("source") == "safetensors":   # the tower's bf16 biases / norms / positions are converted to f32 at load (vision/st_source.py)
+    sys.path.insert(0, os.path.join(HERE, "vision"))
+    import st_source
+    sys.path.insert(0, os.path.join(HERE, "draft"))
+    import prep_weights
+    _entries = {k_: ("bf16e", "f32_copy", n_) for k_, n_ in st_source.prepared(cfg["vision"]).items()}
+    if _entries:
+        open(os.path.join(pkg, "vision_weights.loom"), "w", encoding="utf-8", newline="\n").write(
+            prep_weights.policy(_entries, "the image tower's bf16 biases, norms and position table"))
+        VISION_POLICY = ["vision_weights.loom"]
+        _llm = os.path.join(pkg, "program", "llm.loom")   # the converter (its stage program is a root of the policy): the text generator emits it when it converts anything
+        if "llm_prep_bf16e_f32_copy" not in open(_llm, encoding="utf-8").read():
+            open(_llm, "a", encoding="utf-8", newline="\n").write("\n" + prep_weights.library({("bf16e", "f32_copy")}))
 
 # 3. Tokenizer. loom-serve strips *special* added tokens from decoded text; any
 # structural token the control program must see in the output (channel tags,
@@ -910,7 +924,7 @@ card = {
     "schema_version": 1,
     "model": {"id": model_id, "name": f"{cfg.get('name', 'llm')} (Loom port, {'safetensors' if SAFETENSORS else 'GGUF'})"},
     "programs": {"source": {
-        "inputs": [{"path": "program/prepare.loom", "data": ["weights.loom"] + POLICIES},
+        "inputs": [{"path": "program/prepare.loom", "data": ["weights.loom"] + VISION_POLICY + POLICIES},
                    "program/control.loom", "program/storage.loom", "program/service.loom"],
         "libraries": ["program/llm.loom"]}},
     "services": {"chat": {"kind": "text", "version": 1}},
@@ -927,6 +941,8 @@ if DRAFT:
     card["presets"]["chat"]["execution"] = build_draft.card_execution(ex, DRAFT)
     card = build_draft.card_drafter(card, pkg, DRAFT)
 if cfg.get("vision"):
+    if SAFETENSORS and cfg["vision"].get("source") == "safetensors":   # the tower is read from the checkpoint's own files
+        cfg["vision"] = dict(cfg["vision"], parameter_files=[os.path.basename(p) for p in GGUF_PARTS])
     card = build_vision.write_component(pkg, card, cfg["vision"], vision_cfg)
 import dual_target  # noqa: E402
 a.prefill_r9700 = a.prefill_r9700 or cfg.get("prefill_capacity_r9700")

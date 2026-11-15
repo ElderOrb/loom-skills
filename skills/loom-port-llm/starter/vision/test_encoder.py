@@ -1,9 +1,15 @@
-"""Whole-encoder test: plan -> check.case with real mmproj weights; compares to ref_vit. usage: test_encoder.py MMPROJ H W [atol]"""
-import sys, os, numpy as np, gguf, re
+"""Whole-encoder test: plan -> check.case with real mmproj weights; compares to ref_vit. usage: test_encoder.py MMPROJ H W [atol]
+A safetensors checkpoint instead of an mmproj: test_encoder.py LLM_CONFIG.json CHECKPOINT.safetensors H W [atol] (the config's vision block,
+inspect_safetensors.py): the weights are the checkpoint's own bytes (bf16 matrices, the f32 prepared copies of the small tensors)."""
+import sys, os, json, numpy as np, gguf, re
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 import encoder as EN, vk_common as V, ref_vit as R
+ST = sys.argv[1].endswith(".json")   # a safetensors checkpoint (see above)
+if ST:
+    import st_load
+    vis = json.load(open(sys.argv[1]))["vision"]; sys.argv[1:3] = [sys.argv[2]]
 path, H, Wd = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-c = EN.config(path); p = EN.build(c); P = c["patch"]; gh, gw = H // P, Wd // P; T = gh * gw; M = T // c["merge"] ** 2
+c = EN.config_st(vis) if ST else EN.config(path); p = EN.build(c); P = c["patch"]; gh, gw = H // P, Wd // P; T = gh * gw; M = T // c["merge"] ** 2
 d = os.environ.get("VISION_TEST_DIR", os.path.join(__import__("tempfile").gettempdir(), "loom_vision_tests")) + "/encoder"; os.makedirs(d, exist_ok=True)
 rng = np.random.default_rng(5)
 # smooth synthetic image (u8)
@@ -11,7 +17,7 @@ yy, xx = np.mgrid[0:H, 0:Wd]; img = np.stack([(127 + 120 * np.sin(xx / 7.0)), (1
 vals = dict(T=T, Tp=-(-T // 256) * 256, M=M, Mp=-(-M // 64) * 64, gw=gw, gh=gh, img_w=Wd, n_pix=H * Wd * 3, NH=c["NH"])
 def ev(expr):
     return int(eval(expr.replace("Tp", str(vals["Tp"])).replace("Mp", str(vals["Mp"])), {}, {k: v for k, v in vals.items()}))
-r = gguf.GGUFReader(path); raw = {t.name: np.array(t.data).reshape(-1).view(np.int8) for t in r.tensors}
+raw = st_load.raw_weights([path], vis) if ST else {t.name: np.array(t.data).reshape(-1).view(np.int8) for t in gguf.GGUFReader(path).tensors}
 cs = V.Case("t_encoder_" + c["family"].replace("-", "_"), d)
 bufs = {n: cs.out((sz,), "f16" if n == "x16" else "f32") for n, sz in EN.buffers(c, T, M).items()}
 bufs["pix"] = cs.arr(img.reshape(-1)); bufs["pixf"] = cs.out((H * Wd * 3,))
@@ -28,7 +34,7 @@ def arg(a):
 for kern, grid, args in p.ops:
     cs.launch(kern, [arg(g) for g in grid], [arg(a) for a in args])
 pre = img.astype(np.float32) / 255.0
-W_, KV = R.load(path)
+W_, KV = st_load.load([path], vis) if ST else R.load(path)
 ref = {"gemma4v": R.gemma4v, "muse-glimmer": R.muse_glimmer}.get(c["family"], R.qwen_vl)(W_, KV, pre).astype(np.float32)
 np.save(os.path.join(d, "ref.npy"), ref)
 atol = float(sys.argv[4]) if len(sys.argv) > 4 else 0.05
