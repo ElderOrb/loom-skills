@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st port exp2: the published staging package as is (card variant) and its rebuild from this branch, context 64k, consistency, ktest, a long perf run. Evidence branch: not for merge.",
+ "_comment": "mxfp4st port exp3: served context of the safetensors package on the R9700: rebuilds at 64k and 96k tokens (context = pool), functional check each, decode/prefill rows to 32k at 64k. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -7,32 +7,27 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "amd-q38-mxfp4-second",
+   "name": "amd-q38-mxfp4-ctx",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
    "kit": null,
    "llamacpp": "b1375",
    "variants": [
     {
-     "name": "card"
-    },
-    {
-     "name": "rebuild",
-     "build": {}
-    },
-    {
      "name": "ctx64k",
-     "execution": {
-      "context_capacity": 65536,
-      "pool_capacity": 65536
-     }
+     "build": {},
+     "context": 65536
+    },
+    {
+     "name": "ctx96k",
+     "build": {},
+     "context": 98304
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:rebuild",
-    "consistency:card:2",
+    "func:ctx64k",
     "perf:ctx64k:1",
-    "perf:ctx64k:1:long"
+    "perf:ctx64k:1:long",
+    "func:ctx96k"
    ]
   }
  ]
