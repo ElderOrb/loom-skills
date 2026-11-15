@@ -34,12 +34,13 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False, kmult=1, rf=4):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False, kmult=1, rf=4, a_pf=False):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
     store: 256 x 128 outputs, swiglu: 256 x 64 of each of gate and up. K advances 128 values (four MXFP4 blocks) per stage.
     dbuf (with a_direct): the weight stage is double-buffered, one barrier per step: the next step is decoded into the other buffer while this one is multiplied.
+    a_pf (with a_direct, not dbuf): the next step's activation fragments are loaded during this step (carried in registers).
     a_direct: the activation fragments are loaded from global memory straight into registers (no LDS staging of the activations)."""
     two_w = mode == "swiglu"
     NT = 256
@@ -265,6 +266,12 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
         for r in range(RF):
             A(f"  %xrow{r}_v = index.add %row_origin, {'%wave_row' if r == 0 else f'%wave_row{r}'} : index\n  %xrow{r} = index.assume %xrow{r}_v [lt(%xrow{r}_v, %rows)] : index")
     A(loads("p", "%c0"))
+    if a_pf:
+        assert a_direct and not dbuf
+        for kk in range(KS // 16):
+            A(f"  %kp{kk} = index.constant {16 * kk} : index")
+            for r in range(RF):
+                A(f"  %lp{r}_{kk} = vector.fragment.load<lhs> %x_g8[%xrow{r}, %kp{kk}] shape [%c16, %c16] : view<[%rows]x[%k]xf8E4M3, %a_storage> -> vector<2xi32>")
     if dbuf:
         assert a_direct
         A(stage_text(raw=("%wq{j}p", "%we{j}p"), sfx="_pro"))
@@ -275,6 +282,8 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
     for j in range(NB):
         carried.append((f"%cr_e{j}", f"%we{j}{'q' if dbuf else 'p'}", f"%we{j}n", "i32"))
         carried.append((f"%cr_q{j}", f"%wq{j}{'q' if dbuf else 'p'}", f"%wq{j}n", "vector<4xi32>"))
+    if a_pf:
+        carried += [(f"%ca{r}_{kk}", f"%lp{r}_{kk}", f"%ln{r}_{kk}", "vector<2xi32>") for kk in range(KS // 16) for r in range(RF)]
     A("  " + ", ".join(f"%o{a}" for a in accs) + ", " + ", ".join(f"%unused_{i}" for i in range(len(carried))) +
       " = scf.for %step = [%c0 to %k_steps step %c1](" +
       ", ".join(f"%i{a} = %init : vector<8xf32>" for a in accs) + ", " + ", ".join(f"{c[0]} = {c[1]} : {c[3]}" for c in carried) + ") -> (" +
@@ -295,10 +304,17 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
     rowv = ["%wave_row"] + [f"%wave_row{r}" for r in range(1, RF)]
     if a_direct:
         A("    %kbase = index.mul %step, %c128 : index")
+    if a_pf:
+        A("    %k_next_a = index.assume %k_next [lt(%k_next, %k_steps)] : index\n    %kbn = index.mul %k_next_a, %c128 : index")
     for kk in range(KS // 16):
         A(f"    %fk{kk} = index.constant {kk * 16} : index")
         for r in range(RF):
-            if a_direct:
+            if a_pf:
+                if r == 0:
+                    A(f"    %kgn{kk} = index.add %kbn, %fk{kk} : index")
+                A(f"    %ln{r}_{kk} = vector.fragment.load<lhs> %x_g8[%xrow{r}, %kgn{kk}] shape [%c16, %c16] : view<[%rows]x[%k]xf8E4M3, %a_storage> -> vector<2xi32>")
+                A(f"    %l{r}_{kk} = vector.bitcast %ca{r}_{kk} : vector<2xi32> to vector<2xi32>")
+            elif a_direct:
                 if r == 0:
                     A(f"    %kg{kk} = index.add %kbase, %fk{kk} : index")
                 A(f"    %l{r}_{kk} = vector.fragment.load<lhs> %x_g8[%xrow{r}, %kg{kk}] shape [%c16, %c16] : view<[%rows]x[%k]xf8E4M3, %a_storage> -> vector<2xi32>")

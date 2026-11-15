@@ -49,6 +49,16 @@ def _noload(t, mode):
     return t
 
 
+@_ablation("noa")        # activation fragments of K substeps 1..7 reuse substep 0's (the global loads of A vanish)
+def _noa(t, mode):
+    return re.sub(r"(vector\.fragment\.load<lhs> %\w+\[%\w+, )%(?:fk|kg)\d+\]", lambda m: m.group(1) + ("%kg0]" if "%x_g8" in m.group(0) else "%fk0]"), t)
+
+
+@_ablation("nob")        # weight fragments of K substeps 1..7 reuse substep 0's (the LDS reads of B vanish)
+def _nob(t, mode):
+    return re.sub(r"(vector\.fragment\.load<rhs> %\w+\[)%fk\d+,", r"\1%fk0,", t)
+
+
 @_ablation("nobar")      # no workgroup barriers (wrong results)
 def _nobar(t, mode):
     return re.sub(r"^\s*kernel\.barrier<workgroup>[^\n]*\n", "", t, flags=re.M)
@@ -59,14 +69,20 @@ def _nox(t, mode):
     return re.sub(r"^\s*vector\.store %cr_x\d, %x_stage_st[^\n]*\n", "", t, flags=re.M)
 
 
-GEN = {"adirect": {"a_direct": True}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}, "adr8": {"a_direct": True, "rf": 8}, "adr2": {"a_direct": True, "rf": 2}}   # variants that are generator parameters (the levers), not text ablations
+GEN = {"adirect": {"a_direct": True}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}, "adr8": {"a_direct": True, "rf": 8}, "adr2": {"a_direct": True, "rf": 2}, "adr2pf": {"a_direct": True, "rf": 2, "a_pf": True}}   # variants that are generator parameters (the levers), not text ablations
 
 
 def kernel(mode, kn, variant="", order="pairs"):
-    t = G.gemm_mxfp4s_f8_m256(mode, order=order, **GEN.get(variant, {}))
+    """variant: `lever[+ablation...]`: a GEN lever (generator parameters), then text ablations applied on top of it"""
+    parts = variant.split("+") if variant else []
+    lever = parts[0] if parts and parts[0] in GEN else ""
+    t = G.gemm_mxfp4s_f8_m256(mode, order=order, **GEN.get(lever, {}))
+    variant = "+".join(x for x in parts if x != lever)
     old = f"g_gemm_mxfp4s_{mode}_f8_m256_rdna4"
     t = t.replace(f'export("{old}") @{old}(', f'export("{kn}") @{kn}(')
-    return VARIANTS[variant](t, mode) if variant in VARIANTS else t
+    for ab in variant.split("+") if variant else []:
+        t = VARIANTS[ab](t, mode)
+    return t
 
 
 def build(variant=""):
@@ -286,7 +302,7 @@ if __name__ == "__main__" and len(sys.argv) > 2:
     d = sys.argv[2]
     os.makedirs(d, exist_ok=True)
     for v in (sys.argv[3:] or ["base"]):
-        if v != "base" and v not in VARIANTS and v not in GEN: raise SystemExit("unknown variant " + v)
+        if v != "base" and not all(x in VARIANTS or x in GEN for x in v.split("+")): raise SystemExit("unknown variant " + v)
         v = "" if v == "base" else v
         open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)) + ("\n" + PEAK8 + "\n" + PEAK8R if not v else ""))
     # hrx-loom 0.1.0: float comparison is check.expect.approximate with the actual and expected types (as make_kernel_tests.py does)

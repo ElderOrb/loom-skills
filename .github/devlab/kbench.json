@@ -63,16 +63,28 @@
       "gen_variants": [
         "base",
         "adirect",
-        "adk2",
-        "adr8",
-        "adr2"
+        "adr2",
+        "adr2pf",
+        "adirect+nomma",
+        "adirect+nodq",
+        "adirect+nobar",
+        "adirect+noa",
+        "adirect+nob",
+        "adr2+nomma",
+        "adr2+noa"
       ],
       "files": [
         "bench.loom",
         "bench_adirect.loom",
-        "bench_adk2.loom",
-        "bench_adr8.loom",
-        "bench_adr2.loom"
+        "bench_adr2.loom",
+        "bench_adr2pf.loom",
+        "bench_adirect+nomma.loom",
+        "bench_adirect+nodq.loom",
+        "bench_adirect+nobar.loom",
+        "bench_adirect+noa.loom",
+        "bench_adirect+nob.loom",
+        "bench_adr2+nomma.loom",
+        "bench_adr2+noa.loom"
       ],
       "tests": [
         "test.loom"
