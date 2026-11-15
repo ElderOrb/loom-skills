@@ -43,9 +43,17 @@ print("kernels:", len(p.kernels), "launches:", len(p.ops), "T", T, "M", M, "ref 
 # expectation over the full padded buffer: rows >= M are never written (buffers start at 0), so expect zeros there
 full = np.zeros(EN.buffers(c, T, M)["out"], np.float32); full[: M * c["out_row"]] = ref.reshape(-1)
 ea = cs.arr(full)
-cs.lines.append(f'  check.file.write.npy value({bufs["out"][0]}) path("got.npy") mode(always) : {bufs["out"][1]}')
-cs.lines.append(f"  check.expect.approximate actual({bufs['out'][0]}) expected({ea[0]}) atol({atol:e}) rtol({RTOL}) nan(different) : {bufs['out'][1]}, {ea[1]}")
+NOWRITE = bool(os.environ.get("VISION_TEST_NOWRITE"))   # loom-test of some SDKs cannot execute check.file.write.npy: judge by tolerance levels only
+if not NOWRITE:
+    cs.lines.append(f'  check.file.write.npy value({bufs["out"][0]}) path("got.npy") mode(always) : {bufs["out"][1]}')
+    cs.lines.append(f"  check.expect.approximate actual({bufs['out'][0]}) expected({ea[0]}) atol({atol:e}) rtol({RTOL}) nan(different) : {bufs['out'][1]}, {ea[1]}")
+else:   # the case fails when any element is outside atol + rtol |ref|; three levels say how far the output is from the reference (a layout or weight bug is far off at every level)
+    for lvl_atol, lvl_rtol in ((1.0, 3.0e-2), (0.25, 2.0e-2), (4.0, 1.0e-1)):
+        cs.lines.append(f"  check.expect.approximate actual({bufs['out'][0]}) expected({ea[0]}) atol({lvl_atol:e}) rtol({lvl_rtol:e}) nan(different) : {bufs['out'][1]}, {ea[1]}")
 ok = V.run("\n".join(p.kernels.values()), [cs], d)
+if NOWRITE:
+    print("ENCODER", "PASS" if ok else "FAIL", f"{H}x{Wd}: |got - ref| <= 1.0 + 0.03 |ref| for all {M * c['out_row']} outputs (ref |max| {np.abs(ref).max():.1f}, mean |x| {np.abs(ref).mean():.3f})" if ok else "(see the failures above: levels 1.0/3%, 0.25/2%, 4.0/10%)")
+    sys.exit(0 if ok else 1)
 
 got = np.load(os.path.join(d, "got.npy"))[: M * c["out_row"]].reshape(M, c["out_row"])
 err = np.abs(got - ref); rel = err / (np.abs(ref) + 1e-3)

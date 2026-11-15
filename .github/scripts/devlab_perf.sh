@@ -77,7 +77,7 @@
 #          ktest:V              make_kernel_tests.py + run_kernel_tests.sh with V's kit
 #          vtest:V[:HxW]        the image tower (a package with image input): starter/vision/tests (encoder kernels vs NumPy), then the whole encoder
 #                               at HxW pixels (default 320x224) on the package's weights (a safetensors package: the checkpoint's own tensors) vs
-#                               ref_vit.py, per-row cosine >= 0.999; vtest_V.log, vtest_encoder_V.log
+#                               ref_vit.py, every output within 1.0 + 3 % of the reference; vtest_V.log, vtest_encoder_V.log
 #          gates:V:LEVEL        gates.sh against llama.cpp
 #            "elastic": true: on the R9700 serve with --memory_bytes (the elastic state backing) instead of the card's --pool_backing=fixed
 # Runner: "runner": "strix" (default) | "r9700" on the experiment or a job picks the DevLab runner (workflow runs-on). On the
@@ -542,10 +542,10 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       ( cd "${KIT[$p1]}/vision/tests" && bash run_tests.sh ) > "$out/vtest_$p1.log" 2>&1; rc=$?
       # the whole encoder: a safetensors package reads the checkpoint's tensors (CFG.json CHECKPOINT), a GGUF package its mmproj
       eargs=$("$T" -c "import json,sys; c=json.load(open(sys.argv[1])); v=c['vision']; print(sys.argv[1] + ' ' + c['weights']['files'][0] if v.get('source') == 'safetensors' else v['mmproj'])" "$D/$p1/pkg/llm_config.json")
-      ( cd "${KIT[$p1]}/vision" && "$T" test_encoder.py $eargs "${vh%x*}" "${vh#*x}" 10 1.0e+00 ) > "$out/vtest_encoder_$p1.log" 2>&1
+      ( cd "${KIT[$p1]}/vision" && VISION_TEST_NOWRITE=1 "$T" test_encoder.py $eargs "${vh%x*}" "${vh#*x}" ) > "$out/vtest_encoder_$p1.log" 2>&1
       tail -3 "$out/vtest_encoder_$p1.log"
-      grep -q "row-cos min 0.999" "$out/vtest_encoder_$p1.log" || rc=1
-      res[$s]="$([ $rc = 0 ] && echo PASS || echo FAIL) ($(grep -c '^PASS' "$out/vtest_$p1.log") kernel cases passed, $(grep -c '^FAIL\|^COMPILE' "$out/vtest_$p1.log") failed; encoder $vh: $(grep -o 'row-cos min [0-9.]*' "$out/vtest_encoder_$p1.log" | tail -1))";;
+      grep -q "^ENCODER PASS" "$out/vtest_encoder_$p1.log" || rc=1
+      res[$s]="$([ $rc = 0 ] && echo PASS || echo FAIL) ($(grep -c '^PASS' "$out/vtest_$p1.log") kernel cases passed, $(grep -c '^FAIL\|^COMPILE' "$out/vtest_$p1.log") failed; encoder $vh: $(grep -o '^ENCODER [A-Z]*' "$out/vtest_encoder_$p1.log" | tail -1))";;
     logits)   # logits:V[:N_PROMPTS]  (loom-skills#736): V's package through the Gufo bundle with the logits capability on, checked on this GPU
       free_gpu   # the GPU is the bundle's (and the undrafted llama.cpp reference's) alone
       gufo_bundle || { echo '{"verdict": "NOT_SUPPORTED", "note": "no gufo bundle on this job (set bundle or GUFO_BUNDLE)", "gates": {}}' > "$out/logits_$p1.json"; res[$s]="not supported (no gufo bundle)"; continue; }
