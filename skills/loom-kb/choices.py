@@ -251,6 +251,9 @@ CHOICE("prefill.gemm.f16o_swiglu", "bool", False, "GEMM_F16O", kernels=["g_gemm_
        doc="gfx12 f16-output swiglu group with its row scale (the R9700 prefill stack of #656). Opt-in per model: llm_config "
            "rdna4_f16_ffn is its default there. Also turns on prefill.attn.flash2_trim and prefill.attn.flash2_b2 (cfg-driven).",
        generator_defaults=("",))
+CHOICE("decode.mxfp4s.act_q8", "bool", False, "MXFP4S_Q8", kernels=["g_mv_mxfp4s_*_q8*", "g_mxfp4s_icodes"], rows=ROWS_DECODE + ROWS_STREAMS, from_pr="mxfp4st-kern",
+       doc="MXFP4 split-plane dense matvecs take int8 activations (ACT_Q8's dot4 path, as Q8_0 / the K-quants) instead of f32 conversions and fused multiply-adds: the 4-token verify "
+           "matvec of a drafted decode is ALU-bound on the f32 path (the GGUF MXFP4 Qwen3.8-27B measured 47 tok/s drafted vs 74 with int8 activations). Opt-in per model.")
 CHOICE("prefill.gemm.mxfp4s_f8", "bool", False, "GEMM_MXFP4S_F8", kernels=["g_gemm_mxfp4s_*_f8_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
        devices=["rdna4"], from_pr="mxfp4st-kern",
        doc="gfx12: MXFP4 split-plane (mxfp4s) prefill GEMMs on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): the nibble and scale planes are read as stored, weights decoded to bf8 "
