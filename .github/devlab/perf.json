@@ -1,47 +1,76 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
+ "_comment": "R9700 context sweep of the safetensors MXFP4 card (MTP depth 3): per served context, an admission probe of a ~context-token request, the functional checks and the long rows (decode_32k)",
  "runner": "r9700",
  "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+ "kit": null,
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "name": "ctx-sweep",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "require_preset_r9700": true,
    "kit": null,
-   "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "memory_bytes_r9700": 34000000000,
    "variants": [
     {
-     "name": "card",
-     "build": {}
+     "name": "c64",
+     "context": 65536,
+     "execution": {
+      "context_capacity": 65536,
+      "pool_capacity": 65536
+     }
     },
     {
-     "name": "nodraft",
-     "build": {},
+     "name": "c80",
+     "context": 81920,
      "execution": {
-      "draft_depth": 0
+      "context_capacity": 81920,
+      "pool_capacity": 81920
+     }
+    },
+    {
+     "name": "c96",
+     "context": 98304,
+     "execution": {
+      "context_capacity": 98304,
+      "pool_capacity": 98304
+     }
+    },
+    {
+     "name": "c113",
+     "context": 113664,
+     "execution": {
+      "context_capacity": 113664,
+      "pool_capacity": 113664
+     }
+    },
+    {
+     "name": "c128",
+     "context": 131072,
+     "execution": {
+      "context_capacity": 131072,
+      "pool_capacity": 131072
      }
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
-   ]
+    "admit:c64",
+    "func:c64",
+    "perf:c64:1:long",
+    "admit:c80",
+    "func:c80",
+    "perf:c80:1:long",
+    "admit:c96",
+    "func:c96",
+    "perf:c96:1:long",
+    "admit:c113",
+    "func:c113",
+    "perf:c113:1:long",
+    "admit:c128",
+    "func:c128",
+    "perf:c128:1:long"
+   ],
+   "runner": "r9700"
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
