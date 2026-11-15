@@ -1046,7 +1046,7 @@
   "quark75-Qwen3.8-27B-MXFP4-loom": {
    "staging": {
     "repo": "loom-fun-staging/quark75-Qwen3.8-27B-MXFP4-loom",
-    "revision": "cc16ef6729e1884f888386fe6bd728d3fd2dff32"
+    "revision": "5a0630df5b3870344fff21311554b00b5d18b279"
    },
    "model_id": "qwen3.8-27b-mxfp4",
    "kit": null,
