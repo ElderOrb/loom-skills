@@ -20,7 +20,7 @@ one: one lane per 32-value block, llama.cpp's quantize_row_q8_0 / quantize_row_q
 #   Q4_0; the output block g reads input block g (g < split) or g + skip (the tail), so one pass copies both segments.
 SRC = {"bf16": 64, "f16": 64, "q8_0": 34, "bf16e": 2}     # bytes per 32 values of a source the converter reads (bf16e: per element)
 DST = {"q8_0": 34, "q4_0": 18, "q6_k": 210, "f32_copy": 4, "f32_add1": 4, "f32_negexp": 4}   # ... of a prepared format (f32_*: per element)
-SRC_SUPER = {"q6_k": 210}                     # bytes per 256-value superblock of a source with a row subset (see subset_entry)
+SRC_SUPER = {"q6_k": 210, "bf16r": 512}       # bytes per 256 values of a source with a row subset (see subset_entry); bf16r: a BF16 head (32-value units)
 
 # Elementwise bf16 -> f32 conversions of a safetensors checkpoint's small tensors (one lane per element; safetensors.py's name map
 # says which tensor takes which op): copy (conv1d, dt_bias, the gated norm), add1 (the zero-centred RMSNorm weights: w + 1 is
@@ -47,24 +47,24 @@ def subset_rows(N, base, V):
 def subset_entry(src, dst, N, base, V, H):
     """A policy entry (src, dst, out blocks, extra) of a row-subset copy: extra = (source bytes, split block, skip blocks)."""
     n, tail, rows = subset_rows(N, base, V)
-    unit = 256 if dst == src else 32   # a same-format copy moves whole superblocks
+    unit = 256 if dst == src else 32   # a same-format copy moves whole superblocks (bf16r: always 32-value units)
     split = n * H // unit
     skip = tail * H // unit - split
     return (src, dst, rows * H // unit, (V * H // 256 * SRC_SUPER[src], split, skip))
 
 
-def _decode(src):
+def _decode(src, g="%g"):
     if src in ("bf16", "f16"):
         return f"""    %ib = index.constant 64 : offset
-    %io = index.scale %g, %ib : index, offset -> offset
+    %io = index.scale {g}, %ib : index, offset -> offset
     %ia = index.add %in_origin, %io : offset
     %src_view = buffer.view %input[%ia] : buffer -> view<32x{src}>
     %raw = vector.load %src_view[0] : view<32x{src}> -> vector<32x{src}>
     %v = vector.extf %raw : vector<32x{src}> to vector<32xf32>
 """
-    return """    %ib = index.constant 34 : offset
+    return f"""    %ib = index.constant 34 : offset
     %two_i = index.constant 2 : offset
-    %io = index.scale %g, %ib : index, offset -> offset
+    %io = index.scale {g}, %ib : index, offset -> offset
     %ia = index.add %in_origin, %io : offset
     %sd_view = buffer.view %input[%ia] : buffer -> view<1xf16>
     %sdh = view.load %sd_view[0] : view<1xf16> -> f16
@@ -163,6 +163,7 @@ def _kernel_super(src, dst):
     dequantizer in llm.loom, then quantize_row_q4_0); dst == src: a 256-value superblock, copied byte for byte."""
     n = f"{src}_{dst}"
     same = dst == src
+    assert not (same and src == "bf16r"), "bf16r rows are re-encoded (q4_0 / q8_0), never copied"
     unit = "256-value superblock" if same else "32-value block"
     if same:
         body = """    %src_view = buffer.view %input[%origin] : buffer -> view<210xi8>
@@ -178,11 +179,13 @@ def _kernel_super(src, dst):
 """
         locate = """    %sb = %sg
 """
+    elif src == "bf16r":   # BF16 rows: a unit is a 32-value block, read at source unit %sg
+        body = _decode("bf16", "%sg") + _encode(dst)
     else:
         body = f"""    %v = func.call @g_q6_k_values(%input, %origin, %grp) : (buffer, offset, index) -> (vector<32xf32>)
 {_encode(dst)}"""
-    sbuf = "%sg" if same else "%sb"
-    locate = ("" if same else "    %sb = index.div %sg, %c8 : index\n    %grp = index.rem %sg, %c8 : index\n")
+    sbuf = "%sg" if same or src == "bf16r" else "%sb"
+    locate = ("" if same or src == "bf16r" else "    %sb = index.div %sg, %c8 : index\n    %grp = index.rem %sg, %c8 : index\n")
     return f"""
 // Load-time weight preparation (draft/prep_weights.py): staged {src.upper()} tensor (input + llm.prep_input) ->
 // {dst.upper()} in output, one lane per {unit}; output unit g reads source unit g (g < split) or g + skip.
@@ -204,8 +207,7 @@ kernel.def export("g_prep_{n}") @g_prep_{n}(%blocks: index) {{
   %c1 = index.constant 1 : index
   %c8 = index.constant 8 : index
   %c64 = index.constant 64 : index
-  %sb_bytes = index.constant 210 : offset
-  %wg = kernel.workgroup.id<x> : index
+{'' if src == 'bf16r' else '  %sb_bytes = index.constant 210 : offset' + chr(10)}  %wg = kernel.workgroup.id<x> : index
   %lane = kernel.workitem.id<x> : index
   %base = index.mul %wg, %c64 : index
   %g = index.add %base, %lane : index
@@ -214,9 +216,7 @@ kernel.def export("g_prep_{n}") @g_prep_{n}(%blocks: index) {{
     %in_tail = index.cmp uge, %g, %split : index
     %shifted = index.add %g, %skip : index
     %sg = scf.select %in_tail, %shifted, %g : index
-{locate}    %sbo = index.scale {sbuf}, %sb_bytes : index, offset -> offset
-    %origin = index.add %in_origin, %sbo : offset
-{body}  }}
+{locate}{'' if src == 'bf16r' else f'    %sbo = index.scale {sbuf}, %sb_bytes : index, offset -> offset' + chr(10) + '    %origin = index.add %in_origin, %sbo : offset' + chr(10)}{body}  }}
   kernel.return
 }}
 

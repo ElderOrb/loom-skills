@@ -36,6 +36,19 @@ if gen_draft.enabled() and gen_draft.DRAFT["kind"] == "mtp":
     _w = CFG["tensors"].get(f"blk.{MTP_LAYER}.ffn_gate.weight", {"shape": [0, FF]})["shape"][1]   # MoE block: no dense FFN
     assert _w in FFL, f"MTP block FFN width {_w} differs from the trunk's {sorted(set(FFL))}"
     FFL = FFL + [_w] * (MTP_LAYER + 1 - len(FFL))   # layer_text(MTP_LAYER) reads FFL[MTP_LAYER]
+# MTP_BLOCK_PREP=q8_0|q4_0 (safetensors checkpoint with a BF16 NextN block, e.g. the Quark MXFP4 card): the block's matrices are read from
+# a load-time copy (weights.loom, draft/prep_weights.py bf16 -> q8_0 / q4_0). Only the MTP programs read them (the verified path never does),
+# so the proposals get int8 matvecs over 1/4 or 1/2 of the BF16 bytes and only acceptance moves. Tensors are retyped here; entries are
+# {tensor: (src, dst, 32-value blocks)} for the weight policy.
+MBLK_PREP = {}
+if MTP_LAYER is not None and os.environ.get("MTP_BLOCK_PREP"):
+    _mdst = os.environ["MTP_BLOCK_PREP"]
+    assert _mdst in ("q8_0", "q4_0"), f"MTP_BLOCK_PREP={_mdst}: q8_0 or q4_0"
+    assert (CFG.get("source") or {}).get("kind") == "safetensors", "MTP_BLOCK_PREP prepares tensors through the safetensors weight policy"
+    for _n, _t in CFG["tensors"].items():
+        if _n.startswith(f"blk.{MTP_LAYER}.") and _t["type"] == "bf16" and len(_t["shape"]) == 2 and _t["shape"][0] % 32 == 0:
+            MBLK_PREP[_n] = ("bf16", _mdst, _t["shape"][0] * _t["shape"][1] // 32)
+            _t["type"] = _mdst
 def nff(i):
     """index SSA of layer i's FFN width."""
     return "%nFF" if FF_UNIFORM else f"%nFF{FFL[i]}"
@@ -4512,6 +4525,17 @@ def quant_wiring(program):
     return program
 
 
+
+def quant_wiring_mtp_only(program):
+    """quant_wiring() over the MTP warm and propose programs alone (each one on its own text: the read / made sets are per program)."""
+    import re as _re
+    for name in ("llm_mtp_warm", "llm_mtp_propose"):
+        m = _re.search(r"command\.program\.def public @" + name + r"\(\).*?\n\}\n", program, _re.S)
+        if m:
+            program = program[:m.start()] + quant_wiring(m.group(0)) + program[m.end():]
+    return program
+
+
 def lin(fmt, x, s, w, wsize, y, k, n, kval, mode="store", width=None):
     if mode == "swiglu" and fmt in SPLIT:   # no fused kernel for split planes: gate into y, up into %fu (MIXED_FFN allocates it), then silu(gate) * up
         wa, wb = w
@@ -5563,9 +5587,11 @@ if __name__ == "__main__":
     out_dir = os.environ.get("LLM_OUT") or os.path.join(here, "out")
     os.makedirs(out_dir, exist_ok=True)
     program, head_fmt = model()  # first: records the mv / GEMM variants it launches
+    TRUNK_Q8 = bool(USED_MVQ or USED_MOEQ)   # the trunk (verified path) has int8-activation matvecs; MTP_BLOCK_PREP / the bf16 proposal head add them to the MTP programs alone
     program = deepstack_wiring(program) if DEEPSTACK else program
     program = last_out_select_program(program) if LAST_OUT else program
     spec_kernels = ""
+    MTP_ONLY_Q8 = False
     if gen_draft.enabled():   # before the kernel list is emitted: these programs record mv / GEMM variants too
         head_name = "output.weight" if "output.weight" in TENS else "token_embd.weight"
         gfacts = dict(H=H, HG=HG, EPS=EPS, D=D, KD=KVH * D, QK_NORM=QK_NORM, VISION=bool(VISION), MROPE=bool(MROPE),
@@ -5579,14 +5605,16 @@ if __name__ == "__main__":
         HPREP, PHEAD_ROWS = {}, None
         if PROWS > 0 and gen_draft.DRAFT["kind"] in ("mtp", "dflash") and (gen_draft.DRAFT["kind"] == "dflash" or MTP_LAYER is not None):
             import prep_weights
-            assert fmt_of(head_name) in prep_weights.SRC_SUPER and ACT_Q8 and H % 32 == 0, \
-                f"PROPOSE_HEAD_ROWS needs a Q6_K head with int8 activations (head {fmt_of(head_name)}, ACT_Q8={ACT_Q8})"
+            PSRC = "bf16r" if fmt_of(head_name) == "bf16" else fmt_of(head_name)   # bf16r: BF16 rows re-encoded (safetensors head)
+            assert PSRC in prep_weights.SRC_SUPER and ACT_Q8 and H % 32 == 0, \
+                f"PROPOSE_HEAD_ROWS needs a Q6_K or BF16 head with int8 activations (head {fmt_of(head_name)}, ACT_Q8={ACT_Q8})"
             PBASE = base_vocab() or V
-            PDST = "q6_k" if os.environ.get("PROPOSE_HEAD", "q4_0") == "q6_k" else "q4_0"   # q6_k: the rows kept as they are (no re-rounding)
-            HPREP = {head_name: prep_weights.subset_entry(fmt_of(head_name), PDST, PROWS, PBASE, V, H)}
+            PDST = "q6_k" if os.environ.get("PROPOSE_HEAD", "q4_0") == "q6_k" and PSRC == "q6_k" else "q4_0"   # q6_k: the rows kept as they are (no re-rounding)
+            HPREP = {TENS[head_name].get("hf", head_name): prep_weights.subset_entry(PSRC, PDST, PROWS, PBASE, V, H)}
+            HKEY = TENS[head_name].get("hf", head_name)
             PHEAD_ROWS = prep_weights.subset_rows(PROWS, PBASE, V)
             open(os.path.join(out_dir, "head_weights.loom"), "w", newline="\n").write(prep_weights.policy(HPREP, "the proposal head"))
-            gfacts["phead"] = prep_weights.dst_bytes(PDST, HPREP[head_name][2])
+            gfacts["phead"] = prep_weights.dst_bytes(PDST, HPREP[HKEY][2])
             if PHEAD_ROWS[2] < V:
                 gfacts["phead_rows"] = (PHEAD_ROWS[2], PHEAD_ROWS[0], PHEAD_ROWS[1] - PHEAD_ROWS[0])
         if gen_draft.DRAFT["kind"] == "dflash":
@@ -5642,7 +5670,8 @@ if __name__ == "__main__":
         # (4 drafting streams at depth 3: 69 vs 146 ms per epoch on Bolt-E4B), at the price of rare near-tie flips vs
         # 1-token decode. SPEC_EXACT=1 keeps the 4-token matvec (decode's rounding) at every width instead.
         # ACT_Q8: the int8 matvec streams weights once per 16 tokens, so the GEMM takes over later (SPEC_MM_FROM).
-        mm_from = int(os.environ.get("SPEC_MM_FROM", "17" if USED_MVQ else "5"))
+        MTP_ONLY_Q8 = bool(MBLK_PREP or (PHEAD_ROWS and fmt_of(head_name) == "bf16")) and not TRUNK_Q8
+        mm_from = int(os.environ.get("SPEC_MM_FROM", "17" if USED_MVQ and not MTP_ONLY_Q8 else "5"))
         program = "\n".join(spec) if os.environ.get("SPEC_EXACT") == "1" else gen_draft.small_gemm("\n".join(spec), mm_from)
         # The drafter's catch-up (warm) program only feeds proposals, never the output, so it takes the GEMM from
         # DRAFT_MM_FROM tokens (4 drafting streams commit ~10 tokens per step: DFlash's 33280-wide fc on the f32 4-token
@@ -5672,25 +5701,29 @@ if __name__ == "__main__":
         COMMON += MXFP4S
     if any(t["type"] == "bf16" for t in TENS.values()) and "func.def inline @g_bf16_values" not in COMMON:   # bf16 embedding / head / MTP block (safetensors)
         COMMON += BF16_VALUES
-    if USED_MVQ or USED_MOEQ:   # ACT_Q8: int8-activation matvecs, their weight-code helpers and g_quant_q8
+    # A BF16 (safetensors) head with a reduced-vocabulary proposal copy: only the proposals run the int8 head (over the Q4_0 copy);
+    # the verified head keeps its f32-activation kernels.
+    PH_ONLY = bool(spec_kernels and "phead" in gfacts and head_fmt not in IQ_FMTS and PHEAD_ROWS)
+    if USED_MVQ or USED_MOEQ or PH_ONLY:   # ACT_Q8: int8-activation matvecs, their weight-code helpers and g_quant_q8
         COMMON += ICODES + "".join(mv(fmt, K, R=R, TG=TG, swiglu=sw == 1, pair=sw == 2, suffix=f"_r{R}" if R != 16 else "", iq=True)
                                    for fmt, K, sw, R, TG in sorted(USED_MVQ))
-        program = quant_wiring(program)
+        program = quant_wiring_mtp_only(program) if MTP_ONLY_Q8 else quant_wiring(program)
         if head_fmt in IQ_FMTS:
             COMMON += "".join(head_mv(tg, head_fmt, iq=True) for tg in (1, 4, 8, 16))
             program = head_wiring(program)
-            if spec_kernels and "phead" in gfacts:   # the proposals' head: the Q4_0 copy's variants
-                _rows = PHEAD_ROWS[2] if PHEAD_ROWS else V   # a reduced draft vocabulary has fewer rows
-                _V, _CH = V, CHUNKS
-                V, CHUNKS = _rows, (_rows + 127) // 128
-                _pf, _ps = ("q6_k", "_pq6") if PHEAD_ROWS and HPREP[head_name][1] == "q6_k" else ("q4_0", "_p40")
-                COMMON += "".join(head_mv(tg, _pf, iq=True, suffix=_ps) for tg in (1, 4, 8, 16))
-                V, CHUNKS = _V, _CH
-                _pm = _re.search(r"command\.program\.def public @llm_" + gen_draft.DRAFT["kind"] + r"_propose\(\).*?\n\}\n", program, _re.S)
-                _pt = _re.sub(r"@(g_head_mv\w*_q8)\[", r"@\1" + _ps + "[", _pm.group(0))
-                if PHEAD_ROWS and PHEAD_ROWS[2] < V:
-                    _pt = _pt.replace("@g_head_select[", "@g_head_select_p[")
-                program = program[:_pm.start()] + _pt + program[_pm.end():]
+        if spec_kernels and "phead" in gfacts and (head_fmt in IQ_FMTS or PH_ONLY):   # the proposals' head: the Q4_0 copy's variants
+            _rows = PHEAD_ROWS[2] if PHEAD_ROWS else V   # a reduced draft vocabulary has fewer rows
+            _V, _CH = V, CHUNKS
+            V, CHUNKS = _rows, (_rows + 127) // 128
+            _pf, _ps = ("q6_k", "_pq6") if PHEAD_ROWS and HPREP[HKEY][1] == "q6_k" else ("q4_0", "_p40")
+            COMMON += "".join(head_mv(tg, _pf, iq=True, suffix=_ps) for tg in (1, 4, 8, 16))
+            V, CHUNKS = _V, _CH
+            _pm = _re.search(r"command\.program\.def public @llm_" + gen_draft.DRAFT["kind"] + r"_propose\(\).*?\n\}\n", program, _re.S)
+            _pt = head_wiring(_pm.group(0)) if PH_ONLY else _pm.group(0)
+            _pt = _re.sub(r"@(g_head_mv\w*_q8)\[", r"@\1" + _ps + "[", _pt)
+            if PHEAD_ROWS and PHEAD_ROWS[2] < V:
+                _pt = _pt.replace("@g_head_select[", "@g_head_select_p[")
+            program = program[:_pm.start()] + _pt + program[_pm.end():]
     if os.environ.get("ROW_SCALE_LIVE", "1") != "0":   # after quant_wiring (it matches g_row_scale_f16); =0 A/B it off
         program = live_row_scale(program)
         COMMON += ROW_SCALE_LIVE
@@ -5781,13 +5814,18 @@ if __name__ == "__main__":
     if seg_tokens():
         text = seg_attention(text)
     SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in text}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
-    if SRC_PREP:
+    MB_USED = {n: e for n, e in MBLK_PREP.items() if f'"{n}"' in text}   # MTP_BLOCK_PREP: the NextN block's matrices the programs read
+    if SRC_PREP or MB_USED:
         import prep_weights
         entries = {t["hf"]: ("bf16e", "f32_" + t["prep"]["op"], int(math.prod(t["shape"]))) for t in SRC_PREP.values()}
         assert all(t["prep"]["src"] == "bf16" for t in SRC_PREP.values()), "prepared tensors are bf16 in the checkpoint"
-        text += "\n" + prep_weights.library({(s_, d_) for s_, d_, _ in entries.values()})   # the converters (their stage programs are roots of the weight policy)
+        entries.update({TENS[n]["hf"]: e for n, e in MB_USED.items()})
+        _lib = prep_weights.library({e[:2] for e in entries.values()})   # the converters (their stage programs are roots of the weight policy)
+        if "config.decl @llm.prep_blocks" in text:   # the proposal head's converters (spec_kernels) declared the shared configs already
+            _lib = _lib.replace("config.decl @llm.prep_blocks : i64\n\nconfig.decl @llm.prep_input : i64\n\n", "", 1)
+        text += "\n" + _lib
         open(os.path.join(out_dir, "weights.loom"), "w", newline="\n").write(
-            prep_weights.policy(entries, "the safetensors checkpoint's bf16 norms, A_log, dt_bias and conv1d"))
+            prep_weights.policy(entries, "the safetensors checkpoint's bf16 norms, A_log, dt_bias and conv1d" + (" and the MTP block's matrices" if MB_USED else "")))
     text = hf_rename(text)
     out = os.path.join(out_dir, "model.loom")
     open(out, "w", newline="\n").write(text)

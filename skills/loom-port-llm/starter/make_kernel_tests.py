@@ -1294,22 +1294,30 @@ if (HEAD_Q8 and HEAD_FMT in ("q8_0", "bf16", "f16") and H % 32 == 0 and (cfg.get
 # [0, N) + the added-token rows of the Q6_K head to Q4_0 (llama.cpp dequantize_row_q6_K numerics, then quantize_row_q4_0), the int8
 # head runs over the copy (logits vs numpy), and g_head_select_p maps a winning row back to its token id (synthetic partials: a head
 # row, a tail row, an end-of-turn token). The split / shift the generator baked into g_head_select_p are read from the package's llm.loom.
-def _phead_params():
-    import glob, re
+def _pkg_llm_text():
+    """The generated llm.loom of the package under test (next to the config, or in a build dir beside it), or None."""
+    import glob
     d = os.path.dirname(os.path.abspath(sys.argv[1]))
     cands = [os.path.join(d, g) for g in ("pkg/program/llm.loom", "*/pkg/program/llm.loom")] \
         + [os.path.join(os.path.dirname(d), g) for g in ("pkg/program/llm.loom", "*/pkg/program/llm.loom")]
     for c in cands:
         for f in glob.glob(c) if c else []:
-            t = open(f, errors="replace").read()
-            i = t.find("@g_head_select_p(")
-            m = re.search(r"%split = scalar\.constant (\d+) : i32\n\s*%shift = scalar\.constant (\d+) : i32", t[i:]) if i >= 0 else None
-            if m:
-                return int(m.group(1)), int(m.group(2)), "@g_prep_q6_k_q6_k(" in t
+            return open(f, errors="replace").read()
     return None
 
 
-_PH = _phead_params() if (HEAD_Q8 and HEAD_FMT == "q6_k" and H % 256 == 0 and (cfg.get("mtp") or cfg.get("drafter"))) else None
+def _phead_params():
+    import re
+    t = _pkg_llm_text()
+    i = t.find("@g_head_select_p(") if t else -1
+    m = re.search(r"%split = scalar\.constant (\d+) : i32\n\s*%shift = scalar\.constant (\d+) : i32", t[i:]) if i >= 0 else None
+    return (int(m.group(1)), int(m.group(2)), "@g_prep_q6_k_q6_k(" in t) if m else None
+
+
+# a Q6_K head (GGUF) or a BF16 head (safetensors, prep_weights "bf16r"); the package's llm.loom says whether the copy exists
+_PH = _phead_params() if ((HEAD_Q8 and HEAD_FMT == "q6_k" and H % 256 == 0 or ACT_Q8 and HEAD_FMT == "bf16" and H % 32 == 0)
+                          and (cfg.get("mtp") or cfg.get("drafter"))) else None
+PSRC = "bf16r" if HEAD_FMT == "bf16" else "q6_k"
 if _PH:
     split_rows, shift, SAME = _PH                        # SAME: the copy keeps the Q6_K rows (PROPOSE_HEAD=q6_k), else Q4_0
     PSUF = "_pq6" if SAME else "_p40"
@@ -1358,7 +1366,7 @@ if _PH:
   %w = check.file.read.npy path("hd_w.npy") : {hwt}
   %le = check.file.read.npy path("pr_l.npy") : tensor<{S * CHP}xf32>
   %w4 = check.generate.fill value(0) : {w4t}
-  kernel.launch @g_prep_q6_k_{"q6_k" if SAME else "q4_0"}[%b](%b, %o, %sp, %sk, %w4, %w) : [index](index, i64, i64, i64, {w4t}, {hwt})
+  kernel.launch @g_prep_{PSRC}_{"q6_k" if SAME else "q4_0"}[%b](%b, %o, %sp, %sk, %w4, %w) : [index](index, i64, i64, i64, {w4t}, {hwt})
   %hk = check.literal value({H}) : index
   %hq = check.generate.fill value(0) : tensor<{S}x{2 * H}xi8>
   kernel.launch @g_quant_q8[%t, %hk](%t, %hk, %h, %hq) : [index, index](index, index, {ht}, tensor<{S}x{2 * H}xi8>)
@@ -1535,6 +1543,29 @@ def drafter_cases():
 }}
 """)
 drafter_cases()
+
+
+def mtp_block_cases():
+    """MTP_BLOCK_PREP=q8_0 (safetensors, draft/prep_weights.py): the NextN block's BF16 matrices are converted at load (g_prep_bf16_q8_0)
+    and the proposals run the int8 matvecs on the copy: prep_cases() on the block's matrices whose output is the hidden width
+    (eh_proj, attn_output, ffn_down: the widths gen_llm picks rows-per-workgroup for), reference = llama.cpp's Q8_0 rounding."""
+    t = _pkg_llm_text()
+    if not t or "@g_prep_bf16_q8_0(" not in t or not cfg.get("mtp") or (cfg.get("source") or {}).get("kind") != "safetensors":
+        return
+    global DT
+    DT = T
+    M = cfg["mtp"]["layers"][0]
+    seen_mv = set()
+    for sfx in ("nextn.eh_proj", "attn_output", "ffn_down"):
+        nm = f"blk.{M}.{sfx}.weight"
+        if nm not in T or T[nm].tensor_type.name.lower() != "bf16":
+            continue
+        K, n = int(T[nm].shape[0]), int(T[nm].shape[1])
+        if K % 32 == 0 and n == H:
+            prep_cases(nm, None, "bf16", K, n, deq(nm).astype(np.float64), None, "mb_" + sfx.replace(".", "_"), seen_mv)
+
+
+mtp_block_cases()
 
 
 def dflash_attention_case():

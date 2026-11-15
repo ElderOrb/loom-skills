@@ -54,3 +54,12 @@ qwen35, per tensor (HF -> internal; "prep" is the load-time conversion bf16 -> f
 
 Test: `tests/test_safetensors_source.py`; the dequant of real rows against a scalar reimplementation of vLLM's decode runs when the checkpoint is in the HF cache.
 
+## Proposals over bf16 tensors (drafted checkpoints)
+
+A Quark export keeps the MTP block (`mtp.fc`, `mtp.layers.0.*`, 0.85 GB) and the head (2.54 GB) in bf16, so every MTP proposal round reads ~3.4 GB
+(depth 3: ~10 GB per verify step, more than the verified pass's MXFP4 weights). Proposals feed verification only (verification runs the checkpoint's own
+tensors, `llm_advance` / `llm_verify` stay byte-identical), so they read load-time prepared copies:
+- `draft.propose.block` = `q8_0` | `q4_0` (`MTP_BLOCK_PREP`): the block's matrices become Q8_0 / Q4_0 through `weights.loom` (`g_prep_bf16_q8_0`, llama.cpp's quantize_row numerics) and run the int8-activation matvecs. The copy replaces the block's bytes (nothing else reads them), so it costs no memory.
+- `draft.propose.head_rows` = N (`PROPOSE_HEAD_ROWS`): the head pass reads a Q4_0 copy of head rows [0, N) + the added-token rows (`g_prep_bf16r_q4_0`, `head_weights.loom`), +0.24 GB at N = 81920.
+The int8 matvecs exist in the MTP warm / propose programs only (`quant_wiring_mtp_only`) while the trunk has none; with int8 trunk weights the whole program takes them. Measured settings: the model node.
+

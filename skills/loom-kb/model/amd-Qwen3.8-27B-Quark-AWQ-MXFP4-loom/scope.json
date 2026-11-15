@@ -19,6 +19,14 @@
     "exec.pool_capacity": 65536
    },
    "evidence": "first DevLab R9700 runs (devlab-perf 43771486278, 43772073750): the package rebuilt at context = pool = 65536 serves with --pool_backing=fixed, func pass, decode 38.8 tok/s and prefill 33k 866 tok/s (decode_32k 36.5); 98304 also starts and answers (func pass) but no full-context request was run; 32768 (the first card) and 1024-token prefill chunks as the Q4_K_M 27B card. Serving settings to be re-measured with the fast kernels (kern PR) and the verify scratch of depth 3."
+  },
+  {
+   "when": {},
+   "set": {
+    "draft.propose.head_rows": 81920,
+    "draft.propose.block": "q8_0"
+   },
+   "evidence": "WIP (to be measured)"
   }
  ]
 }
