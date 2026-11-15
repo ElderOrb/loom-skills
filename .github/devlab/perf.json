@@ -1,5 +1,5 @@
 {
- "_comment": "MXFP4 R9700 prefill profile: doubling ablations of the prefill kernel families (timing only) on the f8q8 build.",
+ "_comment": "MXFP4 R9700: prefill chunk 1024 vs 2048 (tile tail), same build.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "llama_spec": "matched",
@@ -8,93 +8,38 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "mxfp4-prof",
+   "name": "mxfp4-chunk",
    "memory_bytes_r9700": 34000000000,
    "variants": [
     {
-     "name": "base",
+     "name": "p1024",
      "build": {
       "GEMM_MXFP4_F8": "1",
       "MXFP4_Q8": "1"
      },
-     "context": 134144
+     "context": 90112
     },
     {
-     "name": "dmx",
+     "name": "p2048",
      "build": {
       "GEMM_MXFP4_F8": "1",
       "MXFP4_Q8": "1"
      },
-     "context": 134144,
-     "double": [
-      "llm_advance:g_gemm_mxfp4"
-     ]
-    },
-    {
-     "name": "dq8",
-     "build": {
-      "GEMM_MXFP4_F8": "1",
-      "MXFP4_Q8": "1"
-     },
-     "context": 134144,
-     "double": [
-      "llm_advance:g_gemm_q8_0"
-     ]
-    },
-    {
-     "name": "drs",
-     "build": {
-      "GEMM_MXFP4_F8": "1",
-      "MXFP4_Q8": "1"
-     },
-     "context": 134144,
-     "double": [
-      "llm_advance:g_row_scale|g_post_add_norm"
-     ]
-    },
-    {
-     "name": "dgdn",
-     "build": {
-      "GEMM_MXFP4_F8": "1",
-      "MXFP4_Q8": "1"
-     },
-     "context": 134144,
-     "double": [
-      "llm_advance:g_gdn"
-     ]
-    },
-    {
-     "name": "dat",
-     "build": {
-      "GEMM_MXFP4_F8": "1",
-      "MXFP4_Q8": "1"
-     },
-     "context": 134144,
-     "double": [
-      "llm_advance:attention|flash"
-     ]
-    },
-    {
-     "name": "dsm",
-     "build": {
-      "GEMM_MXFP4_F8": "1",
-      "MXFP4_Q8": "1"
-     },
-     "context": 134144,
-     "double": [
-      "llm_advance:g_silu|g_split|g_qk_rope|g_embed|g_token|g_conv"
-     ]
+     "context": 90112,
+     "build_args": [
+      "--prefill",
+      "2048"
+     ],
+     "execution": {
+      "prefill_capacity": 2048
+     }
     }
    ],
    "steps": [
-    "perf:base:1",
-    "perf:dmx:1",
-    "perf:dq8:1",
-    "perf:drs:1",
-    "perf:dgdn:1",
-    "perf:dat:1",
-    "perf:dsm:1",
-    "perf:base:1"
+    "perf:p1024:1",
+    "perf:p2048:1",
+    "perf:p2048:1:long",
+    "perf:p1024:1:long"
    ]
   }
  ]
