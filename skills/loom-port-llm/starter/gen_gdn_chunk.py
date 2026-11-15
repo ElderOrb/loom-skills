@@ -28,6 +28,8 @@ SPAN_MIN = 64   # spans of at least this many tokens (the GEMM epoch shape) run 
 
 
 def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
+    import os as _os
+    ABL = set(filter(None, _os.environ.get("GDN_CHUNK_ABL", "").split(",")))   # timing ablations (wrong results): skip nosolve noout nostate nozkq
     HK, HV, DK, DV, C, VD = G["HK"], G["HV"], G["DK"], G["DV"], G["C"], G["VD"]
     assert DK == 128 and DV == 128 and HV % HK == 0, "g_gdn_chunk_rdna4 is built for 128 x 128 heads (8 waves x 16 value columns)"
     NS = HV * DV * DK
@@ -42,31 +44,6 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
     out = []
     P = out.append
 
-    def stage_loads(pre, cidx):
-        """Global loads of the chunk CIDX (an index value): K / Q rows (16 columns per thread), the norms, alpha and beta of the thread's token.
-        Results: %{pre}kr %{pre}qr %{pre}kinv0 %{pre}qinv0 %{pre}al %{pre}be."""
-        L = []
-        L.append(f"    %{pre}c0 = index.mul {cidx}, {ci(CN)} : index")
-        L.append(f"    %{pre}rem = index.sub %length, %{pre}c0 : index")
-        L.append(f"    %{pre}m = index.min %{pre}rem, {ci(CN)} : index")
-        L.append(f"    %{pre}srow = index.div %thread, {ci(8)} : index")
-        L.append(f"    %{pre}spart = index.rem %thread, {ci(8)} : index")
-        L.append(f"    %{pre}scol = index.mul %{pre}spart, {ci(16)} : index")
-        L.append(f"    %{pre}slive = index.cmp ult, %{pre}srow, %{pre}m : index")
-        L.append(f"    %{pre}stoff = index.add %{pre}c0, %{pre}srow : index")
-        L.append(f"    %{pre}stokc = scf.select %{pre}slive, %{pre}stoff, %{pre}c0 : index")
-        L.append(f"    %{pre}stabs_v = index.add %first, %{pre}stokc : index")
-        L.append(f"    %{pre}stabs = index.assume %{pre}stabs_v [lt(%{pre}stabs_v, %tokens)] : index")
-        L.append(f"    %{pre}kinv0 = view.load %inv_view[%{pre}stabs, %k_norm_index] : view<[%tokens]x{2 * HK}xf32> -> f32")
-        L.append(f"    %{pre}qinv0 = view.load %inv_view[%{pre}stabs, %q_norm_index] : view<[%tokens]x{2 * HK}xf32> -> f32")
-        L.append(f"    %{pre}al = view.load %alpha_view[%{pre}stabs, %vh] : view<[%tokens]x{HV}xf32> -> f32")
-        L.append(f"    %{pre}be = view.load %beta_view[%{pre}stabs, %vh] : view<[%tokens]x{HV}xf32> -> f32")
-        L.append(f"    %{pre}kcol = index.add %kcol_base, %{pre}scol : index")
-        L.append(f"    %{pre}qcol = index.add %qcol_base, %{pre}scol : index")
-        L.append(f"    %{pre}kr = vector.load %x_view[%{pre}stabs, %{pre}kcol] : view<[%tokens]x{C}xf32> -> vector<16xf32>")
-        L.append(f"    %{pre}qr = vector.load %x_view[%{pre}stabs, %{pre}qcol] : view<[%tokens]x{C}xf32> -> vector<16xf32>")
-        return L
-
     def bar():
         P("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
 
@@ -77,38 +54,49 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
     P(f"    %m_last_a = index.sub %m, %k1 : index")
     P(f"    %m_last = index.assume %m_last_a [range(%m_last_a, 0, {CN - 1})] : index")
     P(f"    %vbase_tok = index.add %first, %c0tok : index")
-    # ---- P0: stage the chunk (thread -> row thread / 8, 16 columns of K and Q) from the values the previous iteration (or the prologue) loaded
+    # ---- P0: stage the chunk (thread -> row thread / 8, 16 columns of K, Q and V)
     P(f"    %srow = index.div %thread, {ci(8)} : index")
     P(f"    %spart = index.rem %thread, {ci(8)} : index")
     P(f"    %scol = index.mul %spart, {ci(16)} : index")
     P(f"    %slive = index.cmp ult, %srow, %m : index")
-    P(f"    %qinv1 = scalar.mulf %lqinv0, %qscale_c : f32")
-    P(f"    %kinv = scf.select %slive, %lkinv0, %zero_f : f32")
+    P(f"    %stoff = index.add %c0tok, %srow : index")
+    P(f"    %stokc = scf.select %slive, %stoff, %c0tok : index")
+    P(f"    %stabs_v = index.add %first, %stokc : index")
+    P(f"    %stabs = index.assume %stabs_v [lt(%stabs_v, %tokens)] : index")
+    P(f"    %kinv0 = view.load %inv_view[%stabs, %k_norm_index] : view<[%tokens]x{2 * HK}xf32> -> f32")
+    P(f"    %qinv0 = view.load %inv_view[%stabs, %q_norm_index] : view<[%tokens]x{2 * HK}xf32> -> f32")
+    P(f"    %qinv1 = scalar.mulf %qinv0, %qscale_c : f32")
+    P(f"    %kinv = scf.select %slive, %kinv0, %zero_f : f32")
     P(f"    %qinv = scf.select %slive, %qinv1, %zero_f : f32")
     P(f"    %kinv_v = vector.splat %kinv : vector<16xf32>")
     P(f"    %qinv_v = vector.splat %qinv : vector<16xf32>")
-    P(f"    %kn = vector.mulf %lkr, %kinv_v : vector<16xf32>")
-    P(f"    %qn = vector.mulf %lqr, %qinv_v : vector<16xf32>")
+    P(f"    %kcol = index.add %kcol_base, %scol : index")
+    P(f"    %qcol = index.add %qcol_base, %scol : index")
+    P(f"    %vcol16 = index.add %vcol_head, %scol : index")
+    P(f"    %kr = vector.load %x_view[%stabs, %kcol] : view<[%tokens]x{C}xf32> -> vector<16xf32>")
+    P(f"    %qr = vector.load %x_view[%stabs, %qcol] : view<[%tokens]x{C}xf32> -> vector<16xf32>")
+    P(f"    %vr = vector.load %x_view[%stabs, %vcol16] : view<[%tokens]x{C}xf32> -> vector<16xf32>")
+    P(f"    %kn = vector.mulf %kr, %kinv_v : vector<16xf32>")
+    P(f"    %qn = vector.mulf %qr, %qinv_v : vector<16xf32>")
     P(f"    %kh16 = vector.fptrunc %kn : vector<16xf32> to vector<16xf16>")
     P(f"    %qh16 = vector.fptrunc %qn : vector<16xf32> to vector<16xf16>")
     P(f"    vector.store %kh16, %kh_view[%srow, %scol] : vector<16xf16>, view<{CN}x{KHS}xf16>")
     P(f"    vector.store %qh16, %q_view[%srow, %scol] : vector<16xf16>, view<{CN}x{QAS}xf16>")
+    P(f"    vector.store %vr, %v_view[%srow, %scol] : vector<16xf32>, view<{CN}x{VS}xf32>")
     # per-token scalars: threads with part 0 (rows 0..CN-1 live in threads 0, 8, 16, ...)
     P(f"    %is_p0 = index.cmp eq, %spart, %k0 : index")
     P(f"    scf.if %is_p0 {{")
-    P(f"      %al_b = scalar.addf %lal, %dt_bias_value : f32")
+    P(f"      %al = view.load %alpha_view[%stabs, %vh] : view<[%tokens]x{HV}xf32> -> f32")
+    P(f"      %be = view.load %beta_view[%stabs, %vh] : view<[%tokens]x{HV}xf32> -> f32")
+    P(f"      %al_b = scalar.addf %al, %dt_bias_value : f32")
     P(f"      %al_p = scalar.softplusf<afn> %al_b : f32")
     P(f"      %gate = scalar.mulf %al_p, %a_value : f32")
     P(f"      %g_live = scf.select %slive, %gate, %zero_f : f32")
-    P(f"      %bt = scalar.logisticf<afn> %lbe : f32")
+    P(f"      %bt = scalar.logisticf<afn> %be : f32")
     P(f"      %bt_live = scf.select %slive, %bt, %zero_f : f32")
     P(f"      view.store %g_live, %g_s[%srow] : f32, view<{CN}xf32>")
     P(f"      view.store %bt_live, %beta_s[%srow] : f32, view<{CN}xf32>")
     P(f"    }}")
-    # the next chunk's loads (consumed by the next iteration; their latency hides behind this chunk's work)
-    P(f"    %nci_a = index.add %ci, %k1 : index")
-    P(f"    %nci = index.min %nci_a, %last_chunk : index")
-    out.extend(stage_loads("n", "%nci"))
     bar()
     # ---- P1: inclusive scan of g (threads < CN)
     P(f"    %tcn = index.cmp ult, %thread, {ci(CN)} : index")
@@ -126,13 +114,6 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
     P(f"      view.store %egv, %eg_s[%tt] : f32, view<{CN}xf32>")
     P(f"    }}")
     bar()
-    # v rows of the chunk: loaded here, stored to LDS in P3 (their latency hides behind P2)
-    P(f"    %vt_v = index.add %first, %c0tok : index")
-    P(f"    %vtok_a = index.add %vt_v, %srow : index")
-    P(f"    %vtok_c = index.min %vtok_a, %last_tok : index")
-    P(f"    %vtok = index.assume %vtok_c [lt(%vtok_c, %tokens)] : index")
-    P(f"    %vcol16 = index.add %vcol_head, %scol : index")
-    P(f"    %vr = vector.load %x_view[%vtok, %vcol16] : view<[%tokens]x{C}xf32> -> vector<16xf32>")
     # ---- P2: S as rhs fragments; K S and Q S; this wave's tile of K K^T (waves 0-3) or Q K^T (waves 4-7)
     for kb in range(8):
         P(f"    %sh{kb} = vector.fptrunc %s{kb} : {vec8} to vector<8xf16>")
@@ -140,10 +121,12 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
     for nmx, vw, sz in (("zk", "%kh_view", KHS), ("zq", "%q_view", QAS)):
         for mt in range(NT):
             prev = "%init"
-            for kb in range(8):
+            for kb in range(1 if "nozkq" in ABL else 8):
                 P(f"    %{nmx}l{mt}_{kb} = vector.fragment.load<lhs> {vw}[{ci(16 * mt)}, {ci(16 * kb)}] {SH} : view<{CN}x{sz}xf16> -> vector<8xf16>")
                 P(f"    %{nmx}{mt}_{kb} = vector.mma %{nmx}l{mt}_{kb}, %sf{kb}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
                 prev = f"%{nmx}{mt}_{kb}"
+            if "nozkq" in ABL:
+                P(f"    %{nmx}{mt}_7 = vector.addf {prev}, %zero8 : {vec8}")
     P(f"    %tq = index.rem %wave, {ci(NT * NT)} : index")
     P(f"    %tmt = index.div %tq, {ci(NT)} : index")
     P(f"    %tnt = index.rem %tq, {ci(NT)} : index")
@@ -190,11 +173,10 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
     P(f"      vector.fragment.store<result> %pv, %p_view[%tr, %tc] {SH} : {vec8}, view<{CN}x{PS}xf16>")
     P(f"    }}")
     bar()
-    P(f"    vector.store %vr, %v_view[%srow, %scol] : vector<16xf32>, view<{CN}x{VS}xf32>")
     # ---- P3: waves 0 solves T = (I + A)^-1 (one thread per column), waves 1-4 stage K^T exp(G - gc) as f16 [dk][t]
     P(f"    scf.if %tcn {{")
     P(f"      %cc = index.assume %thread [range(%thread, 0, {CN - 1})] : index")
-    for i in range(CN):
+    for i in range(2 if "nosolve" in ABL else CN):
         P(f"      %oh{i} = index.cmp eq, %cc, {ci(i)} : index")
         P(f"      %tv{i}_0 = scf.select %oh{i}, %one_f, %zero_f : f32")
         if i >= dep:
@@ -278,7 +260,7 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
             P(f"    %pl{mt}_{kt} = vector.fragment.load<lhs> %p_view[{ci(16 * mt)}, {ci(16 * kt)}] {SH} : view<{CN}x{PS}xf16> -> vector<8xf16>")
             P(f"    %oo{mt}_{kt} = vector.mma %pl{mt}_{kt}, %df{kt}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             prev = f"%oo{mt}_{kt}"
-        for e in range(8):
+        for e in range(0 if "noout" in ABL else 8):
             P(f"    %olt{mt}_{e}_r = index.add {ci(16 * mt + e)}, %lane_h8 : index")
             P(f"    %olt{mt}_{e} = index.cmp ult, %olt{mt}_{e}_r, %m : index")
             P(f"    scf.if %olt{mt}_{e} {{")
@@ -295,13 +277,13 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
         P(f"    %sdv{kb} = vector.mulf %s{kb}, %eg_v : {vec8}")
         P(f"    %sd{kb} = vector.fragment<init> %sdv{kb} {SH} : {vec8}")
         prev = f"%sd{kb}"
-        for kt in range(NT):
+        for kt in range(0 if "nostate" in ABL else NT):
             P(f"    %ul{kb}_{kt} = vector.fragment.load<lhs> %kdt_view[{ci(16 * kb)}, {ci(16 * kt)}] {SH} : view<{DK}x{KDS}xf16> -> vector<8xf16>")
             P(f"    %un{kb}_{kt} = vector.mma %ul{kb}_{kt}, %df{kt}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             prev = f"%un{kb}_{kt}"
         P(f"    %sn{kb} = vector.addf {prev}, %zero8 : {vec8}")
     bar()
-    P(f"    scf.yield {', '.join(f'%sn{kb}' for kb in range(8))}, %nkr, %nqr, %nkinv0, %nqinv0, %nal, %nbe : {', '.join([vec8] * 8)}, vector<16xf32>, vector<16xf32>, f32, f32, f32, f32")
+    P(f"    scf.yield {', '.join(f'%sn{kb}' for kb in range(8))} : {', '.join([vec8] * 8)}")
     chunk_text = out
     # ------------------------------------------------------------------------------------------------------------------
     tgt = "target(@rdna4) " if target else ""
@@ -330,7 +312,7 @@ kernel.def {tgt}export("g_gdn_chunk_rdna4") @g_gdn_chunk_rdna4(%spans: index) {{
   %one_f = scalar.constant 1.0 : f32
   %one_i32 = scalar.constant 1 : i32
   %active, %length, %start32, %row, %first = func.call @g_gdn_span(%metadata, %spans, %span) : (buffer, index, index) -> (i1, index, i32, index, index)
-  %k_min_len = index.constant {SPAN_MIN} : index
+  %k_min_len = index.constant {10 ** 6 if "skip" in ABL else SPAN_MIN} : index
   %in_class = index.cmp uge, %length, %k_min_len : index
   %mine = scalar.andi %active, %in_class : i1
   scf.if %mine {{
@@ -430,14 +412,10 @@ kernel.def {tgt}export("g_gdn_chunk_rdna4") @g_gdn_chunk_rdna4(%spans: index) {{
         init.append(f"    %sl{kb} = vector.load %state_view[%sk{kb}_i] : view<{NS}xf32> -> {vec8}")
     init.append(f"    scf.yield {', '.join(f'%sl{kb}' for kb in range(8))} : {', '.join([vec8] * 8)}")
     init.append("  }")
-    nch = [f"  %len_r = index.add %length, {ci(CN - 1)} : index", f"  %nchunks = index.div %len_r, {ci(CN)} : index",
-           "  %last_chunk = index.sub %nchunks, %k1 : index", "  %last_len = index.sub %length, %k1 : index",
-           "  %last_abs_a = index.add %first, %last_len : index", "  %last_tok = index.assume %last_abs_a [lt(%last_abs_a, %tokens)] : index"]
-    nch += [l.replace("%pc0", "%pc0") for l in stage_loads("p", "%k0")]
-    carry = ", ".join(f"%s{kb} = %ist{kb} : {vec8}" for kb in range(8)) + ", %lkr = %pkr : vector<16xf32>, %lqr = %pqr : vector<16xf32>, %lkinv0 = %pkinv0 : f32, %lqinv0 = %pqinv0 : f32, %lal = %pal : f32, %lbe = %pbe : f32"
-    outs = ", ".join(f"%fin{kb}" for kb in range(8)) + ", %fkr, %fqr, %fkinv0, %fqinv0, %fal, %fbe"
-    rt = ", ".join([vec8] * 8) + ", vector<16xf32>, vector<16xf32>, f32, f32, f32, f32"
-    loop_head = f"  {outs} = scf.for %ci = [%k0 to %nchunks step %k1]({carry}) -> ({rt}) {{"
+    nch = [f"  %len_r = index.add %length, {ci(CN - 1)} : index", f"  %nchunks = index.div %len_r, {ci(CN)} : index"]
+    carry = ", ".join(f"%s{kb} = %ist{kb} : {vec8}" for kb in range(8))
+    outs = ", ".join(f"%fin{kb}" for kb in range(8))
+    loop_head = f"  {outs} = scf.for %ci = [%k0 to %nchunks step %k1]({carry}) -> ({', '.join([vec8] * 8)}) {{"
     stores = [f"    %so{kb}_i = index.add %sidx_l, {ci(16 * kb)} : index\n    vector.store %fin{kb}, %next_view[%so{kb}_i] : {vec8}, view<{NS}xf32>" for kb in range(8)]
     consts.update({0, 1, 8, 16})
     cdefs = "\n".join(f"  %k{k} = index.constant {k} : index" for k in sorted(consts))

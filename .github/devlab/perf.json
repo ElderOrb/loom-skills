@@ -1,5 +1,5 @@
 {
- "_comment": "gdnpf round 4: chunk kernel with the next chunk's loads prefetched (chunkpf) vs the previous commit (chunk) vs the card build",
+ "_comment": "gdnpf round 5: ablations of the chunk kernel (timing only, wrong results): skip = the kernel does nothing, nosolve = 2 rows of the solve, noout = no output stores, nostate = no state update products, nozkq = K S / Q S products cut to one k step",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -19,25 +19,59 @@
      "build": {
       "GDN_CHUNK": "1"
      },
-     "context": 124928,
-     "ref": "676319ce42bc39163835ff7027e67246340f554b"
+     "context": 124928
     },
     {
-     "name": "chunkpf",
+     "name": "skip",
      "build": {
-      "GDN_CHUNK": "1"
+      "GDN_CHUNK": "1",
+      "GDN_CHUNK_ABL": "skip"
+     },
+     "context": 124928
+    },
+    {
+     "name": "nosolve",
+     "build": {
+      "GDN_CHUNK": "1",
+      "GDN_CHUNK_ABL": "nosolve"
+     },
+     "context": 124928
+    },
+    {
+     "name": "noout",
+     "build": {
+      "GDN_CHUNK": "1",
+      "GDN_CHUNK_ABL": "noout"
+     },
+     "context": 124928
+    },
+    {
+     "name": "nostate",
+     "build": {
+      "GDN_CHUNK": "1",
+      "GDN_CHUNK_ABL": "nostate"
+     },
+     "context": 124928
+    },
+    {
+     "name": "nozkq",
+     "build": {
+      "GDN_CHUNK": "1",
+      "GDN_CHUNK_ABL": "nozkq"
      },
      "context": 124928
     }
    ],
    "steps": [
-    "ktest:chunkpf",
     "perf:base:1",
     "perf:chunk:1",
-    "perf:chunkpf:1",
+    "perf:skip:1",
+    "perf:nosolve:1",
+    "perf:noout:1",
+    "perf:nostate:1",
+    "perf:nozkq:1",
     "perf:base:1",
-    "perf:chunk:1",
-    "perf:chunkpf:1"
+    "perf:chunk:1"
    ]
   }
  ]

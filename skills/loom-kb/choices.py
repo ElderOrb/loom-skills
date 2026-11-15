@@ -350,6 +350,10 @@ CHOICE("hybrid.gdn.row_lanes", "int", 16, "GDN_ROW_LANES", derive=_mtp_rows, fro
        doc="Lanes per value column of the row-split recurrence (MTP-drafted hybrids: 8, one form for every span).", **_GD)
 CHOICE("hybrid.gdn.cols", "int", 2, "GDN_COLS", derive=_mtp_cols, from_pr="#350",
        doc="Value-column width of the row-split recurrence (MTP-drafted hybrids: 4).", **_GD)
+CHOICE("hybrid.gdn.chunk", "bool", False, "GDN_CHUNK", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_chunk_rdna4", "g_gdn_recurrence*"],
+       from_pr="q38r9700 gdnpf",
+       doc="gfx12 chunked (WY) gated delta-net prefill (gen_gdn_chunk.py): spans of 64+ tokens run g_gdn_chunk_rdna4 (f16 WMMA, f32 state), the "
+           "sequential kernel's gfx12 twin the shorter ones; the gfx11 kernels do not change (128 x 128 heads only).")
 
 # ======================================================================================================================
 # Speculative decoding (gen_llm.py, draft/)
@@ -383,6 +387,7 @@ NOT("input path or file selection (not a model-affecting knob)", "CATALOG", "LOO
 NOT("transport between a generator and its subprocesses (set by the caller from cfg / the build)", "LLM_CONFIG", "LLM_DRAFT",
     "LLM_TOKENIZER", "GEMM_FORMATS", "GEMM_F16O_ON", "GEMM_KMETA", "GEMM_PREFIX", "FLASH2_TARGET", "FLASH2_ROLE", "FLASH2_ARCH",
     "FLASH2_NAME", "FLASH2_KV_FN", "FLASH2_SCALE", "FLASH2_POS_BYTES")
+NOT("timing ablations of g_gdn_chunk_rdna4 (skip nosolve noout nostate nozkq): wrong results, experiments only", "GDN_CHUNK_ABL")
 NOT("kernel-test selection (which cases make_kernel_tests.py writes), not a model choice", "FLASH_TESTS", "GEMM_TESTS", "MOE_TESTS",
     "MOE_GEMM_TESTS", "DRAFTER_TESTS", "KTEST_GEMM_ALL", "KTEST_GEMM_ERR", "KTEST_HEADS_SFX", "KTEST_LLM", "PREFILL_CONT",
     "DEVICE_ARCH", "VISION_TEST_RDNA4")
