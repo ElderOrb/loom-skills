@@ -59,7 +59,7 @@ def _nox(t, mode):
     return re.sub(r"^\s*vector\.store %cr_x\d, %x_stage_st[^\n]*\n", "", t, flags=re.M)
 
 
-GEN = {"adirect": {"a_direct": True}, "adbuf": {"a_direct": True, "dbuf": True}}   # variants that are generator parameters (the levers), not text ablations
+GEN = {"adirect": {"a_direct": True}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}}   # variants that are generator parameters (the levers), not text ablations
 
 
 def kernel(mode, kn, variant="", order="pairs"):
@@ -145,6 +145,69 @@ check.benchmark<@k_peak8_case> @k_peak8_bm
 """   # 4096 waves x 256 iterations x 8 WMMA of 8192 flop = 68.7 TFLOP: the fp8 WMMA ceiling of this runner (register-only chains)
 
 
+PEAK8R = """kernel.def target(@rdna4) export("k_peak8r") @k_peak8r() {
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  %groups = index.constant 512 : index
+  kernel.launch.config workgroups(%groups, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%src: buffer, %y_arg: buffer) {
+  %origin = index.constant 0 : offset
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c16 = index.constant 16 : index
+  %c256 = index.constant 256 : index
+  %lane_id = kernel.workitem.id<x> : index
+  %lane = index.assume %lane_id [range(%lane_id, 0, 255)] : index
+  %yv = buffer.view %y_arg[%origin] : buffer -> view<256x8xf32>
+  %stage_bytes = index.constant 8192 : offset
+  %stage = buffer.alloca<workgroup> align(16) %stage_bytes : buffer
+  %a_schema = encoding.define #encoding.operand<element_format=f8e4m3, payload_elements=8, payload_registers=2> : encoding<schema>
+  %b_schema = encoding.define #encoding.operand<element_format=f8e5m2, payload_elements=8, payload_registers=2> : encoding<schema>
+  %a_layout = encoding.layout.dense : encoding<layout>
+  %b_layout = encoding.layout.strided [1, 64] : encoding<layout>
+  %a_storage = encoding.define #encoding.storage {layout = %a_layout : encoding<layout>, schema = %a_schema : encoding<schema>} : encoding<storage>
+  %b_storage = encoding.define #encoding.storage {layout = %b_layout : encoding<layout>, schema = %b_schema : encoding<schema>} : encoding<storage>
+  %src_view = buffer.view %src[%origin] : buffer -> view<256x32xi8>
+  %stage_st = buffer.view %stage[%origin] : buffer -> view<256x32xi8>
+  %c0v = index.constant 0 : index
+  %c16v = index.constant 16 : index
+  %q0 = vector.load %src_view[%lane, %c0v] : view<256x32xi8> -> vector<16xi8>
+  %q1 = vector.load %src_view[%lane, %c16v] : view<256x32xi8> -> vector<16xi8>
+  vector.store %q0, %stage_st[%lane, %c0v] : vector<16xi8>, view<256x32xi8>
+  vector.store %q1, %stage_st[%lane, %c16v] : vector<16xi8>, view<256x32xi8>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %a_view = buffer.view %stage[%origin] : buffer -> view<64x64xf8E4M3, %a_storage>
+  %b_view = buffer.view %stage[%origin] : buffer -> view<64x64xf8E5M2, %b_storage>
+  %lhs = vector.fragment.load<lhs> %a_view[%c0, %c0] shape [%c16, %c16] : view<64x64xf8E4M3, %a_storage> -> vector<2xi32>
+  %rhs = vector.fragment.load<rhs> %b_view[%c0, %c0] shape [%c16, %c16] : view<64x64xf8E5M2, %b_storage> -> vector<2xi32>
+  %zero = vector.constant 0.0 : vector<8xf32>
+  %init = vector.fragment<init> %zero shape [%c16, %c16] : vector<8xf32>
+  %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7 = scf.for %i = [%c0 to %c256 step %c1](%a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
+""" + "".join(f"    %n{i} = vector.mma %lhs, %rhs, %a{i} : vector<2xi32>, vector<2xi32>, vector<8xf32>\n" for i in range(8)) + """    scf.yield %n0, %n1, %n2, %n3, %n4, %n5, %n6, %n7 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
+  }
+  %s01 = vector.addf %r0, %r1 : vector<8xf32>
+  %s23 = vector.addf %r2, %r3 : vector<8xf32>
+  %s45 = vector.addf %r4, %r5 : vector<8xf32>
+  %s67 = vector.addf %r6, %r7 : vector<8xf32>
+  %s03 = vector.addf %s01, %s23 : vector<8xf32>
+  %s47 = vector.addf %s45, %s67 : vector<8xf32>
+  %sum = vector.addf %s03, %s47 : vector<8xf32>
+  vector.store %sum, %yv[%lane, %c0] : vector<8xf32>, view<256x8xf32>
+  kernel.return
+}
+check.case public @k_peak8r_case {
+  %seed = check.literal value(5) : i64
+  %src = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<8192xi8>
+  %y = check.generate.fill value(0.0) : tensor<256x8xf32>
+  kernel.launch @k_peak8r[](%src, %y) : [](tensor<8192xi8>, tensor<256x8xf32>)
+  check.return
+}
+check.benchmark<@k_peak8r_case> @k_peak8r_bm
+"""   # 4096 waves x 256 iterations x 8 WMMA of 8192 flop = 68.7 TFLOP: the fp8 WMMA ceiling of this runner (register-only chains)
+
+
+
+
 # -- correctness cases --------------------------------------------------------------------------------------------------
 def e4m3_round(x):
     x = np.asarray(x, np.float64); a = np.minimum(np.abs(x), 448.0)
@@ -225,7 +288,7 @@ if __name__ == "__main__" and len(sys.argv) > 2:
     for v in (sys.argv[3:] or ["base"]):
         if v != "base" and v not in VARIANTS and v not in GEN: raise SystemExit("unknown variant " + v)
         v = "" if v == "base" else v
-        open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)) + ("\n" + PEAK8 if not v else ""))
+        open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)) + ("\n" + PEAK8 + "\n" + PEAK8R if not v else ""))
     # hrx-loom 0.1.0: float comparison is check.expect.approximate with the actual and expected types (as make_kernel_tests.py does)
     text = re.sub(r"check\.expect\.close (actual\(.*\)) : (.*)$", r"check.expect.approximate \1 : \2, \2", HEAD + "\n".join(tests(d)), flags=re.M)
     open(os.path.join(d, "test.loom"), "w").write(text)

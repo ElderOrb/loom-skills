@@ -62,25 +62,23 @@
       "gen": "gemm_mxfp4s/gen_bench.py",
       "gen_variants": [
         "base",
+        "adirect",
+        "adbuf",
+        "adk2",
         "nomma",
         "nodq",
         "nobar",
-        "nox",
-        "nofrag",
-        "noload",
-        "adirect",
-        "adbuf"
+        "nox"
       ],
       "files": [
         "bench.loom",
+        "bench_adirect.loom",
+        "bench_adbuf.loom",
+        "bench_adk2.loom",
         "bench_nomma.loom",
         "bench_nodq.loom",
         "bench_nobar.loom",
-        "bench_nox.loom",
-        "bench_nofrag.loom",
-        "bench_noload.loom",
-        "bench_adirect.loom",
-        "bench_adbuf.loom"
+        "bench_nox.loom"
       ],
       "tests": [
         "test.loom"

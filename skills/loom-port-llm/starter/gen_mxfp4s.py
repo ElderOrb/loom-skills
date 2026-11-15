@@ -34,7 +34,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False, kmult=1):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -48,8 +48,10 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
     cfr = 2 if two_w else 4       # 16-column B fragments per wave and weight
     RF = 4                        # 16-row A fragments per wave (64 rows)
     wave_cols = 16 * cfr
-    PX = 144                      # LDS pitch (bytes) of both stages: 128 data + 16 pad
-    KS = 128                      # K per step: four 32-value blocks
+    KS = 128 * kmult              # K per step: 4 * kmult 32-value blocks (kmult > 1 needs a_direct)
+    PX = KS + 16                  # LDS pitch (bytes) of both stages: KS data + 16 pad
+    NB = 2 * kmult                # blocks one staging thread decodes per step (half of a row's step)
+    assert kmult == 1 or a_direct
     name = f"{prefix}_gemm_mxfp4s_{mode}_f8_m256_rdna4"
     weights = ["w", "w2"] if two_w else ["w"]
     accs = [f"{wi}r{r}c{c}" for wi in range(len(weights)) for r in range(RF) for c in range(cfr)]
@@ -72,8 +74,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   %four = index.constant 4 : offset
   %one_off = index.constant 1 : offset
   %o0 = index.constant 0 : offset
-  %o16 = index.constant 16 : offset
-  %c0 = index.constant 0 : index
+{"".join(f"  %o{16 * j} = index.constant {16 * j} : offset" + chr(10) for j in range(1, NB))}{"".join(f"  %cj{j} = index.constant {j} : index" + chr(10) for j in range(NB))}  %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
   %c4 = index.constant 4 : index
@@ -81,6 +82,10 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   %c16 = index.constant 16 : index
   %c32 = index.constant 32 : index
   %c64 = index.constant 64 : index
+  %cks2 = index.constant {KS // 2} : index
+  %cnb16 = index.constant {NB * 16} : index
+  %cks32 = index.constant {KS // 32} : index
+  %cnb = index.constant {NB} : index
   %c128 = index.constant {KS} : index
   %c256 = index.constant 256 : index
   %tn = index.constant {TN} : index
@@ -133,7 +138,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   // W staging: thread t decodes two MXFP4 blocks (64 weights) of weight row t/2: columns (t%2) * 64
   %stage_row = index.div %workitem, %c2 : index
   %stage_half = index.rem %workitem, %c2 : index
-  %stage_col = index.mul %stage_half, %c64 : index''')
+  %stage_col = index.mul %stage_half, %cks2 : index''')
     if two_w:
         A(f'''  %half_tw = index.constant {TN} : index
   %w_is_up = index.cmp uge, %stage_row, %half_tw : index
@@ -173,19 +178,19 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
             t.append(f"    %xc{sfx}{i} = index.assume %xc{sfx}{i}_v [lt(%xc{sfx}{i}_v, %k16)] : index")
             t.append(f"    %xr{sfx}{i} = vector.load %x_view[%x_row, %xc{sfx}{i}, %c0] : view<[%rows]x[%k16]x16xi8> -> vector<16xi8>")
         # weights: nibble bytes [kstep*64 + half*32 + 16j, +16) of the row, scale byte kstep*4 + half*2 + j
-        t.append(f"    %wk{sfx}_a = index.mul {kstep}, %c64 : index")
-        t.append(f"    %wk{sfx}_b = index.mul %stage_half, %c32 : index")
+        t.append(f"    %wk{sfx}_a = index.mul {kstep}, %cks2 : index")
+        t.append(f"    %wk{sfx}_b = index.mul %stage_half, %cnb16 : index")
         t.append(f"    %wk{sfx} = index.add %wk{sfx}_a, %wk{sfx}_b : index")
         t.append(f"    %wk{sfx}_o = index.scale %wk{sfx}, %one_off : index, offset -> offset")
         t.append(f"    %wkb{sfx} = index.add %w_row_origin, %wk{sfx}_o : offset")
-        t.append(f"    %sb{sfx}_a = index.mul {kstep}, %c4 : index")
-        t.append(f"    %sb{sfx}_b = index.mul %stage_half, %c2 : index")
+        t.append(f"    %sb{sfx}_a = index.mul {kstep}, %cks32 : index")
+        t.append(f"    %sb{sfx}_b = index.mul %stage_half, %cnb : index")
         t.append(f"    %sb{sfx} = index.add %sb{sfx}_a, %sb{sfx}_b : index")
-        for j in range(2):
-            t.append(f"    %wqo{j}{sfx} = index.add %wkb{sfx}, %o16 : offset" if j else f"    %wqo{j}{sfx} = index.add %wkb{sfx}, %o0 : offset")
+        for j in range(NB):
+            t.append(f"    %wqo{j}{sfx} = index.add %wkb{sfx}, %o{16 * j} : offset")
             t.append(f"    %wq{j}{sfx}_v = buffer.view {wsrc}[%wqo{j}{sfx}] : buffer -> view<4xi32>")
             t.append(f"    %wq{j}{sfx} = vector.load %wq{j}{sfx}_v[0] : view<4xi32> -> vector<4xi32>")
-            t.append(f"    %sbj{j}{sfx} = index.add %sb{sfx}, %c{j} : index")
+            t.append(f"    %sbj{j}{sfx} = index.add %sb{sfx}, %cj{j} : index")
             t.append(f"    %sbo{j}{sfx}_a = index.scale %sbj{j}{sfx}, %one_off : index, offset -> offset")
             t.append(f"    %sbo{j}{sfx} = index.add %ws_row_origin, %sbo{j}{sfx}_a : offset")
             t.append(f"    %we{j}{sfx}_v = buffer.view {ssrc}[%sbo{j}{sfx}] : buffer -> view<1xi8>")
@@ -203,7 +208,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
         A2 = L2.append
         for i in range(0 if a_direct else 8):
             A2(f"    vector.store %cr_x{i}, %x_stage_st[%workitem, %xo{i}] : vector<16xi8>, view<256x{PX}xi8>")
-        for j in range(2):
+        for j in range(NB):
             A2(f'''    %em{j} = scalar.subi %cr_e{j}, %c107 : i32
         %ea{j} = scalar.shli %em{j}, %cs2 : i32
         %ea4_{j} = scalar.muli %ea{j}, %ones : i32
@@ -262,7 +267,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
         A("    %k_one = index.min %c1, %k_steps_m1 : index")
         A(loads("q", "%k_one"))
     carried = [(f"%cr_x{i}", f"%xrp{i}", f"%xrn{i}", "vector<16xi8>") for i in range(0 if a_direct else 8)]
-    for j in range(2):
+    for j in range(NB):
         carried.append((f"%cr_e{j}", f"%we{j}{'q' if dbuf else 'p'}", f"%we{j}n", "i32"))
         carried.append((f"%cr_q{j}", f"%wq{j}{'q' if dbuf else 'p'}", f"%wq{j}n", "vector<4xi32>"))
     A("  " + ", ".join(f"%o{a}" for a in accs) + ", " + ", ".join(f"%unused_{i}" for i in range(len(carried))) +
