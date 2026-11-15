@@ -387,7 +387,6 @@ NOT("input path or file selection (not a model-affecting knob)", "CATALOG", "LOO
 NOT("transport between a generator and its subprocesses (set by the caller from cfg / the build)", "LLM_CONFIG", "LLM_DRAFT",
     "LLM_TOKENIZER", "GEMM_FORMATS", "GEMM_F16O_ON", "GEMM_KMETA", "GEMM_PREFIX", "FLASH2_TARGET", "FLASH2_ROLE", "FLASH2_ARCH",
     "FLASH2_NAME", "FLASH2_KV_FN", "FLASH2_SCALE", "FLASH2_POS_BYTES")
-NOT("timing ablations of g_gdn_chunk_rdna4 (skip nosolve noout nostate nozkq): wrong results, experiments only", "GDN_CHUNK_ABL")
 NOT("kernel-test selection (which cases make_kernel_tests.py writes), not a model choice", "FLASH_TESTS", "GEMM_TESTS", "MOE_TESTS",
     "MOE_GEMM_TESTS", "DRAFTER_TESTS", "KTEST_GEMM_ALL", "KTEST_GEMM_ERR", "KTEST_HEADS_SFX", "KTEST_LLM", "PREFILL_CONT",
     "DEVICE_ARCH", "VISION_TEST_RDNA4")

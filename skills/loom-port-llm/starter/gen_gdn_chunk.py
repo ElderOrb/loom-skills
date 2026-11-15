@@ -28,8 +28,6 @@ SPAN_MIN = 64   # spans of at least this many tokens (the GEMM epoch shape) run 
 
 
 def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
-    import os as _os
-    ABL = set(filter(None, _os.environ.get("GDN_CHUNK_ABL", "").split(",")))   # timing ablations (wrong results): skip nosolve noout nostate nozkq
     HK, HV, DK, DV, C, VD = G["HK"], G["HV"], G["DK"], G["DV"], G["C"], G["VD"]
     assert DK == 128 and DV == 128 and HV % HK == 0, "g_gdn_chunk_rdna4 is built for 128 x 128 heads (8 waves x 16 value columns)"
     NS = HV * DV * DK
@@ -121,12 +119,10 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
     for nmx, vw, sz in (("zk", "%kh_view", KHS), ("zq", "%q_view", QAS)):
         for mt in range(NT):
             prev = "%init"
-            for kb in range(1 if "nozkq" in ABL else 8):
+            for kb in range(8):
                 P(f"    %{nmx}l{mt}_{kb} = vector.fragment.load<lhs> {vw}[{ci(16 * mt)}, {ci(16 * kb)}] {SH} : view<{CN}x{sz}xf16> -> vector<8xf16>")
                 P(f"    %{nmx}{mt}_{kb} = vector.mma %{nmx}l{mt}_{kb}, %sf{kb}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
                 prev = f"%{nmx}{mt}_{kb}"
-            if "nozkq" in ABL:
-                P(f"    %{nmx}{mt}_7 = vector.addf {prev}, %zero8 : {vec8}")
     P(f"    %tq = index.rem %wave, {ci(NT * NT)} : index")
     P(f"    %tmt = index.div %tq, {ci(NT)} : index")
     P(f"    %tnt = index.rem %tq, {ci(NT)} : index")
@@ -176,7 +172,7 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
     # ---- P3: waves 0 solves T = (I + A)^-1 (one thread per column), waves 1-4 stage K^T exp(G - gc) as f16 [dk][t]
     P(f"    scf.if %tcn {{")
     P(f"      %cc = index.assume %thread [range(%thread, 0, {CN - 1})] : index")
-    for i in range(2 if "nosolve" in ABL else CN):
+    for i in range(CN):
         P(f"      %oh{i} = index.cmp eq, %cc, {ci(i)} : index")
         P(f"      %tv{i}_0 = scf.select %oh{i}, %one_f, %zero_f : f32")
         if i >= dep:
@@ -260,7 +256,7 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
             P(f"    %pl{mt}_{kt} = vector.fragment.load<lhs> %p_view[{ci(16 * mt)}, {ci(16 * kt)}] {SH} : view<{CN}x{PS}xf16> -> vector<8xf16>")
             P(f"    %oo{mt}_{kt} = vector.mma %pl{mt}_{kt}, %df{kt}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             prev = f"%oo{mt}_{kt}"
-        for e in range(0 if "noout" in ABL else 8):
+        for e in range(8):
             P(f"    %olt{mt}_{e}_r = index.add {ci(16 * mt + e)}, %lane_h8 : index")
             P(f"    %olt{mt}_{e} = index.cmp ult, %olt{mt}_{e}_r, %m : index")
             P(f"    scf.if %olt{mt}_{e} {{")
@@ -277,7 +273,7 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True, dep=2):
         P(f"    %sdv{kb} = vector.mulf %s{kb}, %eg_v : {vec8}")
         P(f"    %sd{kb} = vector.fragment<init> %sdv{kb} {SH} : {vec8}")
         prev = f"%sd{kb}"
-        for kt in range(0 if "nostate" in ABL else NT):
+        for kt in range(NT):
             P(f"    %ul{kb}_{kt} = vector.fragment.load<lhs> %kdt_view[{ci(16 * kb)}, {ci(16 * kt)}] {SH} : view<{DK}x{KDS}xf16> -> vector<8xf16>")
             P(f"    %un{kb}_{kt} = vector.mma %ul{kb}_{kt}, %df{kt}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             prev = f"%un{kb}_{kt}"
@@ -312,7 +308,7 @@ kernel.def {tgt}export("g_gdn_chunk_rdna4") @g_gdn_chunk_rdna4(%spans: index) {{
   %one_f = scalar.constant 1.0 : f32
   %one_i32 = scalar.constant 1 : i32
   %active, %length, %start32, %row, %first = func.call @g_gdn_span(%metadata, %spans, %span) : (buffer, index, index) -> (i1, index, i32, index, index)
-  %k_min_len = index.constant {10 ** 6 if "skip" in ABL else SPAN_MIN} : index
+  %k_min_len = index.constant {SPAN_MIN} : index
   %in_class = index.cmp uge, %length, %k_min_len : index
   %mine = scalar.andi %active, %in_class : i1
   scf.if %mine {{

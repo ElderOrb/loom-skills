@@ -1,5 +1,5 @@
 {
- "_comment": "gdnpf round 5: ablations of the chunk kernel (timing only, wrong results): skip = the kernel does nothing, nosolve = 2 rows of the solve, noout = no output stores, nostate = no state update products, nozkq = K S / Q S products cut to one k step",
+ "_comment": "gdnpf round 6: the chunk kernel (GDN_CHUNK=1) vs the card build: prefill 1k/2k and long rows, 4 streams undrafted, text match and dev gates against llama.cpp",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -22,57 +22,37 @@
      "context": 124928
     },
     {
-     "name": "skip",
-     "build": {
-      "GDN_CHUNK": "1",
-      "GDN_CHUNK_ABL": "skip"
-     },
-     "context": 124928
+     "name": "basend",
+     "build": {},
+     "context": 124928,
+     "execution": {
+      "draft_depth": 0
+     }
     },
     {
-     "name": "nosolve",
+     "name": "chunknd",
      "build": {
-      "GDN_CHUNK": "1",
-      "GDN_CHUNK_ABL": "nosolve"
+      "GDN_CHUNK": "1"
      },
-     "context": 124928
-    },
-    {
-     "name": "noout",
-     "build": {
-      "GDN_CHUNK": "1",
-      "GDN_CHUNK_ABL": "noout"
-     },
-     "context": 124928
-    },
-    {
-     "name": "nostate",
-     "build": {
-      "GDN_CHUNK": "1",
-      "GDN_CHUNK_ABL": "nostate"
-     },
-     "context": 124928
-    },
-    {
-     "name": "nozkq",
-     "build": {
-      "GDN_CHUNK": "1",
-      "GDN_CHUNK_ABL": "nozkq"
-     },
-     "context": 124928
+     "context": 124928,
+     "execution": {
+      "draft_depth": 0
+     }
     }
    ],
    "steps": [
     "perf:base:1",
     "perf:chunk:1",
-    "perf:skip:1",
-    "perf:nosolve:1",
-    "perf:noout:1",
-    "perf:nostate:1",
-    "perf:nozkq:1",
+    "perf:base:1:long",
+    "perf:chunk:1:long",
+    "c4:basend",
+    "c4:chunknd",
+    "textmatch:chunk",
+    "gates:chunk:dev",
     "perf:base:1",
     "perf:chunk:1"
-   ]
+   ],
+   "llamacpp": "b1375"
   }
  ]
 }
