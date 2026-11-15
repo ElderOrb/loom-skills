@@ -54,15 +54,16 @@ def root_sources(cfg, draft):
     DFlash: propose = [embedding, (head), drafter, drafter context projections]; warm = [fc + norm, context]."""
     head = [] if cfg.get("tied_embeddings") else ["model"]
     if draft["kind"] == "mtp":
-        return ["model"] + head + ["model"], ["model"] * (1 + 6 + (2 if cfg.get("qk_norm") else 0))
+        wsrc = ["model"] * (1 + 6 + (2 if cfg.get("qk_norm") else 0))
+        if draft.get("head_policy"):   # PROPOSE_HEAD_ROWS: propose = [embedding, NextN block, the head's Q4_0 copy]; no head root
+            return ["model", "model", "phead"], wsrc
+        return ["model"] + head + ["model"], wsrc
     if draft["kind"] == "ngram":   # prompt lookup reads no weights
         return [], []
     if draft["kind"] == "assist":  # propose = [target embedding, assistant checkpoint]; warm reads no weights
         return ["model", "draft"], []
     # "phead": the target's head once more, through its load-time Q4_0 policy (head_weights.loom, prep_weights.py)
     # With "phead" the proposals never read the head root, so an untied head is not bound (gen_dflash.py: same rule).
-    if draft.get("head_policy") and draft["kind"] == "mtp":   # PROPOSE_HEAD_ROWS: propose = [embedding, NextN block, head copy]
-        return ["model", "model", "phead"], ["model"] * (1 + 6 + (2 if cfg.get("qk_norm") else 0))
     if draft.get("head_policy"):
         return ["model", "draft", "draft", "phead"], ["draft", "draft"]
     return ["model"] + head + ["draft", "draft"], ["draft", "draft"]
