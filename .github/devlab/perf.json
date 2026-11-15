@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st draft exp1: cheap MTP proposals for the bf16 NextN block and bf16 head (draft.propose.block Q8_0/Q4_0, draft.propose.head_rows). One R9700 job; sessions in ABBA order (base q8 q4 h81 | h81 q4 q8 base), then depth and head-row sweeps with a q8 anchor. Evidence branch: not for merge.",
+ "_comment": "mxfp4st draft exp2: staging only the needed head rows (exp1: every prepared variant ran out of device memory at the first request; base ran). Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -100,6 +100,14 @@
       "PROPOSE_HEAD_ROWS": "248320"
      },
      "context": 65536
+    },
+    {
+     "name": "q8c49",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "context": 49152
     }
    ],
    "steps": [
@@ -119,7 +127,8 @@
     "perf:q8r49:1:long",
     "perf:q8r131:1:long",
     "perf:q8all:1:long",
-    "perf:q8:1:long"
+    "perf:q8:1:long",
+    "perf:q8c49:1:long"
    ]
   }
  ]
