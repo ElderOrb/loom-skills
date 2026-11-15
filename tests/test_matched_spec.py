@@ -12,7 +12,8 @@ CARDS = json.load(open(DATA))
 
 class ClassificationTests(unittest.TestCase):
     def test_all_cards_classified_and_no_ngram(self):
-        self.assertEqual(len(CARDS), 52)
+        nightly = json.load(open(ROOT / ".github/nightly-models.json"))["models"]
+        self.assertEqual(set(CARDS), {m["repo"] for m in nightly})   # one entry per nightly card
         for repo, e in CARDS.items():
             self.assertIn(e["choice"], ("mtp", "dflash", "assist", "none"), repo)
             self.assertNotIn("ngram", e["llama_spec"], repo)
