@@ -1235,24 +1235,30 @@ def _phead_params():
             i = t.find("@g_head_select_p(")
             m = re.search(r"%split = scalar\.constant (\d+) : i32\n\s*%shift = scalar\.constant (\d+) : i32", t[i:]) if i >= 0 else None
             if m:
-                return int(m.group(1)), int(m.group(2))
+                return int(m.group(1)), int(m.group(2)), "@g_prep_q6_k_q6_k(" in t
     return None
 
 
 _PH = _phead_params() if (HEAD_Q8 and HEAD_FMT == "q6_k" and H % 256 == 0 and (cfg.get("mtp") or cfg.get("drafter"))) else None
 if _PH:
-    split_rows, shift = _PH
+    split_rows, shift, SAME = _PH                        # SAME: the copy keeps the Q6_K rows (PROPOSE_HEAD=q6_k), else Q4_0
+    PSUF = "_pq6" if SAME else "_p40"
     base_tok = split_rows + shift                     # first added-token id; the copy holds rows [0, split_rows) + [base_tok, V)
     V_ = cfg["vocab"]; rows_p = split_rows + V_ - base_tok; CHp = (rows_p + 127) // 128
     sel = np.concatenate([np.arange(split_rows), np.arange(base_tok, V_)])
-    Wp = Wh[sel].astype(np.float32); blk = Wp.reshape(-1, 32)
-    m = blk[np.arange(len(blk)), np.abs(blk).argmax(1)]
-    d4 = m / np.float32(-8)
-    id4 = np.divide(np.float32(1), d4, out=np.zeros_like(d4), where=d4 != 0)
-    c4 = np.minimum(np.float32(15), np.floor(blk * id4[:, None] + np.float32(8.5)))
-    W4 = ((c4 - 8) * d4.astype(np.float16).astype(np.float32)[:, None]).reshape(Wp.shape)
-    del blk, c4, Wp
-    S, nb = 8, rows_p * H // 32
+    Wp = Wh[sel].astype(np.float32)
+    if SAME:
+        W4, nb = Wp, rows_p * H // 256
+    else:
+        blk = Wp.reshape(-1, 32)
+        m = blk[np.arange(len(blk)), np.abs(blk).argmax(1)]
+        d4 = m / np.float32(-8)
+        id4 = np.divide(np.float32(1), d4, out=np.zeros_like(d4), where=d4 != 0)
+        c4 = np.minimum(np.float32(15), np.floor(blk * id4[:, None] + np.float32(8.5)))
+        W4 = ((c4 - 8) * d4.astype(np.float16).astype(np.float32)[:, None]).reshape(Wp.shape)
+        del blk, c4, Wp
+        nb = rows_p * H // 32
+    S = 8
     hm = np.zeros(4 + 9 * S, np.int32); hm[0] = S
     for j in range(S):
         hm[4 + 9 * j + 0] = 1; hm[4 + 9 * j + 4] = j; hm[4 + 9 * j + 6] = 1
@@ -1262,30 +1268,31 @@ if _PH:
     CHP = CHp * 128
     lpad = np.full((S, CHP), -3.0e38, np.float32); lpad[:, :rows_p] = lp
     save("pr_meta", hm); save("pr_h", hp); save("pr_l", lpad.reshape(-1))
-    mt, ht, w4t = f"tensor<{hm.size}xi32>", f"tensor<{S}x{H}xf32>", f"tensor<{nb * 18}xi8>"
-    tol = 3.0e-2 * float(np.abs(lp).max())
-    skip_blocks = (base_tok - split_rows) * H // 32
+    unit = 256 if SAME else 32
+    mt, ht, w4t = f"tensor<{hm.size}xi32>", f"tensor<{S}x{H}xf32>", f"tensor<{nb * (210 if SAME else 18)}xi8>"
+    tol = (2.0e-3 if SAME else 3.0e-2) * float(np.abs(lp).max())
+    skip_blocks = (base_tok - split_rows) * H // unit
     def prl(k, tag):
         return (f"  %p{tag} = check.generate.fill value(0) : tensor<{S * CHp * 2}xi32>\n  %l{tag} = check.generate.fill value(0.0) : tensor<{S * CHP}xf32>\n"
                 f"  kernel.launch @{k}[%spans](%spans, %t, %meta, %hq, %w4, %p{tag}, %l{tag}) : [index](index, index, {mt}, tensor<{S}x{2 * H}xi8>, {w4t}, tensor<{S * CHp * 2}xi32>, tensor<{S * CHP}xf32>)\n")
-    pv = [("g_head_mv_t4_q8_p40", "4"), ("g_head_mv_t8_q8_p40", "8"), ("g_head_mv_t16_q8_p40", "16")]
+    pv = [(f"g_head_mv_t4_q8{PSUF}", "4"), (f"g_head_mv_t8_q8{PSUF}", "8"), (f"g_head_mv_t16_q8{PSUF}", "16")]
     cases.append(f"""check.case public @propose_head_rows {{
   %spans = check.literal value({S}) : index
   %t = check.literal value({S}) : index
   %b = check.literal value({nb}) : index
   %o = check.literal value(0) : i64
-  %sp = check.literal value({split_rows * H // 32}) : i64
+  %sp = check.literal value({split_rows * H // unit}) : i64
   %sk = check.literal value({skip_blocks}) : i64
   %meta = check.file.read.npy path("pr_meta.npy") : {mt}
   %h = check.file.read.npy path("pr_h.npy") : {ht}
   %w = check.file.read.npy path("hd_w.npy") : {hwt}
   %le = check.file.read.npy path("pr_l.npy") : tensor<{S * CHP}xf32>
   %w4 = check.generate.fill value(0) : {w4t}
-  kernel.launch @g_prep_q6_k_q4_0[%b](%b, %o, %sp, %sk, %w4, %w) : [index](index, i64, i64, i64, {w4t}, {hwt})
+  kernel.launch @g_prep_q6_k_{"q6_k" if SAME else "q4_0"}[%b](%b, %o, %sp, %sk, %w4, %w) : [index](index, i64, i64, i64, {w4t}, {hwt})
   %hk = check.literal value({H}) : index
   %hq = check.generate.fill value(0) : tensor<{S}x{2 * H}xi8>
   kernel.launch @g_quant_q8[%t, %hk](%t, %hk, %h, %hq) : [index, index](index, index, {ht}, tensor<{S}x{2 * H}xi8>)
-""" + prl("g_head_mv_q8_p40", "1") + "".join(prl(k, tag) for k, tag in pv) + f"""  check.expect.close actual(%l1) expected(%le) atol({tol:.3e}) rtol(0.0) nan(different) : tensor<{S * CHP}xf32>
+""" + prl(f"g_head_mv_q8{PSUF}", "1") + "".join(prl(k, tag) for k, tag in pv) + f"""  check.expect.close actual(%l1) expected(%le) atol({tol:.3e}) rtol(0.0) nan(different) : tensor<{S * CHP}xf32>
 """ + "".join(f"  check.expect.close actual(%l{tag}) expected(%l1) atol(0.0) rtol(0.0) nan(different) : tensor<{S * CHP}xf32>\n"
               f"  check.expect.equal actual(%p{tag}) expected(%p1) : tensor<{S * CHp * 2}xi32>\n" for _, tag in pv) + "  check.return\n}\n")
     # g_head_select_p: span j's best row sits in chunk j (value 1 + j); span 0: a head row, span 1: a tail row, span 2: an end-of-turn

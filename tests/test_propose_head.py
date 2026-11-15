@@ -37,6 +37,17 @@ class Rows(unittest.TestCase):
                 s = g if g < split else g + skip
                 self.assertEqual(s % per_row, g % per_row)
 
+    def test_same_format_copy_counts_superblocks(self):
+        """PROPOSE_HEAD=q6_k keeps the rows as they are: units are 256-value superblocks (210 bytes), same row map."""
+        src, dst, blocks, (nbytes, split, skip) = pw.subset_entry("q6_k", "q6_k", 65536, B, V, H)
+        per_row = H // 256
+        self.assertEqual(blocks, (65536 + V - B) * per_row)
+        rows = [(g // per_row if g < split else (g + skip) // per_row) for g in range(0, blocks, per_row)]
+        self.assertEqual(rows, list(range(65536)) + list(range(B, V)))
+        self.assertEqual(pw.dst_bytes("q6_k", blocks), blocks * 210)
+        self.assertIn("view<210xi8>", pw.library({("q6_k", "q6_k")}))
+        self.assertNotIn("g_q6_k_values", pw.library({("q6_k", "q6_k")}))
+
     def test_select_mapping(self):
         n, tail, rows = pw.subset_rows(32768, B, V)
         split, shift = n, tail - n

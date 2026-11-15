@@ -20,7 +20,7 @@ one: one lane per 32-value block, llama.cpp's quantize_row_q8_0 / quantize_row_q
 #   Q4_0; the output block g reads input block g (g < split) or g + skip (the tail), so one pass copies both segments.
 SRC = {"bf16": 64, "f16": 64, "q8_0": 34}     # bytes per 32 values of a source the converter reads
 SRC_SUPER = {"q6_k": 210}                     # bytes per 256-value superblock of a source with a row subset (see subset_entry)
-DST = {"q8_0": 34, "q4_0": 18}                # ... of a prepared format
+DST = {"q8_0": 34, "q4_0": 18, "q6_k": 210}   # ... of a prepared format (q6_k: a row subset kept as is, counted in 256-value superblocks)
 
 
 def dst_bytes(dst, blocks):
@@ -38,9 +38,10 @@ def subset_rows(N, base, V):
 def subset_entry(src, dst, N, base, V, H):
     """A policy entry (src, dst, out blocks, extra) of a row-subset copy: extra = (source bytes, split block, skip blocks)."""
     n, tail, rows = subset_rows(N, base, V)
-    split = n * H // 32
-    skip = tail * H // 32 - split
-    return (src, dst, rows * H // 32, (V * H // 256 * SRC_SUPER[src], split, skip))
+    unit = 256 if dst == src else 32   # a same-format copy moves whole superblocks
+    split = n * H // unit
+    skip = tail * H // unit - split
+    return (src, dst, rows * H // unit, (V * H // 256 * SRC_SUPER[src], split, skip))
 
 
 def _decode(src):
@@ -133,13 +134,34 @@ def _encode(dst):
 
 
 def _kernel_super(src, dst):
-    """g_prep_<src>_<dst> for a superblock source (Q6_K) with a row subset: output block g reads input block g below
-    llm.prep_split, g + llm.prep_skip from there on (g_q6_k_values is the trunk's dequantizer, in llm.loom)."""
+    """g_prep_<src>_<dst> for a superblock source (Q6_K) with a row subset: output unit g reads source unit g below
+    llm.prep_split, g + llm.prep_skip from there on. dst Q4_0: a unit is a 32-value block (g_q6_k_values, the trunk's
+    dequantizer in llm.loom, then quantize_row_q4_0); dst == src: a 256-value superblock, copied byte for byte."""
     n = f"{src}_{dst}"
-    enc = _encode(dst)
+    same = dst == src
+    unit = "256-value superblock" if same else "32-value block"
+    if same:
+        body = """    %src_view = buffer.view %input[%origin] : buffer -> view<210xi8>
+    %oo = index.scale %g, %sb_bytes : index, offset -> offset
+    %dst_view = buffer.view %output[%oo] : buffer -> view<210xi8>
+    %c0 = index.constant 0 : index
+    %c210 = index.constant 210 : index
+    scf.for %k = [%c0 to %c210 step %c1] {
+      %kb = index.assume %k [range(%k, 0, 209)] : index
+      %byte = view.load %src_view[%kb] : view<210xi8> -> i8
+      view.store %byte, %dst_view[%kb] : i8, view<210xi8>
+    }
+"""
+        locate = """    %sb = %sg
+"""
+    else:
+        body = f"""    %v = func.call @g_q6_k_values(%input, %origin, %grp) : (buffer, offset, index) -> (vector<32xf32>)
+{_encode(dst)}"""
+    sbuf = "%sg" if same else "%sb"
+    locate = ("" if same else "    %sb = index.div %sg, %c8 : index\n    %grp = index.rem %sg, %c8 : index\n")
     return f"""
 // Load-time weight preparation (draft/prep_weights.py): staged {src.upper()} tensor (input + llm.prep_input) ->
-// {dst.upper()} blocks in output, one lane per 32-value block; output block g reads source block g (g < split) or g + skip.
+// {dst.upper()} in output, one lane per {unit}; output unit g reads source unit g (g < split) or g + skip.
 kernel.def export("g_prep_{n}") @g_prep_{n}(%blocks: index) {{
   %c1 = index.constant 1 : index
   %c63 = index.constant 63 : index
@@ -155,6 +177,7 @@ kernel.def export("g_prep_{n}") @g_prep_{n}(%blocks: index) {{
   %split = index.cast %split_bound : i64 to index
   %skip_bound = scalar.assume %skip64 [range(%skip64, 0, 1073741824)] : i64
   %skip = index.cast %skip_bound : i64 to index
+  %c1 = index.constant 1 : index
   %c8 = index.constant 8 : index
   %c64 = index.constant 64 : index
   %sb_bytes = index.constant 210 : offset
@@ -167,12 +190,9 @@ kernel.def export("g_prep_{n}") @g_prep_{n}(%blocks: index) {{
     %in_tail = index.cmp uge, %g, %split : index
     %shifted = index.add %g, %skip : index
     %sg = scf.select %in_tail, %shifted, %g : index
-    %sb = index.div %sg, %c8 : index
-    %grp = index.rem %sg, %c8 : index
-    %sbo = index.scale %sb, %sb_bytes : index, offset -> offset
+{locate}    %sbo = index.scale {sbuf}, %sb_bytes : index, offset -> offset
     %origin = index.add %in_origin, %sbo : offset
-    %v = func.call @g_q6_k_values(%input, %origin, %grp) : (buffer, offset, index) -> (vector<32xf32>)
-{enc}  }}
+{body}  }}
   kernel.return
 }}
 
