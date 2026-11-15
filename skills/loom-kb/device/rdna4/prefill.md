@@ -50,3 +50,9 @@ Prefill GEMM shapes of the 27B (hidden 5120, ffn 17408, gdn qkv 10240, attention
   (1024*s + m needs more than 11 bits; the rounding error is about half a quantization step), so the 3 ops per 2 values stay. Removing the pk_add would be ~2 % of the kernel at best.
 - Prefill chunk (`prefill_capacity`, execution override, context 65536 so the bigger chunk fits; 124928 context + chunk 2048 exhausts device memory): 1k/2k/8k/16k/32k tok/s
   card (1024) 1547/1634 (ABBA 1521/1609), 1708, 1645, 1521; 1536: 1462/1628 (1457/1624), 1691, 1634, 1512; 2048: 1454/1627 (1445/1616), 1715, 1651, 1529. 1k loses 5-6 %, 2k ties, 8k-32k +-0.5 %: keep 1024.
+
+### Qwen3.8-27B on the R9700: prefill outside the GEMMs (gdnpf)
+Doubling each kernel family in prefill (2k, ms/token of 0.608; single runs, noise +-0.01): GEMMs 0.485 (q4_k store 0.211, swiglu 0.167, q6_k 0.077, q8_0 0.030),
+GDN recurrence 0.046, post-add norm 0.013, row scale 0.013, f32 mv (ssm alpha/beta) 0.012, conv 0.011, silu_mul 0.020 (one outlier), gated norm 0.007,
+q/k norm 0.004, quant 0.003. Only the recurrence is above the noise: the chunked gfx12 kernel (facet hybrid-gdn prefill) takes it from 0.042 to 0.016
+(+4.4 % prefill). The small kernels (together ~0.06) are individually below what a doubling resolves and below what one fusion could save (<= 1 % each).

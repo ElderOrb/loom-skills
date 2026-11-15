@@ -17,6 +17,17 @@
     "exec.prefill_capacity": 1024
    },
    "evidence": "migrated from the R9700 fit table (.github/devlab/r9700_fit.json r9700_execution / ctx_cap, measured on the R9700 DevLab runner; #609 #613 #615 #617 #618 #619 #628 #630); values unchanged"
+  },
+  {
+   "when": {
+    "devices": [
+     "rdna4"
+    ]
+   },
+   "set": {
+    "hybrid.gdn.chunk": true
+   },
+   "evidence": "q38r9700 gdnpf (PR 860): gfx12 chunked WY GDN prefill on the R9700 DevLab runner, same-job A/B vs the card build (2 rounds): prefill 1k/2k 1536/1622 -> 1599/1694 tok/s (+4.1/+4.4 %), 8k/16k/32k 1713/1649/1525 -> 1801/1730/1594 (+5.1/+4.9/+4.6 %), decode 65.2 -> 65.0 and decode_32k 52.05 -> 51.98 (ties), 4 streams undrafted 116.9 -> 117.0; ktest 84/84 (gdn_chunk_spans), gates:dev PASS (spec, consistency, agent x2, golden, compare, vision, sampling), textmatch 3/3"
   }
  ]
 }
