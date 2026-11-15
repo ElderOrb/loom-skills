@@ -800,6 +800,57 @@ func.def inline @g_mxfp4_values(%w: buffer, %origin: offset, %group: index) -> (
 """
 
 
+# MXFP4 weight codes for the int8-activation matvecs (opt-in: choice decode.mxfp4.act_q8, formats.ICODES): the signed codes 2 * fp4
+# (kvalues_mxfp4: 0 1 2 3 4 6 8 12 and their negatives) of one 32-value block and its scale 2^(e - 128), the same decode as @g_mxfp4_values
+# without the f32 multiply: the matvec takes eight dot4 steps per block and token instead of 32 conversions and fused multiply-adds.
+MXFP4_ICODES = r"""
+func.def inline @g_mxfp4_icodes(%w: buffer, %origin: offset, %group: index) -> (vector<32xi8>, f32) {
+  %one = index.constant 1 : offset
+  %e_view = buffer.view %w[%origin] : buffer -> view<1xi8>
+  %code_origin = index.add %origin, %one : offset
+  %code_view = buffer.view %w[%code_origin] : buffer -> view<16xi8>
+  %e8 = view.load %e_view[0] : view<1xi8> -> i8
+  %e = scalar.extui %e8 : i8 to i32
+  %c1_i = scalar.constant 1 : i32
+  %c2_i = scalar.constant 2 : i32
+  %c23_i = scalar.constant 23 : i32
+  %tiny_base = scalar.constant 2097152 : i32
+  %e_low = scalar.cmpi ult, %e, %c2_i : i32
+  %tiny = scalar.shli %tiny_base, %e : i32
+  %em1 = scalar.subi %e, %c1_i : i32
+  %normal = scalar.shli %em1, %c23_i : i32
+  %bits = scf.select %e_low, %tiny, %normal : i32
+  %d = scalar.bitcast %bits : i32 to f32
+  %payload = vector.load %code_view[0] : view<16xi8> -> vector<16xi8>
+  %mask = vector.constant 15 : vector<16xi8>
+  %four = vector.constant 4 : vector<16xi8>
+  %lower = vector.andi %payload, %mask : vector<16xi8>
+  %shifted = vector.shrui %payload, %four : vector<16xi8>
+  %upper = vector.andi %shifted, %mask : vector<16xi8>
+  %k0 = scalar.constant 0 : i8
+  %k1 = scalar.constant 1 : i8
+  %k2 = scalar.constant 2 : i8
+  %k3 = scalar.constant 3 : i8
+  %k4 = scalar.constant 4 : i8
+  %k5 = scalar.constant 6 : i8
+  %k6 = scalar.constant 8 : i8
+  %k7 = scalar.constant 12 : i8
+  %k9 = scalar.constant -1 : i8
+  %k10 = scalar.constant -2 : i8
+  %k11 = scalar.constant -3 : i8
+  %k12 = scalar.constant -4 : i8
+  %k13 = scalar.constant -6 : i8
+  %k14 = scalar.constant -8 : i8
+  %k15 = scalar.constant -12 : i8
+  %codebook = vector.from_elements %k0, %k1, %k2, %k3, %k4, %k5, %k6, %k7, %k0, %k9, %k10, %k11, %k12, %k13, %k14, %k15 : vector<16xi8>
+  %lo_codes = vector.table.lookup %codebook[%lower] : vector<16xi8>, vector<16xi8> -> vector<16xi8>
+  %hi_codes = vector.table.lookup %codebook[%upper] : vector<16xi8>, vector<16xi8> -> vector<16xi8>
+  %codes = vector.concat<0> %lo_codes, %hi_codes : vector<16xi8>, vector<16xi8> -> vector<32xi8>
+  func.return %codes, %d : vector<32xi8>, f32
+}
+"""
+
+
 # emitted only when a Q5_0 tensor is used (see main): llama.cpp's Q4_K_M keeps projections whose rows are not a multiple
 # of 256 in Q5_0 (Qwen2.5-0.5B: hidden 896). Integer codes for the int8 matvecs and head (ACT_Q8), values for the rest
 # (embedding, f32 matvecs, the GEMM's dequant16 through gen_gemm.HELPER).
@@ -874,7 +925,7 @@ func.def inline @g_q5_0_values(%w: buffer, %origin: offset, %group: index) -> (v
 def iq_decode(fmt, wi, w, ok, o, within):
     """ACT_Q8 weight side: integer codes %wq{wi} (+ scale %sc{wi}, and %mn{wi}: Q4_K/Q5_K minimum, Q6_K second
     half scale) of the lane's 32-value group, once per row."""
-    two = fmt != "q8_0"
+    two = fmt not in ("q8_0", "mxfp4")
     rt = "vector<32xi8>, f32, f32" if two else "vector<32xi8>, f32"
     return (f"""    %wq{wi}, %sc{wi}""" + (f", %mn{wi}" if two else "") + f""" = scf.if {ok} -> ({rt}) {{
       %v, %a""" + (", %b" if two else "") + f""" = func.call @g_{fmt}_icodes(%{w}, {o}, {within}) : (buffer, offset, index) -> ({rt})
@@ -907,7 +958,7 @@ def iq_dot(fmt, wi, j, out):
         return "\n".join(t)
     t, di = chain(0, 8, "")
     t.append(f"    %df{wi}_{j} = scalar.sitofp {di} : i32 to f32")
-    if fmt == "q8_0":
+    if fmt in ("q8_0", "mxfp4"):
         t.append(f"""    %wd{wi}_{j} = scalar.mulf %sc{wi}, %da{j} : f32
     {out} = scalar.mulf %wd{wi}_{j}, %df{wi}_{j} : f32""")
     else:
@@ -5450,6 +5501,8 @@ if __name__ == "__main__":
         COMMON += Q5_0
     if any(t["type"] == "mxfp4" for t in TENS.values()):
         COMMON += MXFP4
+        if "mxfp4" in IQ_FMTS:
+            COMMON += MXFP4_ICODES
     if USED_MVQ or USED_MOEQ:   # ACT_Q8: int8-activation matvecs, their weight-code helpers and g_quant_q8
         COMMON += ICODES + "".join(mv(fmt, K, R=R, TG=TG, swiglu=sw == 1, pair=sw == 2, suffix=f"_r{R}" if R != 16 else "", iq=True)
                                    for fmt, K, sw, R, TG in sorted(USED_MVQ))

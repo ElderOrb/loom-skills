@@ -251,6 +251,9 @@ CHOICE("prefill.gemm.f16o_swiglu", "bool", False, "GEMM_F16O", kernels=["g_gemm_
        doc="gfx12 f16-output swiglu group with its row scale (the R9700 prefill stack of #656). Opt-in per model: llm_config "
            "rdna4_f16_ffn is its default there. Also turns on prefill.attn.flash2_trim and prefill.attn.flash2_b2 (cfg-driven).",
        generator_defaults=("",))
+CHOICE("decode.mxfp4.act_q8", "bool", False, "MXFP4_Q8", kernels=["g_mv_mxfp4_*", "g_mxfp4_icodes"], rows=ROWS_DECODE + ROWS_STREAMS, from_pr="q38r9700-mxfp4",
+       doc="MXFP4 dense matvecs take int8 activations (ACT_Q8's dot4 path, as Q8_0 / the K-quants) instead of f32 conversions and fused multiply-adds: the 4-token verify "
+           "matvec of a drafted decode is ALU-bound on the f32 path (Qwen3.8-27B MXFP4: decode 47 tok/s drafted vs 65 for Q4_K_M). Opt-in per model: the MoE experts of gpt-oss keep their f32 path.")
 CHOICE("prefill.gemm.mxfp4_f8", "bool", False, "GEMM_MXFP4_F8", kernels=["g_gemm_mxfp4_*_f8_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
        devices=["rdna4"], from_pr="q38r9700-mxfp4",
        doc="gfx12: MXFP4 prefill GEMMs on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): weights decoded to bf8 exactly, activations fp8 e4m3 with a per-row "
