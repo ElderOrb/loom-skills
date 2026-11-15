@@ -1,5 +1,5 @@
 {
- "_comment": "phead: MTP proposals over a reduced-vocabulary Q4_0 head copy (PROPOSE_HEAD_ROWS), R9700: base (choice off) vs N=32768 / 65536 / all rows, two interleaved rounds.",
+ "_comment": "phead round 2: N sweep (Q4_0 copy of rows [0,N) + added tokens) vs base, two interleaved rounds.",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -15,9 +15,9 @@
      "context": 124928
     },
     {
-     "name": "ph32",
+     "name": "ph48",
      "build": {
-      "PROPOSE_HEAD_ROWS": "32768"
+      "PROPOSE_HEAD_ROWS": "49152"
      },
      "context": 124928
     },
@@ -29,22 +29,40 @@
      "context": 124928
     },
     {
-     "name": "phall",
+     "name": "ph96",
      "build": {
-      "PROPOSE_HEAD_ROWS": "248320"
+      "PROPOSE_HEAD_ROWS": "98304"
+     },
+     "context": 124928
+    },
+    {
+     "name": "ph128",
+     "build": {
+      "PROPOSE_HEAD_ROWS": "131072"
+     },
+     "context": 124928
+    },
+    {
+     "name": "ph160",
+     "build": {
+      "PROPOSE_HEAD_ROWS": "163840"
      },
      "context": 124928
     }
    ],
    "steps": [
     "perf:base:1",
-    "perf:ph32:1",
+    "perf:ph48:1",
     "perf:ph64:1",
-    "perf:phall:1",
+    "perf:ph96:1",
+    "perf:ph128:1",
+    "perf:ph160:1",
     "perf:base:1",
-    "perf:ph32:1",
+    "perf:ph48:1",
     "perf:ph64:1",
-    "perf:phall:1"
+    "perf:ph96:1",
+    "perf:ph128:1",
+    "perf:ph160:1"
    ]
   }
  ]
