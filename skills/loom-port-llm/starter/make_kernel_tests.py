@@ -1349,7 +1349,7 @@ if _PH:
     unit = 256 if SAME else 32
     mt, ht, w4t = f"tensor<{hm.size}xi32>", f"tensor<{S}x{H}xf32>", f"tensor<{nb * (210 if SAME else 18)}xi8>"
     tol = (2.0e-3 if SAME else 3.0e-2) * float(np.abs(lp).max())
-    skip_blocks = (base_tok - split_rows) * H // unit
+    skip_blocks = base_tok * H * 2 if PSRC == "bf16r" else (base_tok - split_rows) * H // unit   # bf16r: the tail range's byte origin in the one buffer
     def prl(k, tag):
         return (f"  %p{tag} = check.generate.fill value(0) : tensor<{S * CHp * 2}xi32>\n  %l{tag} = check.generate.fill value(0.0) : tensor<{S * CHP}xf32>\n"
                 f"  kernel.launch @{k}[%spans](%spans, %t, %meta, %hq, %w4, %p{tag}, %l{tag}) : [index](index, index, {mt}, tensor<{S}x{2 * H}xi8>, {w4t}, tensor<{S * CHp * 2}xi32>, tensor<{S * CHP}xf32>)\n")
