@@ -29,9 +29,15 @@ install() {
       || python3 -m pip install --user -q --break-system-packages uv >> "$state/vllm-install.log" 2>&1 || true
   fi
   command -v uv >/dev/null || { echo "no uv and it could not be installed:"; tail -10 "$state/vllm-install.log"; return 1; }
-  uv venv --python 3.12 "$venv" && uv pip install --python "$venv/bin/python" "vllm==$VLLM_VERSION" pillow \
+  uv venv --clear --python 3.12 "$venv" && uv pip install --python "$venv/bin/python" "vllm==$VLLM_VERSION" pillow \
     --extra-index-url "https://wheels.vllm.ai/rocm/$VLLM_VERSION/$VLLM_ROCM_VARIANT" --index-strategy unsafe-best-match \
     > "$state/vllm-install.log" 2>&1 || { echo "vLLM install failed:"; tail -20 "$state/vllm-install.log"; return 1; }
+  # torch's ROCm wheel links libmpi_cxx.so.40 (Open MPI) and libnuma: not on a bare runner image
+  if ! ldconfig -p 2>/dev/null | grep -q 'libmpi_cxx\.so\.40'; then
+    { sudo -n apt-get install -y libopenmpi3t64 libnuma1 || { sudo -n apt-get update -qq && sudo -n apt-get install -y libopenmpi3t64 libnuma1; }; } >> "$state/vllm-install.log" 2>&1 \
+      || echo "WARNING: could not apt-install libopenmpi3t64 (torch import will fail)"
+  fi
+  "$venv/bin/python" -c "import torch; print('torch', torch.__version__, 'hip', torch.version.hip, 'devices', torch.cuda.device_count())" 2>&1 | tee -a "$state/vllm-install.log" | tail -3
   echo "INSTALLED vllm $VLLM_VERSION $VLLM_ROCM_VARIANT in $(( $(date +%s) - t0 )) s" | tee -a "$state/vllm-install.log"
 }
 if [ "${1:-}" = --install ]; then install && echo "$venv/bin/python"; exit; fi
