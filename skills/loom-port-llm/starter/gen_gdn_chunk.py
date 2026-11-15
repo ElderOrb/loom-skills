@@ -208,31 +208,40 @@ def chunk_kernel(G, NG, LB, guard_open="", guard_close="", target=True):
                 P(f"    %kk{tl}{kb} = vector.mma %kk{tl}l{kb}, %kk{tl}r{kb}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             tile_epilogue(tl, "kk")
         P("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
-        # ---- P3: T = (I + A)^-1, one thread per column, rows in sequence (threads 0..63)
+        # ---- P3: T = (I + A)^-1 (A holds -A, strictly lower), one thread per column, rows in sequence (threads 0..63).
+        # The scheduler hoists every independent LDS load of a basic block to its top (the whole solve is one block: register allocation
+        # failed at peaks of 270-1000 VGPRs and scf.if regions are if-converted away), so the A loads of row i depend on T[i - DEP] through
+        # an index term that is zero at run time (T's bits and an LDS zero) and unknown to the compiler: at most DEP rows of loads in flight.
         P(f"    scf.if %t64 {{")
         P(f"      %cc = index.assume %thread [range(%thread, 0, 63)] : index")
         import os as _os
-        SR = int(_os.environ.get('SOLVE_ROWS', CN))
-        for i in range(SR):
-            terms = []
+        DEP = int(_os.environ.get('SOLVE_DEP', 2))
+        for i in range(CN):
             P(f"      %oh{i} = index.cmp eq, %cc, {ci(i)} : index")
             P(f"      %tv{i}_0 = scf.select %oh{i}, %one_f, %zero_f : f32")
+            if i >= DEP:
+                P(f"      %db{i} = scalar.bitcast %T{i - DEP} : f32 to i32")
+                P(f"      %dz{i} = scalar.andi %db{i}, %zero_i32 : i32")
+                P(f"      %dx{i} = index.cast %dz{i} : i32 to index")
+                P(f"      %rv{i} = index.add {ci(i)}, %dx{i} : index")
+                P(f"      %rw{i} = index.assume %rv{i} [range(%rv{i}, 0, 63)] : index")
+                row = f"%rw{i}"
+            else:
+                row = ci(i)
             acc = f"%tv{i}_0"
             nfull = i // 4
             for g in range(nfull):
-                ig = ci(4 * g)
-                P(f"      %ar{i}_{g} = vector.load %a_view[{ci(i)}, {ig}] : view<64x64xf32> -> vector<4xf32>")
+                P(f"      %ar{i}_{g} = vector.load %a_view[{row}, {ci(4 * g)}] : view<64x64xf32> -> vector<4xf32>")
                 for e in range(4):
                     m_ = 4 * g + e
                     P(f"      %ae{i}_{m_} = vector.extract %ar{i}_{g}[{e}] : vector<4xf32> -> f32")
                     P(f"      %tf{i}_{m_} = scalar.fmaf %ae{i}_{m_}, %T{m_}, {acc} : f32")
                     acc = f"%tf{i}_{m_}"
             for m_ in range(4 * nfull, i):
-                P(f"      %ae{i}_{m_} = view.load %a_view[{ci(i)}, {ci(m_)}] : view<64x64xf32> -> f32")
+                P(f"      %ae{i}_{m_} = view.load %a_view[{row}, {ci(m_)}] : view<64x64xf32> -> f32")
                 P(f"      %tf{i}_{m_} = scalar.fmaf %ae{i}_{m_}, %T{m_}, {acc} : f32")
                 acc = f"%tf{i}_{m_}"
             P(f"      %T{i} = scalar.addf {acc}, %zero_f : f32")
-        for i in range(SR):
             P(f"      %T{i}h = scalar.fptrunc %T{i} : f32 to f16")
             P(f"      view.store %T{i}h, %t_view[{ci(i)}, %cc] : f16, view<64x{TS}xf16>")
         P(f"    }}")
@@ -376,6 +385,7 @@ kernel.def {tgt}export("g_gdn_chunk_rdna4") @g_gdn_chunk_rdna4(%spans: index) {{
   %dt_bias_value = view.load %bias_view[%vh] : view<{HV}xf32> -> f32
   %qscale_c = scalar.constant {DK ** -0.5!r} : f32
   %zero8 = vector.constant 0.0 : vector<8xf32>
+  %zero16 = vector.constant 0 : vector<16xi32>
   %init = vector.fragment<init> %zero8 {SH} : vector<8xf32>
   %chk = index.constant {HK} : index
   %kh = index.rem %vh, %chk : index
@@ -412,7 +422,7 @@ kernel.def {tgt}export("g_gdn_chunk_rdna4") @g_gdn_chunk_rdna4(%spans: index) {{
   %kh_view = buffer.view %kh_buf[%zero] : buffer -> view<64x{KHS}xf16>
   %kh_tl = encoding.layout.strided [1, {KHS}] : encoding<layout>
   %kh_t = buffer.view %kh_buf[%zero] : buffer -> view<{KHS}x64xf16, %kh_tl>
-  %qa_bytes = index.constant {max(64 * QAS * 2, 128 * KDS * 2)} : offset
+  %qa_bytes = index.constant {max(64 * QAS * 2, 128 * KDS * 2) + 64 * TS * 2} : offset
   %qa_buf = buffer.alloca<workgroup> align(16) %qa_bytes : buffer
   %q_view = buffer.view %qa_buf[%zero] : buffer -> view<64x{QAS}xf16>
   %a_view = buffer.view %qa_buf[%zero] : buffer -> view<64x64xf32>
@@ -422,9 +432,9 @@ kernel.def {tgt}export("g_gdn_chunk_rdna4") @g_gdn_chunk_rdna4(%spans: index) {{
   %p_bytes = index.constant {64 * PS * 2} : offset
   %p_buf = buffer.alloca<workgroup> align(16) %p_bytes : buffer
   %p_view = buffer.view %p_buf[%zero] : buffer -> view<64x{PS}xf16>
-  %t_buf = buffer.alloca<workgroup> align(16) %p_bytes : buffer
-  %t_view = buffer.view %t_buf[%zero] : buffer -> view<64x{TS}xf16>
-  %sc_bytes = index.constant 1280 : offset
+  %t_off = index.constant {max(64 * QAS * 2, 128 * KDS * 2)} : offset
+  %t_view = buffer.view %qa_buf[%t_off] : buffer -> view<64x{TS}xf16>
+  %sc_bytes = index.constant 1344 : offset
   %sc_buf = buffer.alloca<workgroup> align(16) %sc_bytes : buffer
   %o1 = index.constant 256 : offset
   %o2 = index.constant 512 : offset
@@ -435,6 +445,15 @@ kernel.def {tgt}export("g_gdn_chunk_rdna4") @g_gdn_chunk_rdna4(%spans: index) {{
   %eg_s = buffer.view %sc_buf[%o2] : buffer -> view<64xf32>
   %beta_s = buffer.view %sc_buf[%o3] : buffer -> view<64xf32>
   %ewg_s = buffer.view %sc_buf[%o4] : buffer -> view<64xf32>
+  %o5 = index.constant 1280 : offset
+  %zero_cell = buffer.view %sc_buf[%o5] : buffer -> view<16xi32>
+  %zero_i32_c = scalar.constant 0 : i32
+  %thread_is0 = index.cmp eq, %thread, %k0 : index
+  scf.if %thread_is0 {{
+    vector.store %zero16, %zero_cell[%k0] : vector<16xi32>, view<16xi32>
+  }}
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %zero_i32 = view.load %zero_cell[%k0] : view<16xi32> -> i32
 """
     # initial state (rows of dk for the value column of this lane)
     init = []
