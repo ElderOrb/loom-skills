@@ -1019,7 +1019,7 @@ def bfly_store(vals, p, store, presorted=False):
     return "\n".join(t)
 
 
-def _mv(fmt, K, R=16, TG=1, swiglu=False, suffix="", iq=False, pair=False, chunk=None):
+def _mv(fmt, K, R=16, TG=1, swiglu=False, suffix="", iq=False, pair=False, chunk=None, unroll=1):
     """Decode matrix-vector: a workgroup covers one K row with one lane per
     32-value group (lanes = groups rounded up to a wave), R output rows and TG
     tokens. Each lane keeps its x group for the TG tokens in registers and
@@ -1140,13 +1140,18 @@ kernel.def export("{name}") @{name}(%n: index, %tokens: index) {{
   }}"""))
     L.append(("" if NCH > 1 else PV + "\n") + (f"""  %bt_sv = index.add %bt_idx, %chb : index
   %bt_store = index.assume %bt_sv [range(%bt_sv, 0, {TG - 1})] : index
-""" if iq else "") + f"""  scf.for %r = [%c0 to %rows_per step %c1] {{
+""" if iq else "") + (f"""  %c_unroll = index.constant {unroll} : index
+""" if unroll > 1 else "") + f"""  scf.for %r = [%c0 to %rows_per step {"%c_unroll" if unroll > 1 else "%c1"}] {{
     %row_value = index.add %row_base, %r : index
     %row = index.assume %row_value [lt(%row_value, %n)] : index
     %ro = index.scale %row, %row_bytes : index, offset -> offset
     %rb = index.assume %r [range(%r, 0, {R - 1})] : index
     %o = index.add %ro, %ba : offset""")
+    if unroll > 1:
+        L.append(mv_rows_unrolled(fmt, unroll, nw, CHK, waves, R, TG, PERM, ["w", "w2"] if nw == 2 else ["w"]))
     for wi, w in enumerate(["w", "w2"] if nw == 2 else ["w"]):
+        if unroll > 1:
+            break
         if iq:
             # integer codes once per row; per token one dot4 contraction against the int8 activations
             L.append(iq_decode(fmt, wi, w, "%ok", "%o", "%within"))
@@ -1225,6 +1230,36 @@ kernel.def export("{name}") @{name}(%n: index, %tokens: index) {{
 }
 """)
     return "\n".join(L)
+
+
+def mv_rows_unrolled(fmt, U, nw, CHK, waves, R, TG, PERM, wnames):
+    """The row-loop body of the int8 matvec for U rows per iteration (rows %r .. %r + U - 1; rows_per is a multiple of U), phased:
+    every row's weight codes are decoded (their global loads issued) before any row's dot products, so a wave keeps U rows of
+    loads in flight instead of one. A row's arithmetic is the one-row body's, unchanged. Row 0 is the loop's own head
+    (%o, %rb); rows k >= 1 define %o_u<k> / %rb_u<k> here and every name a row's body defines gets the suffix `_u<k>`."""
+    import re as _re
+    dec = [iq_decode(fmt, wi, w, "%ok", "%o", "%within") for wi, w in enumerate(wnames)]
+    dot = []
+    for wi in range(nw):
+        dot += [iq_dot(fmt, wi, j, f"%pa{wi}_{j}") for j in range(CHK)]
+        dot.append(bfly_store([f"%pa{wi}_{j}" for j in range(CHK)], f"b{wi}",
+                              lambda v, wi=wi: f"view.store {v}, %pv[{wi}, %wave, %rb, %bt_store] : f32, view<{nw}x{waves}x{R}x{TG}xf32>", presorted=PERM))
+    defined = set(_re.findall(r"(%\w+)(?=(?:, %\w+)* = )", "\n".join(dec + dot)))
+    def row(t, u):
+        t = _re.sub(r"%\w+", lambda m: m.group(0) + f"_u{u}" if m.group(0) in defined else m.group(0), t)
+        t = _re.sub(r"%o(?![\w])", f"%o_u{u}", t)
+        return _re.sub(r"%rb(?![\w])", f"%rb_u{u}", t)
+    heads = []
+    for u in range(1, U):
+        heads.append(f"""    %cu{u} = index.constant {u} : index
+    %rr_u{u} = index.add %r, %cu{u} : index
+    %row_value_u{u} = index.add %row_base, %rr_u{u} : index
+    %row_u{u} = index.assume %row_value_u{u} [lt(%row_value_u{u}, %n)] : index
+    %ro_u{u} = index.scale %row_u{u}, %row_bytes : index, offset -> offset
+    %rb_u{u} = index.assume %rr_u{u} [range(%rr_u{u}, 0, {R - 1})] : index
+    %o_u{u} = index.add %ro_u{u}, %ba : offset""")
+    parts = heads + dec + [row(t, u) for u in range(1, U) for t in dec] + dot + [row(t, u) for u in range(1, U) for t in dot]
+    return "\n".join(parts)
 
 
 def mv(fmt, K, R=16, TG=1, swiglu=False, suffix="", iq=False, pair=False):
