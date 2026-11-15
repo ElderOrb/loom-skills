@@ -23,8 +23,12 @@ venv=${VLLM_VENV:-$state/venv}
 install() {
   [ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import vllm,sys; sys.exit(0 if vllm.__version__.split('+')[0]=='$VLLM_VERSION' else 1)" 2>/dev/null && return 0
   local t0=$(date +%s)
-  command -v uv >/dev/null || python3 -m pip install --user -q uv >/dev/null 2>&1 || true
   export PATH=$HOME/.local/bin:$PATH
+  if ! command -v uv >/dev/null; then   # no uv on the runner: the official installer (to ~/.local/bin), else pip
+    { curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh; } >> "$state/vllm-install.log" 2>&1 \
+      || python3 -m pip install --user -q --break-system-packages uv >> "$state/vllm-install.log" 2>&1 || true
+  fi
+  command -v uv >/dev/null || { echo "no uv and it could not be installed:"; tail -10 "$state/vllm-install.log"; return 1; }
   uv venv --python 3.12 "$venv" && uv pip install --python "$venv/bin/python" "vllm==$VLLM_VERSION" pillow \
     --extra-index-url "https://wheels.vllm.ai/rocm/$VLLM_VERSION/$VLLM_ROCM_VARIANT" --index-strategy unsafe-best-match \
     > "$state/vllm-install.log" 2>&1 || { echo "vLLM install failed:"; tail -20 "$state/vllm-install.log"; return 1; }
