@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One command per campaign step: regenerate the cards of many models on one or more devices, resumable, state in one JSON file.
 
-  regen.py plan    --device D [--device D2] [--mode ab|card] [--slugs S... | --all] [--old ORG|refs.json] [--batch N] --state S.json
+  regen.py plan    --base BRANCH --device D [--device D2] [--mode ab|card] [--slugs S... | --all] [--old ORG|refs.json] [--batch N] --state S.json
                    [--replicas 2] [--sequential] [--no-baselines] [--priority]   a narrow change: confirming run as a parallel replica, 2+2 -> 6+6, no llama.cpp
   regen.py submit  S.json [--dry-run] [--max-batches N] [--max-inflight N|auto]   experiment branch + perf.json + PR + label per batch (REST), priority
                    batches and R9700-class devices first; --max-inflight sends a sweep in waves (default: all at once)
@@ -278,7 +278,7 @@ def cmd_plan(a):
         pins = json.load(open(os.path.join(ROOT, ".github", "devlab", "gufo_bundle.json")))
         a.bundle_build = [pins["extension"].split("@")[1], pins["gufo"].split("@")[1]]
     st = {"schema": "regen/1", "created": now(), "mode": a.mode, "work": work, "state": state_path,
-          "opts": {"gates": a.gates, "new_org": a.new_org, "old_org": old_org, "batch": a.batch, "refs": None,
+          "opts": {"gates": a.gates, "new_org": a.new_org, "base": a.base, "old_org": old_org, "batch": a.batch, "refs": None,
                    **({"replicas": a.replicas} if a.replicas > 1 else {}), **({"sequential": True} if a.sequential else {}),
                    **({"no_baselines": True} if a.no_baselines else {}), **({"bundle": a.bundle} if a.bundle else {}),
                    **({"bundle": {"build": {"extension": f"loom-fun/loom-gufo-extension@{a.bundle_build[0]}", "gufo": f"loom-fun/gufo@{a.bundle_build[1]}"}}}
@@ -341,20 +341,22 @@ def batch_body(st, b):
 
 
 def submit_batch(st, b, dry):
+    base = st.d["opts"].get("base") or "refactor"   # states planned before --base existed: the branch they were submitted from
     tag = re.sub(r"[^a-z0-9]+", "-", os.path.basename(st.path)[:-5].lower()).strip("-")
     branch = f"regen-{tag}-b{b['id']}" + (f"-r{b['round']}" if b["round"] > 1 else "")
-    perf = open(b["perf"], "rb").read()
+    with open(b["perf"], "rb") as fh:
+        perf = fh.read()
     title = f"Experiment: regen {tag} {b['device']} batch {b['id']}" + (f" confirming run {b['round']}" if b["round"] > 1 else "")
     if dry:
-        print(f"[dry-run] branch {branch} from refactor, perf.json ({len(perf)} bytes, {len(b['jobs'])} jobs), PR '{title}', label devlab-perf")
+        print(f"[dry-run] branch {branch} from {base}, perf.json ({len(perf)} bytes, {len(b['jobs'])} jobs), PR '{title}', label devlab-perf")
         return
-    sha = gh_api("GET", f"repos/{REPO}/git/ref/heads/refactor", jq=".object.sha")
+    sha = gh_api("GET", f"repos/{REPO}/git/ref/heads/{base}", jq=".object.sha")
     gh_api("POST", f"repos/{REPO}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
     f = "repos/%s/contents/.github/devlab/perf.json" % REPO
     fsha = gh_api("GET", f"{f}?ref={branch}", jq=".sha")
     gh_api("PUT", f, {"message": f"devlab perf: {title}\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>", "branch": branch,
                       "content": base64.b64encode(perf).decode(), "sha": fsha})
-    pr = gh_api("POST", f"repos/{REPO}/pulls", {"title": title, "head": branch, "base": "refactor", "body": batch_body(st, b)}, jq=".number")
+    pr = gh_api("POST", f"repos/{REPO}/pulls", {"title": title, "head": branch, "base": base, "body": batch_body(st, b)}, jq=".number")
     gh_api("POST", f"repos/{REPO}/issues/{pr}/labels", {"labels[]": "devlab-perf"})   # the label starts the run
     b.update(branch=branch, pr=int(pr), stage="submitted", submitted=now())
     for n in b["jobs"]:
@@ -846,6 +848,8 @@ def main(argv=None):
     p.add_argument("--all", action="store_true", help="every model of the fleet manifest (a device skips the ones that do not fit)")
     p.add_argument("--old", help="ORG of the old packages (default loom-fun) or a refs.json {slug: {old, new}} (card revisions pinned: org/repo@rev)")
     p.add_argument("--new-org", default=STAGING_ORG)
+    p.add_argument("--base", required=True, help="the integration branch the experiment branches are cut from and the PRs target (its devlab "
+                   "scripts and knowledge base run the jobs), e.g. r9700 or the campaign's branch")
     p.add_argument("--gates", default="dev")
     p.add_argument("--batch", type=int, default=8, help="jobs per experiment PR (smaller batches finish, and can be collected, sooner)")
     p.add_argument("--no-pin", action="store_true", help="do not pin the new package to the staging head revision at plan time")
