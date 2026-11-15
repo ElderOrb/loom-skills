@@ -50,18 +50,21 @@ def key_of(gpu):
 
 
 def job_devices():
-    """The devices a measurement job can run on: a runner, a memory pool and baselines (a device without one is not measurable)."""
+    """The devices a measurement job can run on: a runner and baselines (a device without one is not measurable). A device without a memory
+    pool (Strix Halo: the package's own memory_bytes is the budget, no fit table) serves the card's default preset at its native context."""
     base = registry.methodology()["baselines"]
-    return [k for k, d in registry.devices().items() if d["runner"]["labels"] and d.get("memory_bytes") and k in base and "rocm" in base[k]]
+    return [k for k, d in registry.devices().items() if d["runner"]["labels"] and k in base and "rocm" in base[k]]
 
 
 def device_fields(gpu, f, m, pool):
     """What a job derives from the fit row f of model m on a device with the memory POOL, or None when the weights do not fit:
     (job fields, execution of the new variants, old-package variant fields, served context). The new variants are the "card" / "nodraft"
     variants of device_jobs; ab_jobs.py uses the same plan."""
+    k = key_of(gpu)
+    if pool is None:   # a device without a pool: the package's own memory, its default preset, no fit row
+        return {f"memory_bytes_{k}": m["memory_bytes"]}, {}, {"execution": {}}, None, None
     if f["w"] + card_lib.SERVE_HEADROOM >= pool or not f["verdict"].startswith("fits"):
         return None
-    k = key_of(gpu)
     mem = min(m["memory_bytes"], pool)
     ctx = card_lib.fit_served_context(f, pool)   # the native context's KV cache does not fit (or the row caps it): serve what does
     if ctx:
@@ -81,6 +84,19 @@ def device_fields(gpu, f, m, pool):
     # the old package of an A/B carries no device preset: the same settings as an execution override (its pool shrunk to what fixed backing holds)
     old = {**({"context": ctx} if ctx else {}), "execution": preset or ex_ctx, "cap_pool": card_lib.fixed_pool_capacity(f, gpu=gpu)}
     return job, ex_ctx, old, ctx, preset
+
+
+def reference_only(slug):
+    """A safetensors package (fleet/<slug>/llm_config.json source.kind): llama.cpp cannot read the checkpoint, so its job has no llama.cpp
+    baseline steps, and the gates step runs only where the vLLM reference engine exists (vllm_shim.py): None when the slug is a GGUF card,
+    else (has the vLLM reference)."""
+    try:
+        cfg = json.load(open(os.path.join(ROOT, "fleet", slug, "llm_config.json")))
+    except OSError:
+        return None
+    if (cfg.get("source") or {}).get("kind") != "safetensors":
+        return None
+    return os.path.exists(os.path.join(ROOT, "skills", "loom-benchmark", "scripts", "vllm_shim.py"))
 
 
 def main(argv=None, device=None, tool="device_jobs.py"):
@@ -103,19 +119,20 @@ def main(argv=None, device=None, tool="device_jobs.py"):
     GPU = a.device
     if GPU not in job_devices():
         sys.exit(f"{GPU}: no measurement job (needs a DevLab runner, a memory pool, baselines in methodology.json): " + ", ".join(job_devices()))
-    POOL = card_lib.GPUS[GPU]["memory_bytes"]
+    POOL = card_lib.GPUS[GPU]["memory_bytes"]   # None: Strix Halo (no pool, no fit table)
     DEV = registry.device(GPU)   # runner key and llama.cpp baselines: skills/loom-kb (device.json, methodology.json)
     K = key_of(GPU)
     NAME = card_lib.GPUS[GPU]["runner"]   # "R9700": the card's short name of the device
     BASE = registry.methodology()["baselines"][GPU]
-    fit_path = a.fit or os.path.join(ROOT, registry.fit_table(GPU))
-    if not os.path.exists(fit_path):
+    fit_path = a.fit or (os.path.join(ROOT, registry.fit_table(GPU)) if POOL is not None else None)
+    if fit_path and not os.path.exists(fit_path):
         sys.exit(f"{fit_path}: no fit table for {GPU} (fit.py --device {GPU} writes it)")
     models = {m["repo"].split("/")[-1]: m for m in json.load(open(os.path.join(ROOT, ".github", "nightly-models.json")))["models"]}
-    fit = card_lib.fit_rows(fit_path, GPU, ROOT)   # sizing + verdict from the table, the serving settings from the scope rules (exec.*)
-    slugs = sorted(m for m in models if fit.get(m, {}).get("verdict", "").startswith("fits")) if a.all else a.slugs
+    fit = card_lib.fit_rows(fit_path, GPU, ROOT) if fit_path else {slug: None for slug in models}   # sizing + verdict from the table, the serving settings from the scope rules (exec.*)
+    fits = lambda m: POOL is None or fit.get(m, {}).get("verdict", "").startswith("fits")
+    slugs = sorted(m for m in models if fits(m)) if a.all else a.slugs
     jobs = []
-    skipped = sorted(m for m in models if not fit.get(m, {}).get("verdict", "").startswith("fits")) if a.all else []
+    skipped = sorted(m for m in models if not fits(m)) if a.all else []
     for slug in slugs:
         m, f = models[slug], fit[slug]
         got = device_fields(GPU, f, m, POOL)
@@ -133,22 +150,28 @@ def main(argv=None, device=None, tool="device_jobs.py"):
             if preset:
                 sys.exit(f"{slug}: --build rebuilds from the default preset's settings, not the {NAME} preset's: publish the package and measure the card")
         nodraft = v("nodraft", {**ex_ctx, "draft_depth": 0})
+        st = reference_only(slug)   # None: a GGUF card (llama.cpp baselines); else a safetensors card: Loom rows only, gates where vLLM is the reference
+        base = {} if st is not None else {"llamacpp": BASE["rocm"]["build"], "llamacpp_vulkan": BASE["vulkan"]["build"]}
+        llama = [] if st is not None else [f"llama@rocm.np1:{n}", f"llama@rocm.np1:{n}:long", "llamac4@rocm.nodraft",
+                                           f"llama@vulkan.np1:{n}", f"llama@vulkan.np1:{n}:long", "llamac4@vulkan.perslot.nodraft"]
+        gates = [f"gates:card:{a.gates}"] if a.gates and (st is None or st) else []
         jobs.append({
-            **({"llama_kv_rocm": jf["llama_kv_rocm"]} if "llama_kv_rocm" in jf else {}),
+            **({"llama_kv_rocm": jf["llama_kv_rocm"]} if "llama_kv_rocm" in jf and st is None else {}),
             "name": slug.lower().replace(".", "-")[:40], **({"repeat_rows": rr} if rr > 1 else {}),
-            "card": f"{a.card_org}/{slug}", **({f"require_preset_{K}": True} if preset else {}), "kit": m["kit"], "llamacpp": BASE["rocm"]["build"], "llamacpp_vulkan": BASE["vulkan"]["build"],
+            "card": f"{a.card_org}/{slug}", **({f"require_preset_{K}": True} if preset else {}), "kit": m["kit"], **base,
             f"memory_bytes_{K}": jf[f"memory_bytes_{K}"], **({"served_context": ctx} if ctx else {}),
             "variants": [card, nodraft],
-            "steps": ["func:card", "ktest:card", *([f"gates:card:{a.gates}"] if a.gates else []), *["perf:card:1"] * n, *["perf:card:1:long"] * n, "c4:nodraft",
-                      f"llama@rocm.np1:{n}", f"llama@rocm.np1:{n}:long", "llamac4@rocm.nodraft",
-                      f"llama@vulkan.np1:{n}", f"llama@vulkan.np1:{n}:long", "llamac4@vulkan.perslot.nodraft"]})
+            "steps": ["func:card", "ktest:card", *gates, *["perf:card:1"] * n, *["perf:card:1:long"] * n, "c4:nodraft", *llama]})
     if not jobs:
         sys.exit("no job: " + (", ".join(skipped) + f" do not fit the {NAME}" if skipped else "no model given"))
     exp = {"_comment": f"{NAME} per-model measurement ({tool}): one job per model on one {NAME} runner; "
-                       f"loom-fun-staging card, llama.cpp ROCm {BASE['rocm']['build']} + Vulkan {BASE['vulkan']['build']} with the matched drafting, "
+                       f"loom-fun-staging card, llama.cpp ROCm {BASE['rocm']['build']} + Vulkan {BASE['vulkan']['build']} with the matched drafting (a safetensors card: Loom rows only), "
                        "reduced-context models served at served_context. Does not fit: " + (", ".join(skipped) or "none"),
-           "runner": DEV["runner"]["key"], "memory_bytes": POOL, "llama_spec": "matched", "jobs": jobs,
+           "runner": DEV["runner"]["key"], "memory_bytes": POOL or jobs[0][f"memory_bytes_{K}"], "llama_spec": "matched", "jobs": jobs,
            "card": jobs[0]["card"], "kit": None, "llamacpp": BASE["rocm"]["build"], "llamacpp_vulkan": BASE["vulkan"]["build"]}
+    if all("llamacpp" not in j for j in jobs):   # only safetensors cards: no llama.cpp anywhere in the experiment
+        for k in ("llama_spec", "llamacpp", "llamacpp_vulkan"):
+            exp.pop(k)
     json.dump(exp, sys.stdout, indent=1)
     print()
 

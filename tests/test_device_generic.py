@@ -47,13 +47,35 @@ class DeviceJobs(unittest.TestCase):
             a["_comment"] = a["_comment"].replace("r9700_jobs.py", "device_jobs.py")
             self.assertEqual(a, b)
 
-    def test_only_measurable_devices(self):   # a runner, a pool and baselines
+    def test_only_measurable_devices(self):   # a runner and baselines (a device without a pool serves the package's own memory)
         jd = device_jobs.job_devices()
         self.assertIn(R9, jd)
         self.assertNotIn(RX, jd)      # no runner
-        self.assertNotIn(STRIX, jd)   # no memory pool (ab_jobs.py covers it)
+        self.assertIn(STRIX, jd)      # no memory pool: the package's own memory_bytes, no fit table (a new card measured on Strix Halo)
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "device_jobs.py"), "--device", RX, "x"], capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)   # argparse: RX is not a choice (no runner, no pool fit table, no baselines)
+
+    def test_strix_card_job_of_a_safetensors_package(self):   # no llama.cpp baseline, no fit row, the card's own memory
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "device_jobs.py"), "--device", STRIX, "--gates", "dev",
+                            "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = json.loads(r.stdout)
+        (j,) = doc["jobs"]
+        self.assertEqual(j["memory_bytes_strix"], 51000000000)
+        has_vllm = os.path.exists(os.path.join(ROOT, "skills", "loom-benchmark", "scripts", "vllm_shim.py"))   # the gates step needs the vLLM reference
+        self.assertEqual(any(x.startswith("gates") for x in j["steps"]), has_vllm)
+        self.assertFalse([x for x in j["steps"] if x.startswith("llama")])
+        for k in ("llamacpp", "llamacpp_vulkan", "llama_spec"):
+            self.assertNotIn(k, j)
+            self.assertNotIn(k, doc)
+
+    def test_r9700_card_job_of_a_safetensors_package(self):   # the measured context cap serves the preset, Loom steps only
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "device_jobs.py"), "--device", R9, "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (j,) = json.loads(r.stdout)["jobs"]
+        self.assertTrue(j["require_preset_r9700"])
+        self.assertEqual(j["served_context"], 65536)
+        self.assertFalse([x for x in j["steps"] if x.startswith("llama")])
 
     def test_field_names_follow_the_runner_key(self):
         row = {"slug": "s", "w": 3e9, "kv": 40e9, "kvpp": 4e5, "ctx": 1e5, "verdict": "fits (reduced ctx)", "rx7900xtx_execution": {"prefill_capacity": 2048}}
