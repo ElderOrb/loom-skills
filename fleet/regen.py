@@ -670,7 +670,9 @@ def ingest_full(st, name, e, W):
             perf += ["--llama-jsonl", *vl, "--c4-llama", c4vl[0], "--baseline-name", "vLLM", "--baseline-version", "vllm/" + rd("vllm_version.txt").strip(),
                      "--baseline-args", rd("vllm_args.txt")]
         else:
-            perf += ["--baseline-name", "vLLM", "--differs", "not measured on this card yet (llama.cpp cannot read the safetensors checkpoint)"]
+            why = ("the job's vLLM step failed: " + rd("vllm_error.txt").strip()[:300]) if os.path.exists(os.path.join(d, "vllm_error.txt")) \
+                else "not measured on this card yet (llama.cpp cannot read the safetensors checkpoint)"
+            perf += ["--baseline-name", "vLLM", "--differs", why]
     else:
         perf += ["--llama-jsonl", *llm, "--c4-llama", c4l[0], "--baseline-version", "llamacpp-rocm/" + baseline["rocm"]["build"],
                  "--baseline-args", rd("llamacpp_args-rocm.np1.txt")]
