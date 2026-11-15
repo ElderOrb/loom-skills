@@ -545,12 +545,14 @@ def fuse_mxfp4_f8(text, prefix="g"):
             readers.setdefault(args[3], []).append(i)
         else:
             others.update(x for x in args if x in _F8_OPERANDS)
-    # a GEMM leaf: scf.if %big { <m128 launch> } else { <base launch> } with the m128 launch an MXFP4 kernel
+    consts = {m.group(1): int(m.group(2)) for l in lines if (m := re.match(r"\s*(%\w+) = index\.constant (\d+) : index", l))}
+    # a GEMM leaf: scf.if %big { <m128 launch> } else { <base launch> } with the m128 launch an MXFP4 kernel whose K the fp8 kernel's 128-value step divides
     leaves = []
     for x, idx in readers.items():
         for i in idx:
             m = _LAUNCH.match(lines[i])
-            if (x in producers and x not in others and _F8_LEAF.match(m.group("k")) and lines[i - 1].strip() == "scf.if %big {"
+            if (x in producers and x not in others and _F8_LEAF.match(m.group("k")) and consts.get(_split(m.group("args"))[1], 1) % 128 == 0
+                    and lines[i - 1].strip() == "scf.if %big {"
                     and lines[i + 1].strip() == "} else {" and lines[i + 3].strip() == "}"
                     and (n := _LAUNCH.match(lines[i + 2])) and n.group("k") == m.group("k")[:-len("_m128")] and n.group("args") == m.group("args")):
                 leaves.append((i, x))

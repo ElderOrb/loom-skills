@@ -15,7 +15,9 @@ SB = {"q4_k": 256, "q5_k": 256, "q6_k": 256, "q8_0": 32, "f32": 32,
       "q4_0": 32, "iq4_nl": 32, "iq4_xs": 256, "q3_k": 256, "iq3_s": 256, "q5_0": 32, "f16": 32, "bf16": 32, "mxfp4": 32}
 LOWBIT = {"q4_0", "iq4_nl", "iq4_xs", "q3_k", "iq3_s"}
 # Formats whose decode matvecs and head take int8 activations (ACT_Q8): gen_llm.py has their @g_<fmt>_icodes.
-ICODES = frozenset({"q8_0", "q4_k", "q5_k", "q6_k", "q5_0"})
+import os as _os
+# MXFP4 (choice decode.mxfp4.act_q8, env MXFP4_Q8): opt-in per model, gpt-oss's MoE experts keep their f32 matvecs.
+ICODES = frozenset({"q8_0", "q4_k", "q5_k", "q6_k", "q5_0"} | ({"mxfp4"} if _os.environ.get("MXFP4_Q8", "0").lower() not in ("", "0", "false", "no", "off") else set()))
 # GGUF tensor type names (gguf.GGMLQuantizationType, lower case) the kit decodes.
 DECODES = frozenset(FMT)
 

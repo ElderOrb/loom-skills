@@ -28,6 +28,12 @@
     "prefill.gemm.mxfp4_f8": true
    },
    "evidence": "MXFP4 weights decode exactly to bf8 (every block exponent of this GGUF is 107..125, the kernel is exact for 107..132); the prefill GEMMs run on fp8 WMMA with e4m3 activations (q38r9700 mxfp4 task; A/B against the f16 path on the R9700 in the PR)"
+  },
+  {
+   "set": {
+    "decode.mxfp4.act_q8": true
+   },
+   "evidence": "the f32 MXFP4 matvec is ALU-bound in the 4-token verify of a drafted decode: DevLab R9700 run 43760335511 measured 47 tok/s decode (MTP depth 3, acceptance .62) vs 65.7 for the Q4_K_M package; the int8-activation dot4 path is the Q8_0 / K-quant one"
   }
  ]
 }

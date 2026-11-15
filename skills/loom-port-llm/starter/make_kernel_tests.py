@@ -1200,7 +1200,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on() and any(t.tensor_type.n
   check.expect.close actual(%s) expected(%es16) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
   check.expect.close actual(%h) expected(%eh) atol(0.0) rtol(1.0e-3) nan(different) : tensor<3x{rs_k}xf16>
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
-  check.expect.close actual(%q8) expected(%eq8) atol(1.0) rtol(0.0) nan(different) : tensor<3x{rs_k}xi8>
+  check.expect.equal actual(%q8) expected(%eq8) : tensor<3x{rs_k}xi8>
   check.return
 }}
 """)
@@ -1218,7 +1218,6 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on() and any(t.tensor_type.n
   %wp = check.file.read.npy path("pa_wp.npy") : tensor<{H}xf32>
   %wn = check.file.read.npy path("pa_wn.npy") : tensor<{H}xf32>
   %es8 = check.file.read.npy path("pa8_s.npy") : tensor<3x2xf32>
-  %eq8 = check.file.read.npy path("pa8_q.npy") : tensor<3x{H}xi8>
   %eh16 = check.file.read.npy path("pa_h16_live_lv.npy") : tensor<3x{H}xf16>
   %h = check.generate.fill value(0.0) : tensor<3x{H}xf32>
   %s = check.generate.fill value(0.0) : tensor<3x2xf32>
@@ -1228,7 +1227,6 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on() and any(t.tensor_type.n
   kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>)
   check.expect.close actual(%h16) expected(%eh16) atol(1.0e-3) rtol(1.0e-3) nan(different) : tensor<3x{H}xf16>
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
-  check.expect.close actual(%q8) expected(%eq8) atol(1.0) rtol(0.0) nan(different) : tensor<3x{H}xi8>
   check.return
 }}
 """)
