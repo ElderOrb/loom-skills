@@ -64,6 +64,7 @@
 #          textmatch:V          text_match.py: first 50 tokens of perf.py's prompts on V, then on llama.cpp
 #          consistency:V:N      consistency.py N times (NOT DETERMINISTIC / concurrent mismatch counts)
 #          determinism:V:C:R    determinism.py (issue #39's script, when present)
+#          admit:V[:TOKENS]     ctx_admit.py on V served alone: a prompt of TOKENS (default: its context minus the answer) is admitted or refused (admit_V*.txt)
 #          func:V               V served alone: the functional checks the card claims (chat, tool calling, image input;
 #                               r9700_func.py: the same checks as the Windows red-team harness), out/func_V.json
 #          logits:V[:N]         host logits readback (loom-skills#736): V's package through the Gufo bundle (loom-gufo-extension
@@ -553,6 +554,11 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       fa=(); grep -q '"vision"' "$card/llm_config.json" && fa+=(--vision)
       "$T" "$here/.github/scripts/r9700_func.py" "$url" "$cardid" "$out/func_$p1.json" ${fa[@]+"${fa[@]}"} $([ -f "$out/info_card.json" ] && echo --info "$out/info_card.json") 2>&1 | tee "$out/func_$p1.log"
       res[$s]=$(tail -1 "$out/func_$p1.log");;
+    admit)   # admit:V[:TOKENS]: ctx_admit.py on V served as configured (its execution context/pool): is a request of TOKENS (default ~ the served context) admitted? (the card's served context on the device)
+      serve_alone "$p1" || { res[$s]=ERROR; continue; }
+      step "context admission $p1 ${p2:-}"
+      (cd "$out" && "$T" "$B/ctx_admit.py" "$D/$p1/pkg" "$url" ${p2:+--tokens "$p2"} 2>&1 | tee "admit_${p1}${p2:+_$p2}.txt" | tail -3)
+      res[$s]=$(tail -1 "$out/admit_${p1}${p2:+_$p2}.txt" | cut -c1-200);;
     gates)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
