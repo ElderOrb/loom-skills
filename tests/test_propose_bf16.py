@@ -51,7 +51,7 @@ class Bf16Rows(unittest.TestCase):
 
     def test_registry(self):
         c = choices.CHOICES["draft.propose.block"]
-        self.assertEqual((c.legacy, c.env, c.type), ("", "MTP_BLOCK_PREP", "str"))
+        self.assertEqual((c.legacy, c.env, c.type), (None, "MTP_BLOCK_PREP", "str"))
 
 
 class Programs(unittest.TestCase):
