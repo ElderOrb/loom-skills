@@ -538,7 +538,7 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('vision') else 1)" "$D/$p1/pkg/llm_config.json" || { res[$s]="SKIP (no image input)"; continue; }
       for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
       step "vision tests $p1"; vt=$D/$p1/vtest; rm -rf "$vt"; mkdir -p "$vt"; vh=${p2:-320x224}
-      export VISION_TEST_DIR=$vt VENV=${VENV:-$root/.venv} PY=$T
+      export VISION_TEST_DIR=$vt VENV=${VENV:-$root/.venv} PY=$T; [ -n "$RDEV" ] && export VISION_TEST_RDNA4=1   # gfx12: the kernel cases launch the K_rdna4 twins
       ( cd "${KIT[$p1]}/vision/tests" && bash run_tests.sh ) > "$out/vtest_$p1.log" 2>&1; rc=$?
       # the whole encoder: a safetensors package reads the checkpoint's tensors (CFG.json CHECKPOINT), a GGUF package its mmproj
       eargs=$("$T" -c "import json,sys; c=json.load(open(sys.argv[1])); v=c['vision']; print(sys.argv[1] + ' ' + c['weights']['files'][0] if v.get('source') == 'safetensors' else v['mmproj'])" "$D/$p1/pkg/llm_config.json")
