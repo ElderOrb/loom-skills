@@ -1,5 +1,5 @@
 {
- "_comment": "gdnpf round 3: chunked (WY) GDN prefill kernel on R9700: kernel test, then prefill/decode A/B vs the card build",
+ "_comment": "gdnpf round 4: chunk kernel with the next chunk's loads prefetched (chunkpf) vs the previous commit (chunk) vs the card build",
  "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
  "kit": null,
@@ -19,15 +19,25 @@
      "build": {
       "GDN_CHUNK": "1"
      },
+     "context": 124928,
+     "ref": "676319ce42bc39163835ff7027e67246340f554b"
+    },
+    {
+     "name": "chunkpf",
+     "build": {
+      "GDN_CHUNK": "1"
+     },
      "context": 124928
     }
    ],
    "steps": [
-    "ktest:chunk",
+    "ktest:chunkpf",
     "perf:base:1",
     "perf:chunk:1",
+    "perf:chunkpf:1",
     "perf:base:1",
-    "perf:chunk:1"
+    "perf:chunk:1",
+    "perf:chunkpf:1"
    ]
   }
  ]
