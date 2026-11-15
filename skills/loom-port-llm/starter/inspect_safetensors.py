@@ -257,12 +257,9 @@ def build_config(src, checkpoint=None, drop_chat=False):
     # mrope (image positions) is wired only with the image component (cfg["vision"], not yet for safetensors): text positions are
     # sequential on all three axes, which plain neox RoPE over the rotary dims computes.
     cfg["tensors"] = tensors
-    if prod:   # the producer's facts the knowledge base routes on (loom-kb facet/quark: has "quark") and the cards state
-        qc = cfg_hf.get("quantization_config") or {}
-        g = qc.get("global_quant_config") or {}
-        cfg[prod["producer"]] = {"weight": prod["weight"], "input": {k: (g.get("input_tensors") or {}).get(k) for k in ("dtype", "group_size", "is_dynamic")},
-                                 "pack_method": (qc.get("export") or {}).get("pack_method"), "algo": qc.get("algo_config"),
-                                 "excluded": len(qc.get(prod["exclude_key"], []))}
+    cfg["formats"] = sorted({t["type"] for t in tensors.values()})   # the weight formats in the file (the knowledge base routes quant nodes on them)
+    if prod:   # the producer's quantization_config as the checkpoint states it (loom-kb facet/quark routes on this key)
+        cfg[prod["producer"]] = cfg_hf["quantization_config"]
     files = sorted(src.files)
     cfg["source"] = {"kind": "safetensors", **{k: v for k, v in src.origin.items() if k in ("repo", "revision")}, "files": files,
                      "family": fam["family"], "producer": prod["producer"] if prod else None, "bytes": sum(src.files.values())}
