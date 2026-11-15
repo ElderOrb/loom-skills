@@ -1,5 +1,5 @@
 {
- "_comment": "MXFP4 prefill GEMMs on fp8 WMMA (R9700): kernel tests of the new kernels, f16-path vs fp8-path A/B (ABBA) on one runner; gates of the fp8 path in a second job.",
+ "_comment": "MXFP4 R9700: fp8 prefill GEMM kernel tests + int8-activation matvecs; f8 (f32 matvec) vs f8q8 (int8 matvec) A/B, long rows and 4 streams of f8q8; gates of f8q8 in a second job.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "llama_spec": "matched",
@@ -8,21 +8,22 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "mxfp4-f8-ab",
+   "name": "mxfp4-ab",
    "memory_bytes_r9700": 34000000000,
    "variants": [
-    {"name": "f16", "build": {"GEMM_MXFP4_F8": "0"}, "context": 134144},
-    {"name": "f8", "build": {"GEMM_MXFP4_F8": "1"}, "context": 134144}
+    {"name": "f8", "build": {"GEMM_MXFP4_F8": "1", "MXFP4_Q8": "0"}, "context": 134144},
+    {"name": "f8q8", "build": {"GEMM_MXFP4_F8": "1", "MXFP4_Q8": "1"}, "context": 134144}
    ],
-   "steps": ["ktest:f8", "perf:f16:1", "perf:f8:1", "perf:f8:1", "perf:f16:1"]
+   "steps": ["ktest:f8q8", "perf:f8:1", "perf:f8q8:1", "perf:f8q8:1:long", "perf:f8q8:1", "perf:f8:1"]
   },
   {
-   "name": "mxfp4-f8-gates",
+   "name": "mxfp4-gates",
    "memory_bytes_r9700": 34000000000,
    "variants": [
-    {"name": "f8", "build": {"GEMM_MXFP4_F8": "1"}, "context": 134144}
+    {"name": "f8q8", "build": {"GEMM_MXFP4_F8": "1", "MXFP4_Q8": "1"}, "context": 134144},
+    {"name": "nd", "build": {"GEMM_MXFP4_F8": "1", "MXFP4_Q8": "1"}, "context": 134144, "execution": {"draft_depth": 0}}
    ],
-   "steps": ["func:f8", "gates:f8:dev"]
+   "steps": ["func:f8q8", "gates:f8q8:dev", "c4:nd"]
   }
  ]
 }
