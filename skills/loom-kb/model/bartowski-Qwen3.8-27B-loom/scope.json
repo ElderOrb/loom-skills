@@ -38,6 +38,17 @@
     "hybrid.gdn.chunk": true
    },
    "evidence": "q38r9700 gdnpf (PR 860): gfx12 chunked WY GDN prefill on the R9700 DevLab runner, same-job A/B vs the card build (2 rounds): prefill 1k/2k 1536/1622 -> 1599/1694 tok/s (+4.1/+4.4 %), 8k/16k/32k 1713/1649/1525 -> 1801/1730/1594 (+5.1/+4.9/+4.6 %), decode 65.2 -> 65.0 and decode_32k 52.05 -> 51.98 (ties), 4 streams undrafted 116.9 -> 117.0; ktest 84/84 (gdn_chunk_spans), gates:dev PASS (spec, consistency, agent x2, golden, compare, vision, sampling), textmatch 3/3"
+  },
+  {
+   "when": {
+    "devices": [
+     "rdna4"
+    ]
+   },
+   "set": {
+    "decode.spec.gdn_copy_split": 8
+   },
+   "evidence": "q38r9700 verify: devlab-perf run 43763681525 (ABBA, drafted decode): 64.79 -> 66.05 tok/s (+1.9 %), cs4 65.89, cs20 66.09; doubling the capture and restore launches cost +0.45 / +0.54 ms of a 40 ms step"
   }
  ]
 }

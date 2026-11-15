@@ -380,6 +380,8 @@ kernel.def export("{name}") @{name}(%tokens: index) {{
   kernel.return
 }}
 """)
+            if copy_split() > 1 and os.environ.get("LOOM_RDNA4", "1").strip().lower() not in ("0", "off", "no", "false"):
+                T.append(copy_split_twin(T[-1], name, copy_split()))
     for W in sorted({w for r in g.get("replay", []) for _, w in r["buffers"]}):
         T.append(replay_kernels(W))
     if DRAFT and DRAFT.get("kind") == "mtp":
@@ -810,6 +812,30 @@ def advance_program(program, g=None):
     if first_binding() == "%features":
         return _with_taps(program.replace(ADVANCE_SIG, ADVANCE_SIG.replace("%residual: buffer", "%features: buffer")), g)
     return program.replace(ADVANCE_SIG, ADVANCE_SIG.replace("%residual: buffer", "%h: buffer")).replace(H_ALLOCA, "", 1)
+
+
+# gfx12 twin of the GDN capture / restore copies (g_gdn_capture / g_gdn_restore): one workgroup per (token, 1/COPY_SPLIT of the
+# columns) instead of one per token. The copy is a scalar loop of ~41 dependent iterations per token on 4 workgroups, ~10 us per
+# launch x 96 launches per drafted step (R9700, doubling: capture +0.45 ms, restore +0.54 ms of 40 ms). The values moved are the same.
+def copy_split():
+    """The twin's workgroups per token (loom-kb per_target choice decode.spec.gdn_copy_split: <ENV>__RDNA4 is the twin's value); the gfx11 kernel never changes."""
+    from flash2_rdna4 import twin_env
+    env = {"GDN_COPY_SPLIT": os.environ.get("GDN_COPY_SPLIT", "1")}
+    env.update({k: v for k, v in os.environ.items() if k == "GDN_COPY_SPLIT" + "__RDNA4"})
+    return int(twin_env(env)["GDN_COPY_SPLIT"])
+
+
+def copy_split_twin(text, name, spl):
+    t = text.replace(f'kernel.def export("{name}") @{name}(', f'kernel.def target(@rdna4) export("{name}_rdna4") @{name}_rdna4(', 1)
+    t = t.replace("  kernel.launch.config workgroups(%tokens, %c1, %c1)",
+                  f"  %c_spl = index.constant {spl} : index\n  %tokens_spl = index.mul %tokens, %c_spl : index\n  kernel.launch.config workgroups(%tokens_spl, %c1, %c1)", 1)
+    t = t.replace("  %token_id = kernel.workgroup.id<x> : index\n",
+                  f"  %c_spl = index.constant {spl} : index\n  %wg_id = kernel.workgroup.id<x> : index\n  %token_id = index.div %wg_id, %c_spl : index\n  %part = index.rem %wg_id, %c_spl : index\n", 1)
+    t = t.replace("  %lane = index.assume %lane_id [range(%lane_id, 0, 255)] : index\n",
+                  "  %lane0 = index.assume %lane_id [range(%lane_id, 0, 255)] : index\n  %c256p = index.constant 256 : index\n  %poff = index.mul %part, %c256p : index\n  %lane = index.add %lane0, %poff : index\n  %c_step = index.constant " + str(256 * spl) + " : index\n", 1)
+    t = re.sub(r"(step )%c256(\] \{)", r"\1%c_step\2", t)
+    assert t.count("step %c_step") == 3, name
+    return t
 
 
 def verify_program(program, g):
