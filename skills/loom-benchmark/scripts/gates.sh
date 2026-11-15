@@ -48,7 +48,8 @@ defer=0
 MMPROJ=${MMPROJ:-$("$T" -c "import json; print((json.load(open('$pkg/llm_config.json')).get('vision') or {}).get('mmproj', ''))" 2>/dev/null)}; export MMPROJ
 safetensors=$("$T" -c "import json; print(1 if (json.load(open('$pkg/llm_config.json')).get('source') or {}).get('kind') == 'safetensors' else '')" 2>/dev/null)
 # REFERENCE_CHECKPOINT=ORG/REPO: use vLLM on that checkpoint for a GGUF package (checks of the adapter itself on a small model)
-[ -n "${REFERENCE_CHECKPOINT:-}" ] && { safetensors=1; gguf=$REFERENCE_CHECKPOINT; }
+[ -n "${REFERENCE_CHECKPOINT:-}" ] && { safetensors=1; }
+ckpt=${REFERENCE_CHECKPOINT:-$3}   # the checkpoint as given: _lib.sh made $gguf an absolute path, which would break an HF repo id (ORG/REPO)
 if [ -n "$safetensors" ]; then   # vLLM reference: the projector is vLLM's own, so any package with a vision block gets the vision gate
   MMPROJ=$("$T" -c "import json; print(1 if json.load(open('$pkg/llm_config.json')).get('vision') else '')"); export MMPROJ
 fi
@@ -59,7 +60,7 @@ elif [ -n "${LLAMA_URL:-}" ]; then
 elif [ -n "$safetensors" ]; then
   L=http://127.0.0.1:$lport
   export VLLM_STATE=${VLLM_STATE:-$bench/vllm-state} LLAMA_CACHE_BUILD=vllm-${VLLM_VERSION:-0.18.0}
-  export LLAMA_START="'$S/vllm_server.sh' '$gguf' $lport $slot"
+  export LLAMA_START="'$S/vllm_server.sh' '$ckpt' $lport $slot"
   export LLAMA_STOP="'$S/vllm_server.sh' --stop $lport"
   defer=1   # one model at a time here too: the 27B does not fit next to Loom
 else
