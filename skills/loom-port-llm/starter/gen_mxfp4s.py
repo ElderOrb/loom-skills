@@ -497,3 +497,64 @@ def fuse_mxfp4s_f8(text, prefix="g"):
     first = text.index("command.program.def")   # the twins precede every launch (dual_target.py: a launch of K comes after the end of the K_rdna4 kernels)
     first = text.rfind("\n", 0, first) + 1
     return text[:first] + "".join(t.rstrip("\n") + "\n\n" for t in kernels.values()) + text[first:], len(leaves)
+
+
+# ======================================================================================================================
+# int8-activation matvec weight codes (decode, verify widths): the split-plane twin of gen_llm.MXFP4_ICODES
+# ======================================================================================================================
+def mxfp4s_icodes(order="pairs"):
+    """@g_mxfp4s_icodes(%w, %ws, %qrow, %srow, %group): the signed codes 2 * fp4 (kvalues_mxfp4: 0 1 2 3 4 6 8 12 and negatives) of 32-value block `group`
+    of the row whose nibbles start at byte %qrow of %w and whose scales start at byte %srow of %ws, and the block scale 2^(e - 128) (the codes carry the
+    factor 2): iq_decode / iq_dot (gen_llm) take it as the Q8_0 path does (one f32 scale, eight dot4 steps per block and token). Nibble order `order`."""
+    join = ("vector.interleave<0> %lo_codes, %hi_codes : vector<16xi8>, vector<16xi8> -> vector<32xi8>" if order == "pairs"
+            else "vector.concat<0> %lo_codes, %hi_codes : vector<16xi8>, vector<16xi8> -> vector<32xi8>")
+    return f"""
+func.def inline @g_mxfp4s_icodes(%w: buffer, %ws: buffer, %qrow: offset, %srow: offset, %group: index) -> (vector<32xi8>, f32) {{
+  %c16 = index.constant 16 : offset
+  %one = index.constant 1 : offset
+  %q_off = index.scale %group, %c16 : index, offset -> offset
+  %q_pos = index.add %qrow, %q_off : offset
+  %q_view = buffer.view %w[%q_pos] : buffer -> view<16xi8>
+  %s_off = index.scale %group, %one : index, offset -> offset
+  %s_pos = index.add %srow, %s_off : offset
+  %e_view = buffer.view %ws[%s_pos] : buffer -> view<1xi8>
+  %e8 = view.load %e_view[0] : view<1xi8> -> i8
+  %e = scalar.extui %e8 : i8 to i32
+  %c1_i = scalar.constant 1 : i32
+  %c2_i = scalar.constant 2 : i32
+  %c23_i = scalar.constant 23 : i32
+  %tiny_base = scalar.constant 2097152 : i32
+  %e_low = scalar.cmpi ult, %e, %c2_i : i32
+  %tiny = scalar.shli %tiny_base, %e : i32
+  %em1 = scalar.subi %e, %c1_i : i32
+  %normal = scalar.shli %em1, %c23_i : i32
+  %bits = scf.select %e_low, %tiny, %normal : i32
+  %d = scalar.bitcast %bits : i32 to f32
+  %payload = vector.load %q_view[0] : view<16xi8> -> vector<16xi8>
+  %mask = vector.constant 15 : vector<16xi8>
+  %four = vector.constant 4 : vector<16xi8>
+  %lower = vector.andi %payload, %mask : vector<16xi8>
+  %shifted = vector.shrui %payload, %four : vector<16xi8>
+  %upper = vector.andi %shifted, %mask : vector<16xi8>
+  %k0 = scalar.constant 0 : i8
+  %k1 = scalar.constant 1 : i8
+  %k2 = scalar.constant 2 : i8
+  %k3 = scalar.constant 3 : i8
+  %k4 = scalar.constant 4 : i8
+  %k5 = scalar.constant 6 : i8
+  %k6 = scalar.constant 8 : i8
+  %k7 = scalar.constant 12 : i8
+  %k9 = scalar.constant -1 : i8
+  %k10 = scalar.constant -2 : i8
+  %k11 = scalar.constant -3 : i8
+  %k12 = scalar.constant -4 : i8
+  %k13 = scalar.constant -6 : i8
+  %k14 = scalar.constant -8 : i8
+  %k15 = scalar.constant -12 : i8
+  %codebook = vector.from_elements %k0, %k1, %k2, %k3, %k4, %k5, %k6, %k7, %k0, %k9, %k10, %k11, %k12, %k13, %k14, %k15 : vector<16xi8>
+  %lo_codes = vector.table.lookup %codebook[%lower] : vector<16xi8>, vector<16xi8> -> vector<16xi8>
+  %hi_codes = vector.table.lookup %codebook[%upper] : vector<16xi8>, vector<16xi8> -> vector<16xi8>
+  %codes = {join}
+  func.return %codes, %d : vector<32xi8>, f32
+}}
+"""

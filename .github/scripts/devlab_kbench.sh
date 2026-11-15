@@ -38,7 +38,8 @@ cp -r "$src"/. "$D/run/"; cd "$D/run" || exit 1
 gen=$(q "print(s.get('gen', ''))")
 if [ -n "$gen" ]; then
   step "generate bench files: $gen $(q "print(' '.join(s.get('gen_variants', [])))")"
-  python3 "$here/.github/devlab/kbench/$gen" "$here" "$D/run" $(q "print(' '.join(s.get('gen_variants', [])))") || exit 1
+  TP=python3; [ -x "$root/.tools/bin/python" ] && TP=$root/.tools/bin/python   # the tools venv has numpy (generators of the suites that build reference data)
+  "$TP" "$here/.github/devlab/kbench/$gen" "$here" "$D/run" $(q "print(' '.join(s.get('gen_variants', [])))") || exit 1
 fi
 python3 - <<'PY' || exit 1
 import glob, os, re

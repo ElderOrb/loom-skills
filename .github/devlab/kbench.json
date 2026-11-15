@@ -61,10 +61,18 @@
       "dir": "gemm_mxfp4s",
       "gen": "gemm_mxfp4s/gen_bench.py",
       "gen_variants": [
-        "base"
+        "base",
+        "nomma",
+        "nodq",
+        "nobar",
+        "nox"
       ],
       "files": [
-        "bench.loom"
+        "bench.loom",
+        "bench_nomma.loom",
+        "bench_nodq.loom",
+        "bench_nobar.loom",
+        "bench_nox.loom"
       ],
       "tests": [
         "test.loom"

@@ -15,7 +15,36 @@ HEAD = "amdgpu.target<gfx12-generic> @rdna4 {subgroup_size = 32}\n\n"
 ROWS = 2048
 SHAPES = [("swiglu", 5120, 17408), ("store", 17408, 5120), ("store", 5120, 12288), ("store", 5120, 10240), ("store", 5120, 6144), ("store", 6144, 5120)]
 FP4 = np.array([0, .5, 1, 1.5, 2, 3, 4, 6], np.float64)
-VARIANTS = {}   # name -> function(kernel text, mode) -> kernel text (levers, filled in as they are tried)
+VARIANTS = {}   # name -> function(kernel text, mode) -> kernel text (ablations and levers, filled in as they are tried)
+
+
+def _ablation(name):
+    def deco(f):
+        VARIANTS[name] = f
+        return f
+    return deco
+
+
+@_ablation("nomma")      # timing only (wrong results): no WMMA
+def _nomma(t, mode):
+    return re.sub(r"^(\s*)(%\w+) = vector\.mma (%\w+), (%\w+), (%\w+) : vector<2xi32>, vector<2xi32>, vector<8xf32>$", r"\1\2 = vector.addf \5, \5 : vector<8xf32>", t, flags=re.M)
+
+
+@_ablation("nodq")       # no weight decode ALU: the raw nibble words are stored as they are
+def _nodq(t, mode):
+    t = re.sub(r"vector\.store %(?:lo16|hi16|blk)_(\d), (%w_stage_st\[[^\n]*)vector<32xi8>, ", r"vector.store %zero32, \2vector<32xi8>, ", t)
+    t = re.sub(r"vector\.store %(?:lo16|hi16)_(\d), (%w_stage_st\[[^\n]*)vector<16xi8>, ", r"vector.store %zero16, \2vector<16xi8>, ", t)
+    return t.replace("  %origin = index.constant 0 : offset\n", "  %origin = index.constant 0 : offset\n  %zero16 = vector.constant 0 : vector<16xi8>\n  %zero32 = vector.constant 0 : vector<32xi8>\n", 1)
+
+
+@_ablation("nobar")      # no workgroup barriers (wrong results)
+def _nobar(t, mode):
+    return re.sub(r"^\s*kernel\.barrier<workgroup>[^\n]*\n", "", t, flags=re.M)
+
+
+@_ablation("nox")        # no activation staging stores
+def _nox(t, mode):
+    return re.sub(r"^\s*vector\.store %cr_x\d, %x_stage_st[^\n]*\n", "", t, flags=re.M)
 
 
 def kernel(mode, kn, variant="", order="pairs"):
@@ -129,6 +158,7 @@ if __name__ == "__main__" and len(sys.argv) > 2:
     d = sys.argv[2]
     os.makedirs(d, exist_ok=True)
     for v in (sys.argv[3:] or ["base"]):
+        if v != "base" and v not in VARIANTS: raise SystemExit("unknown variant " + v)
         v = "" if v == "base" else v
         open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)))
     open(os.path.join(d, "test.loom"), "w").write(HEAD + "\n".join(tests(d)))

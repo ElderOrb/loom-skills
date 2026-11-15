@@ -101,6 +101,39 @@ class KernelTests(unittest.TestCase):
             self.assertIn("%row_origin = index.mul %row_group, %c256 : index", t)
 
 
+class IcodesTests(unittest.TestCase):
+    WRAP = """
+kernel.def target(@rdna4) export("t_icodes") @t_icodes() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%w: buffer, %ws: buffer, %y: buffer, %d: buffer) {
+  %o = index.constant 0 : offset
+  %g = index.constant 3 : index
+  %codes, %s = func.call @g_mxfp4s_icodes(%w, %ws, %o, %o, %g) : (buffer, buffer, offset, offset, index) -> (vector<32xi8>, f32)
+  %yv = buffer.view %y[%o] : buffer -> view<32xi8>
+  vector.store %codes, %yv[0] : vector<32xi8>, view<32xi8>
+  %dv = buffer.view %d[%o] : buffer -> view<1xf32>
+  view.store %s, %dv[0] : f32, view<1xf32>
+  kernel.return
+}
+"""
+
+    @unittest.skipUnless(loom_compile(), "loom-compile not available")
+    def test_icodes_compile_for_gfx1201(self):
+        for order in ("pairs", "split16"):
+            with tempfile.TemporaryDirectory() as d:
+                f = Path(d) / "t.loom"
+                f.write_text(HEADER + R.mxfp4s_icodes(order) + self.WRAP)
+                r = subprocess.run([loom_compile(), str(f), "--format=amdgpu-hsaco", "--target=amdgpu:gfx1201", f"--output={d}/o.hsaco"], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[:2000])
+
+    def test_orders_differ_only_in_the_join(self):
+        a, b = R.mxfp4s_icodes("pairs"), R.mxfp4s_icodes("split16")
+        self.assertIn("vector.interleave<0>", a)
+        self.assertIn("vector.concat<0>", b)
+        self.assertEqual(a.replace("vector.interleave<0>", "J"), b.replace("vector.concat<0>", "J"))
+
+
 class ProducerTests(unittest.TestCase):
     FIXTURE = (ROOT / "tests/data/f8_producers.loom").read_text()
 
