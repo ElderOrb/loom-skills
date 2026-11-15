@@ -15,8 +15,8 @@ state=${VLLM_STATE:-/tmp}; mkdir -p "$state"
 VLLM_VERSION=${VLLM_VERSION:-0.18.0}; VLLM_ROCM_VARIANT=${VLLM_ROCM_VARIANT:-rocm700}
 if [ "${1:-}" = --stop ]; then
   f=$state/vllm-${2:?--stop PORT}.pid; [ -f "$f" ] || exit 0; pid=$(cat "$f")
-  kill "$pid" 2>/dev/null || true
-  for _ in $(seq 120); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done; kill -9 "$pid" 2>/dev/null || true   # GPU memory is free once it is gone
+  kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true   # the shim leads a process group with vLLM's EngineCore child: both go
+  for _ in $(seq 120); do pgrep -g "$pid" >/dev/null 2>&1 || kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done; kill -9 -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true   # GPU memory is free once they are gone
   rm -f "$f"; exit 0
 fi
 venv=${VLLM_VENV:-$state/venv}
@@ -31,9 +31,13 @@ install() {
       || python3 -m pip install --user -q --break-system-packages uv >> "$state/vllm-install.log" 2>&1 || true
   fi
   command -v uv >/dev/null || { echo "no uv and it could not be installed:"; tail -10 "$state/vllm-install.log"; return 1; }
-  uv venv --clear --python 3.12 "$venv" && uv pip install --python "$venv/bin/python" "vllm==$VLLM_VERSION" pillow \
+  # triton compiles a launcher against Python.h: system python without the -dev headers uses uv's standalone python instead
+  local py="--python 3.12"; [ -f /usr/include/python3.12/Python.h ] || sudo -n apt-get install -y python3.12-dev >> "$state/vllm-install.log" 2>&1 || true
+  [ -f /usr/include/python3.12/Python.h ] || py="--managed-python --python 3.12"
+  sudo -n apt-get install -y libdrm-amdgpu1 >> "$state/vllm-install.log" 2>&1 || true   # libdrm_amdgpu.so (device names); best effort
+  uv venv --clear $py "$venv" && uv pip install --python "$venv/bin/python" "vllm==$VLLM_VERSION" pillow \
     --extra-index-url "https://wheels.vllm.ai/rocm/$VLLM_VERSION/$VLLM_ROCM_VARIANT" --index-strategy unsafe-best-match \
-    > "$state/vllm-install.log" 2>&1 || { echo "vLLM install failed:"; tail -20 "$state/vllm-install.log"; return 1; }
+    >> "$state/vllm-install.log" 2>&1 || { echo "vLLM install failed:"; tail -20 "$state/vllm-install.log"; return 1; }
   # torch's ROCm wheel links libmpi_cxx.so.40 (Open MPI) and libnuma: not on a bare runner image
   if ! ldconfig -p 2>/dev/null | grep -q 'libmpi_cxx\.so\.40'; then
     { sudo -n apt-get install -y libopenmpi3t64 libnuma1 || { sudo -n apt-get update -qq && sudo -n apt-get install -y libopenmpi3t64 libnuma1; }; } >> "$state/vllm-install.log" 2>&1 \
@@ -58,7 +62,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 args=("$ckpt" --port "$port" --max-model-len "$mlen"); [ -n "${VLLM_REVISION:-}" ] && args+=(--revision "$VLLM_REVISION")
 
 ldextra
-env ${VLLM_EXTRA_ENV:-} VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} nohup "$venv/bin/python" "$here/vllm_shim.py" "${args[@]}" > "$state/vllm-$port.log" 2>&1 &
+env ${VLLM_EXTRA_ENV:-} VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} setsid nohup "$venv/bin/python" "$here/vllm_shim.py" "${args[@]}" > "$state/vllm-$port.log" 2>&1 &
 echo $! > "$state/vllm-$port.pid"
 ( p=$(cat "$state/vllm-$port.pid"); while kill -0 $p 2>/dev/null; do
     echo "$(date +%T) MemAvailable_GiB $(awk '/^MemAvailable/{printf "%.1f", $2/1048576}' /proc/meminfo) RssAnon_GiB $(awk '/^RssAnon/{printf "%.1f", $2/1048576}' /proc/$p/status 2>/dev/null) vram_used_GiB $(cat /sys/class/drm/card*/device/mem_info_vram_used 2>/dev/null | awk '{s=$1>s?$1:s} END{printf "%.1f", s/1073741824}')"; sleep 10; done ) >> "$state/vllm-$port.mem" 2>/dev/null &

@@ -23,6 +23,7 @@ import argparse
 import base64
 import io
 import json
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -82,14 +83,14 @@ def _derived_max_len(checkpoint, revision=None):
 class VllmEngine:
     """vLLM offline engine (imported lazily: the unit tests never load it)."""
 
-    def __init__(self, checkpoint, max_model_len, revision=None, dtype="bfloat16", seed=0, extra=None):
+    def __init__(self, checkpoint, max_model_len, revision=None, dtype="bfloat16", seed=0, extra=None, gpu_util=0.85):
         import vllm
         self.version = vllm.__version__
         derived = _derived_max_len(checkpoint, revision)
         if derived and max_model_len > derived:   # vLLM refuses a longer window than the checkpoint declares: longer goldens are skipped by golden.py
             print(f"max_model_len {max_model_len} -> {derived} (the checkpoint's max_position_embeddings)", flush=True)
             max_model_len = derived
-        kw = dict(model=checkpoint, dtype=dtype, seed=seed, max_model_len=max_model_len, enable_prefix_caching=False,
+        kw = dict(model=checkpoint, dtype=dtype, seed=seed, max_model_len=max_model_len, enable_prefix_caching=False, gpu_memory_utilization=gpu_util,
                   limit_mm_per_prompt={"image": 4}, **(extra or {}))
         if revision:
             kw["revision"] = revision
@@ -174,9 +175,10 @@ def main():
     ap.add_argument("--max-model-len", type=int, default=36864)
     ap.add_argument("--revision", default=None)
     ap.add_argument("--image-placeholder", default=IMAGE_PLACEHOLDER)
+    ap.add_argument("--gpu-util", type=float, default=float(os.environ.get("VLLM_GPU_UTIL", 0.85)))
     ap.add_argument("--mock", action="store_true")
     a = ap.parse_args()
-    engine = MockEngine() if a.mock else VllmEngine(a.checkpoint, a.max_model_len, a.revision)
+    engine = MockEngine() if a.mock else VllmEngine(a.checkpoint, a.max_model_len, a.revision, gpu_util=a.gpu_util)
     print(f"READY vllm_shim {engine.props()}", flush=True)
     make_server(engine, a.port, a.image_placeholder).serve_forever()
 
