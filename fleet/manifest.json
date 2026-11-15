@@ -66,7 +66,7 @@
   "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom": {
    "staging": {
     "repo": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-    "revision": "32b3a4717512bd61342189cd1dd13b1c4131b55a"
+    "revision": "0a885e7027c1c89b47d76c83b68a2105db8ecd65"
    },
    "model_id": "qwen3.8-27b-mxfp4",
    "kit": null,

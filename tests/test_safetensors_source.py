@@ -13,13 +13,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
+import math
+
+try:
+    import numpy as np
+except ImportError:   # the CI python has no numpy: the tests below that need it skip
+    np = None
 
 ROOT = Path(__file__).resolve().parents[1]
 STARTER = ROOT / "skills/loom-port-llm/starter"
 sys.path.insert(0, str(STARTER))
 import inspect_safetensors as I  # noqa: E402
-import st_tensors  # noqa: E402
+st_tensors = __import__("st_tensors") if np else None   # numpy-based reader
 
 HF_CACHE = Path(os.path.expanduser(os.environ.get("HF_HUB_CACHE", "~/.cache/huggingface/hub")))
 REAL = next(iter(sorted((HF_CACHE / "models--amd--Qwen3.8-27B-Quark-AWQ-MXFP4/snapshots").glob("*/model.safetensors"))), None) \
@@ -44,7 +49,7 @@ def tiny_header():
     h = {}
 
     def bf(name, *shape):
-        h[name] = {"dtype": "BF16", "shape": list(shape), "bytes": 2 * int(np.prod(shape))}
+        h[name] = {"dtype": "BF16", "shape": list(shape), "bytes": 2 * math.prod(shape)}
 
     def q(stem, rows, k):   # a Quark MXFP4 linear
         h[stem + ".weight"] = {"dtype": "U8", "shape": [rows, k // 2], "bytes": rows * k // 2}
@@ -127,8 +132,11 @@ class Config(unittest.TestCase):
         self.assertEqual(c["mtp"], {"layers": [4]})
         self.assertEqual((c["eos_id"], c["extra_eos_ids"]), (501, [500]))
         self.assertEqual(c["gdn"], {"conv_kernel": 4, "k_heads": 2, "v_heads": 4, "head_k": 32, "head_v": 32, "inner": 128, "v_order": "grouped"})
-        self.assertEqual(c["weights"], {"format": "safetensors", "files": ["/ck/model.safetensors"]})
+        self.assertEqual(c["weights"], {"format": "safetensors", "files": [os.path.abspath("/ck/model.safetensors")]})
         self.assertNotIn("mrope", c)   # image positions only: wired with the image component
+        self.assertEqual(c["source"]["kind"], "safetensors")   # the keys loom-kb routes on: source, quark (the checkpoint's quantization_config), formats
+        self.assertEqual(c["quark"], CONFIG["quantization_config"])
+        self.assertEqual(c["formats"], ["bf16", "f32", "mxfp4s"])
 
     def test_tensor_table(self):
         t = self.cfg["tensors"]
@@ -181,6 +189,7 @@ class Config(unittest.TestCase):
             I.producer_for({"quantization_config": {"quant_method": "nosuch"}})
 
 
+@unittest.skipUnless(np, "numpy")
 class Mxfp4s(unittest.TestCase):
     def test_dequant_matches_vllm_reference_on_random_planes(self):
         rng = np.random.default_rng(1)
@@ -270,10 +279,11 @@ class Programs(unittest.TestCase):
             self.assertIn(f"g_prep_bf16e_f32_{op}", self.text)
         for e in self.cfg["tensors"].values():   # a prepared tensor is read as f32 by the programs
             if e.get("prep") and not e["hf"].startswith("mtp."):
-                n = int(np.prod(e["shape"]))
+                n = math.prod(e["shape"])
                 self.assertIn(f'"{e["hf"]}" : view<{n}xf32>', self.text)
 
 
+@unittest.skipUnless(np, "numpy")
 class StTensors(unittest.TestCase):
     def test_prepared_values(self):
         v = np.array([0.5, -1.0, 2.0], np.float32)

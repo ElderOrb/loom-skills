@@ -210,7 +210,7 @@ for li in range(cfg["layers"]):
         name = f"blk.{li}.{nm_}.weight"
         if name not in T:
             continue
-        key = (T[name].tensor_type.name.lower(), K) + ((int(T[name].shape[1]),) if T[name].tensor_type.name.lower() in SPLIT else ())   # split formats: every output width picks its own rows-per-workgroup kernel
+        key = (T[name].tensor_type.name.lower(), K)
         if key not in seen: seen.add(key); todo.append((name, K))
 for name, K in todo:
     fmt = T[name].tensor_type.name.lower(); W = deq(name); n = W.shape[0]
@@ -268,6 +268,56 @@ for name, K in todo:
   kernel.launch @{kern}[%n, %t](%n, %t, %acc, %xq, %w, %y) : [index, index](index, index, i32, tensor<{tg}x{2 * K}xi8>, {wt}, tensor<{tg}x{n}xf32>)
   check.expect.close actual(%y) expected(%e) atol(2.0e-3) rtol(2.0e-3) nan(different) : tensor<{tg}x{n}xf32>
 {same}  check.return
+}}
+""")
+# 2'. split-plane formats: every output width of one K picks its own rows-per-workgroup variant (pick_r), and prefill takes the 16-row
+# 4-token kernel for a 48-row projection (gen_llm.lin_mv): one case per (K, output width) the model's projections have beyond section 2's first
+seen_split = {(T[nm].tensor_type.name.lower(), K, int(T[nm].shape[1])) for nm, K in todo}
+for li in range(cfg["layers"]):
+    for nm_, K in [("attn_q", H), ("attn_k", H), ("attn_v", H), ("attn_qkv", H), ("attn_gate", H), ("ssm_alpha", H), ("ssm_beta", H), ("ssm_out", VD)]:
+        name = f"blk.{li}.{nm_}.weight"
+        if name not in T or T[name].tensor_type.name.lower() not in SPLIT:
+            continue
+        n = int(T[name].shape[1]); key = (T[name].tensor_type.name.lower(), K, n)
+        if key in seen_split or nm_ == "attn_gate" and cfg.get("attn_gate") == "per_head":
+            continue
+        seen_split.add(key); fmt = key[0]; W = deq(name)
+        for tg in (1, 4):
+            xs = rng.standard_normal((tg, K)).astype(np.float32); y = xs @ W.T.astype(np.float64)
+            tag = name.replace(".", "_") + f"_t{tg}"
+            save(tag + "_w", raw(name)); save(tag + "_x", xs); save(tag + "_y", y.astype(np.float32))
+            kern = f"g_mv_{fmt}_k{K}" + ("_t4" if tg == 4 else ""); _R = pick_r(n, K, tg)
+            if _R != 16: kern += f"_r{_R}"
+            wt = ty(raw(name)); sd, sa, st = split_w(name, tag)
+            cases.append(f"""check.case public @mv_{tag} {{
+  %n = check.literal value({n}) : index
+  %t = check.literal value({tg}) : index
+  %acc = check.literal value(0) : i32
+  %w = check.file.read.npy path("{tag}_w.npy") : {wt}
+{sd}  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{tg}x{K}xf32>
+  %e = check.file.read.npy path("{tag}_y.npy") : tensor<{tg}x{n}xf32>
+  %y = check.generate.fill value(0.0) : tensor<{tg}x{n}xf32>
+  kernel.launch @{kern}[%n, %t](%n, %t, %acc, %x, %w{sa}, %y) : [index, index](index, index, i32, tensor<{tg}x{K}xf32>, {wt}{st}, tensor<{tg}x{n}xf32>)
+  check.expect.close actual(%y) expected(%e) atol(2.0e-3) rtol(2.0e-3) nan(different) : tensor<{tg}x{n}xf32>
+  check.return
+}}
+""")
+        if n % 16 == 0 and pick_r(n, K, 4) != 16 and nm_ in ("ssm_alpha", "ssm_beta"):   # prefill's 16-row 4-token kernel (lin_mv) on the same weight
+            xs = rng.standard_normal((4, K)).astype(np.float32); y = xs @ W.T.astype(np.float64)
+            tag = name.replace(".", "_") + "_t4r16"
+            save(tag + "_w", raw(name)); save(tag + "_x", xs); save(tag + "_y", y.astype(np.float32))
+            wt = ty(raw(name)); sd, sa, st = split_w(name, tag)
+            cases.append(f"""check.case public @mv_{tag} {{
+  %n = check.literal value({n}) : index
+  %t = check.literal value(4) : index
+  %acc = check.literal value(0) : i32
+  %w = check.file.read.npy path("{tag}_w.npy") : {wt}
+{sd}  %x = check.file.read.npy path("{tag}_x.npy") : tensor<4x{K}xf32>
+  %e = check.file.read.npy path("{tag}_y.npy") : tensor<4x{n}xf32>
+  %y = check.generate.fill value(0.0) : tensor<4x{n}xf32>
+  kernel.launch @g_mv_{fmt}_k{K}_t4[%n, %t](%n, %t, %acc, %x, %w{sa}, %y) : [index, index](index, index, i32, tensor<4x{K}xf32>, {wt}{st}, tensor<4x{n}xf32>)
+  check.expect.close actual(%y) expected(%e) atol(2.0e-3) rtol(2.0e-3) nan(different) : tensor<4x{n}xf32>
+  check.return
 }}
 """)
 # 2a. per-head attention gate (cfg attn_gate "per_head"): n = heads rows, run by gen_llm.lin_mv on f32 activations at

@@ -32,5 +32,25 @@ One data file per family (`starter/hf_names/<family>.json`: internal-name patter
 of an already ported architecture is a new data file, not code; a producer convention (which tensors are quantized, which stay bf16, scale tensor
 suffixes) is a separate module per producer (`facet/quark`).
 
-PLACEHOLDER (filled by the port PR): exact file names, the qwen35 table of per-tensor decisions (norm offset, A_log, conv1d, V-head order, q/gate
-split, MTP names, mrope), `inspect_safetensors.py` options, and the vision-tower mapping or its gap.
+Files: `starter/hf_names/qwen35.json` (the qwen35 family: Qwen3.5 / Qwen3.8 dense hybrids), `starter/hf_names/quark.json` (producer), `starter/inspect_safetensors.py`
+(`python3 inspect_safetensors.py REPO_OR_DIR OUT.json [--revision REV] [--checkpoint LOCAL.safetensors]`; `-o OUT.json` also works; a dump written by `fleet/st_stub.py` is a valid source),
+`starter/st_tensors.py` (numpy reader and references for the kernel tests). The inspector prints the checkpoint tensors the map does not use and the vision tensors.
+
+qwen35, per tensor (HF -> internal; "prep" is the load-time conversion bf16 -> f32 of the weight policy, `draft/prep_weights.py`):
+
+| HF tensor | internal | decision |
+|---|---|---|
+| every RMSNorm weight (input / post_attention layernorm, q_norm, k_norm, final norm, MTP norms) | `attn_norm`, `post_attention_norm`, `attn_q_norm`, `attn_k_norm`, `output_norm`, `nextn.*norm` | zero-centred `(1 + w)` (vLLM GemmaRMSNorm): prep `add1` |
+| `linear_attn.norm.weight` | `ssm_norm.weight` | plain gated RMSNorm weight: prep `copy` |
+| `linear_attn.A_log` | `ssm_a` | prep `negexp` (-exp(A_log), f32 `<afn>` exp) |
+| `linear_attn.dt_bias`, `conv1d.weight` [C,1,K] | `ssm_dt.bias`, `ssm_conv1d.weight` [K,C] | prep `copy` (same element order) |
+| value heads of in_proj_qkv V rows, in_proj_z, in_proj_a/b, out_proj columns, A_log, dt_bias, conv1d V channels | the same tensors | HF order is grouped (value head h reads key head h // (HV/HK)); llama.cpp reorders to tiled. Read natively: cfg `gdn.v_order: "grouped"`, `gen_gdn.kh_line()`; no weight is permuted |
+| `self_attn.q_proj` [heads*2*head_dim] | `attn_q` | per head [query, gate]: the same packing as the GGUF (`attn_gate: fused_q`) |
+| `in_proj_qkv` rows [q, k, v] | `attn_qkv` | the same as the GGUF (no qkvz interleave in Qwen3.5) |
+| `mtp.fc`, `mtp.pre_fc_norm_embedding` / `_hidden`, `mtp.norm`, `mtp.layers.0.*` | `blk.L.nextn.eh_proj`, `enorm`, `hnorm`, `shared_head_norm`, `blk.L.*` | bf16 (excluded from quantization), MTP depth 3 as the GGUF card |
+| `embed_tokens`, `lm_head` | `token_embd`, `output` | bf16, untied |
+| rope | `rope_dims` 64 of 256, neox, theta 1e7 | mrope sections only matter for image positions |
+| `model.visual.*` | none | **gap**: the image component is built from a GGUF mmproj; the safetensors tower (27 blocks, bf16) needs its own mapping (wave 2) |
+
+Test: `tests/test_safetensors_source.py`; the dequant of real rows against a scalar reimplementation of vLLM's decode runs when the checkpoint is in the HF cache.
+
