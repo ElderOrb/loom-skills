@@ -1,47 +1,69 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
- "runner": "r9700",
+ "_comment": "q38r9700: 4-stream undrafted doubling profile on R9700",
+ "card": "loom-fun-staging/bartowski-Qwen3.8-27B-loom",
  "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "kit": null,
+ "llamacpp": "b1375",
+ "runner": "r9700",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "name": "q38-c4prof",
    "variants": [
     {
-     "name": "card",
-     "build": {}
-    },
-    {
-     "name": "nodraft",
-     "build": {},
+     "name": "nd",
      "execution": {
       "draft_depth": 0
      }
+    },
+    {
+     "name": "gdn",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:g_gdn"
+     ]
+    },
+    {
+     "name": "attn",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:attention|flash"
+     ]
+    },
+    {
+     "name": "small",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:g_quant_q8|g_row_scale|g_post_add_norm|g_silu_mul|g_split_qgate|g_qk_rope|g_mv_f32|g_embed|g_token"
+     ]
+    },
+    {
+     "name": "head",
+     "execution": {
+      "draft_depth": 0
+     },
+     "double": [
+      "llm_advance:g_head"
+     ]
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
+    "c4:nd",
+    "c4:gdn",
+    "c4:attn",
+    "c4:small",
+    "c4:head",
+    "c4:nd",
+    "c4:gdn",
+    "c4:attn",
+    "c4:small",
+    "c4:head"
    ]
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
