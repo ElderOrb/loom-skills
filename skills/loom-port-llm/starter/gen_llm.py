@@ -5470,10 +5470,11 @@ if __name__ == "__main__":
             assert fmt_of(head_name) in prep_weights.SRC_SUPER and ACT_Q8 and H % 32 == 0, \
                 f"PROPOSE_HEAD_ROWS needs a Q6_K head with int8 activations (head {fmt_of(head_name)}, ACT_Q8={ACT_Q8})"
             PBASE = base_vocab() or V
-            HPREP = {head_name: prep_weights.subset_entry(fmt_of(head_name), "q4_0", PROWS, PBASE, V, H)}
+            PDST = "q6_k" if os.environ.get("PROPOSE_HEAD", "q4_0") == "q6_k" else "q4_0"   # q6_k: the rows kept as they are (no re-rounding)
+            HPREP = {head_name: prep_weights.subset_entry(fmt_of(head_name), PDST, PROWS, PBASE, V, H)}
             PHEAD_ROWS = prep_weights.subset_rows(PROWS, PBASE, V)
             open(os.path.join(out_dir, "head_weights.loom"), "w", newline="\n").write(prep_weights.policy(HPREP, "the proposal head"))
-            gfacts["phead"] = prep_weights.dst_bytes("q4_0", HPREP[head_name][2])
+            gfacts["phead"] = prep_weights.dst_bytes(PDST, HPREP[head_name][2])
             if PHEAD_ROWS[2] < V:
                 gfacts["phead_rows"] = (PHEAD_ROWS[2], PHEAD_ROWS[0], PHEAD_ROWS[1] - PHEAD_ROWS[0])
         if gen_draft.DRAFT["kind"] == "dflash":
@@ -5566,10 +5567,11 @@ if __name__ == "__main__":
                 _rows = PHEAD_ROWS[2] if PHEAD_ROWS else V   # a reduced draft vocabulary has fewer rows
                 _V, _CH = V, CHUNKS
                 V, CHUNKS = _rows, (_rows + 127) // 128
-                COMMON += "".join(head_mv(tg, "q4_0", iq=True, suffix="_p40") for tg in (1, 4, 8, 16))
+                _pf, _ps = ("q6_k", "_pq6") if PHEAD_ROWS and HPREP[head_name][1] == "q6_k" else ("q4_0", "_p40")
+                COMMON += "".join(head_mv(tg, _pf, iq=True, suffix=_ps) for tg in (1, 4, 8, 16))
                 V, CHUNKS = _V, _CH
                 _pm = _re.search(r"command\.program\.def public @llm_" + gen_draft.DRAFT["kind"] + r"_propose\(\).*?\n\}\n", program, _re.S)
-                _pt = _re.sub(r"@(g_head_mv\w*_q8)\[", r"@\1_p40[", _pm.group(0))
+                _pt = _re.sub(r"@(g_head_mv\w*_q8)\[", r"@\1" + _ps + "[", _pm.group(0))
                 if PHEAD_ROWS and PHEAD_ROWS[2] < V:
                     _pt = _pt.replace("@g_head_select[", "@g_head_select_p[")
                 program = program[:_pm.start()] + _pt + program[_pm.end():]
