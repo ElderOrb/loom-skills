@@ -898,6 +898,12 @@ for part in GGUF_PARTS:
             os.link(os.path.realpath(part), link)
         except OSError as e:
             sys.exit(f"cannot link {part} into {link} ({e}): enable Windows Developer Mode, or put the package on the GGUF's drive")
+# The chat dialect a host needs to constrain the model's own tokens (tool-call format, reasoning markers), as
+# llm_config.json names it: model.json is what loom-fetch delivers, so a host reads it from here.
+DIALECT_KEYS = ("call_format", "call_arguments_key", "calls_open", "call_separator", "calls_close",
+                "thinking", "think_open", "think_end")
+dialect = {f"llm.chat.{k}": cfg["chat"][k] for k in DIALECT_KEYS
+           if isinstance(cfg.get("chat", {}).get(k), str)}
 card = {
     "schema_version": 1,
     "model": {"id": model_id, "name": f"{cfg.get('name', 'llm')} (Loom port, GGUF)"},
@@ -907,7 +913,7 @@ card = {
         "libraries": ["program/llm.loom"]}},
     "services": {"chat": {"kind": "text", "version": 1}},
     "variants": {"gguf": {"services": {"chat": {
-        "programs": ["source"], "config": {"llm.card": True, **({"llm.logits": False} if os.environ.get("LLM_LOGITS", "1") != "0" else {})},   # llm.logits: key present = the package supports the logits readback (feature.logits_export)
+        "programs": ["source"], "config": {"llm.card": True, **({"llm.logits": False} if os.environ.get("LLM_LOGITS", "1") != "0" else {}), **dialect},   # llm.logits: key present = the package supports the logits readback (feature.logits_export)
         "parameters": {"model": {"files": [{"path": f"parameter/{os.path.basename(p)}", "format": "gguf"} for p in GGUF_PARTS]}},
         "tokenizers": {"text": "tokenizer.json"}}}}},
     "presets": {"chat": {"service": "chat", "variant": "gguf", "programs": "source", "execution": {
