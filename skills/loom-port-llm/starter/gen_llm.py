@@ -4426,6 +4426,10 @@ def quant_wiring(program):
 
 
 def lin(fmt, x, s, w, wsize, y, k, n, kval, mode="store", width=None):
+    if mode == "swiglu" and fmt in SPLIT:   # no fused kernel for split planes: gate into y, up into %fu (MIXED_FFN allocates it), then silu(gate) * up
+        wa, wb = w
+        return (lin(fmt, x, s, wa, wsize, y, k, n, kval, width=width) + "\n  " + lin(fmt, x, s, wb, wsize, "%fu", k, n, kval, width=width)
+                + f"\n  kernel.launch @g_silu_mul[%t](%t, {n}, {y}, %fu) : [index](index, index, buffer, buffer)")
     USED_GEMM.setdefault(fmt, set()).add(mode)
     return linear(fmt, x, s, w, wsize, y, k, n, kval, mode, width=width)
 
@@ -5173,6 +5177,13 @@ def hf_rename(text):
             names[n + "#scale"] = t["hf_scale"]
     if not names:
         return text
+    # the scale plane of a split-plane weight: a second parameter beside it, <var>_sc, under the internal name "<name>#scale"
+    def scale_line(m):
+        t = TENS.get(m.group(4))
+        if not (t and t["type"] in SPLIT):
+            return m.group(0)
+        return m.group(0) + f'\n{m.group(1)}{m.group(2)}_sc = command.parameter {m.group(3)}, "{m.group(4)}#scale" : view<{int(m.group(5)) // SCALE_DIV[t["type"]]}xi8>'
+    text = _re.sub(r'^([ \t]*)(%\w+) = command\.parameter (%\w+), "([^"]+)" : view<(\d+)xi8>$', scale_line, text, flags=_re.M)
     unmapped = set()
     assert not (gen_draft.enabled() and gen_draft.DRAFT["kind"] in ("dflash", "assist")), \
         "a safetensors target with a separate drafter checkpoint: the drafter's parameter names would collide with the map"
@@ -5335,9 +5346,7 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
         b = f"blk.{i}."
         nm = lambda n: b + n + ".weight"
         sz = lambda n: tensor_bytes(nm(n))
-        par = lambda var, n, ty=None: (f'    %{var}_{i} = command.parameter %weights, "{nm(n)}" : {ty or f"view<{sz(n)}xi8>"}\n'
-                                       + (f'    %{var}_{i}_sc = command.parameter %weights, "{nm(n)}#scale" : view<{sz(n) // SCALE_DIV[fmt_of(nm(n))]}xi8>\n'
-                                          if fmt_of(nm(n)) in SPLIT else ""))
+        par = lambda var, n, ty=None: f'    %{var}_{i} = command.parameter %weights, "{nm(n)}" : {ty or f"view<{sz(n)}xi8>"}\n'
         nq, nqh, qd = ("%nQ", "%nQH", QD) if LH[i] == QH else (f"%nQ{LH[i]}", f"%nQH{LH[i]}", LH[i] * D)
         kind = kind_note or (" (gated delta-net)" if i in RECUR else (" (sliding)" if i in sliding else "") + (" (no RoPE)" if i in nope else ""))
         T = [f"  // ---- layer {i}{kind}\n  scf.if %gemm {{\n    kernel.launch @g_row_scale_f16[%t](%t, %nH, %h, %s_h, %h16) : [index](index, index, buffer, buffer, buffer)\n  }}\n",
@@ -5421,7 +5430,7 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
           T.append(moe_layer(i, b, nm, sz, par))
         else:
           fg, fu = fmt_of(nm("ffn_gate")), fmt_of(nm("ffn_up"))
-          if fg == fu and fg not in SPLIT:
+          if fg == fu:
               T.append("  " + lin(fg, "%h", "%s_h", (f"%w_gate_{i}", f"%w_up_{i}"), sz("ffn_gate"), "%f", "%nH", nff(i), H, mode="swiglu") + "\n")
           else:   # gate and up in different formats (unsloth UD mixes): two projections, then silu(gate) * up
               T.append("  " + lin(fg, "%h", "%s_h", f"%w_gate_{i}", sz("ffn_gate"), "%f", "%nH", nff(i), H) + "\n")
@@ -5638,17 +5647,8 @@ if __name__ == "__main__":
                            env=dict(os.environ, FLASH2_TARGET="llm", FLASH2_OUT=hout, LLM_CONFIG=hcfg))
             parts.append(with_heads(h, lambda: open(hout).read()))
             os.remove(hcfg)
-    SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in program}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
-    if SRC_PREP:
-        import prep_weights
-        entries = {t["hf"]: ("bf16e", "f32_" + t["prep"]["op"], int(math.prod(t["shape"]))) for t in SRC_PREP.values()}
-        assert all(t["prep"]["src"] == "bf16" for t in SRC_PREP.values()), "prepared tensors are bf16 in the checkpoint"
-        parts.append(prep_weights.library({(s_, d_) for s_, d_, _ in entries.values()}))
-        open(os.path.join(out_dir, "weights.loom"), "w", newline="\n").write(
-            prep_weights.policy(entries, "the safetensors checkpoint's bf16 norms, A_log, dt_bias and conv1d"))
     parts.append(program)
     text = "\n".join(parts)
-    text = hf_rename(text)
     if "_attention_flash2_partial\")" in text:   # the blocks a run covers in part: their kernel after each launch
         text = re.sub(r"^( *)kernel\.launch @(\w+)_attention_flash2(_h\d+)?\[(.*)$",
                       r"\g<0>\n\1kernel.launch @\2_attention_flash2_partial\3[\4",
@@ -5666,6 +5666,15 @@ if __name__ == "__main__":
         print("f16o groups:", _nf16o)
     if seg_tokens():
         text = seg_attention(text)
+    SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in text}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
+    if SRC_PREP:
+        import prep_weights
+        entries = {t["hf"]: ("bf16e", "f32_" + t["prep"]["op"], int(math.prod(t["shape"]))) for t in SRC_PREP.values()}
+        assert all(t["prep"]["src"] == "bf16" for t in SRC_PREP.values()), "prepared tensors are bf16 in the checkpoint"
+        text += "\n" + prep_weights.library({(s_, d_) for s_, d_, _ in entries.values()})   # the converters (their stage programs are roots of the weight policy)
+        open(os.path.join(out_dir, "weights.loom"), "w", newline="\n").write(
+            prep_weights.policy(entries, "the safetensors checkpoint's bf16 norms, A_log, dt_bias and conv1d"))
+    text = hf_rename(text)
     out = os.path.join(out_dir, "model.loom")
     open(out, "w", newline="\n").write(text)
     print("wrote", out)
