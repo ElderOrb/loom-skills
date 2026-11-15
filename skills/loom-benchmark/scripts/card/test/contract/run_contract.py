@@ -5,7 +5,8 @@ website is built from its output, so a card schema change that it cannot read fr
 summarize() on the golden info.json files of the card tests (loom-card/3 expected cards, loom-card/2 legacy cards) and
 checks what the site relies on:
   - every card summarizes (no exception) and carries the keys the site reads;
-  - the retired needle gates do not appear;
+  - the retired needle and gufo gates do not appear; a loom-card/3 card has the logits gate (n/a without llm.logits) and a
+    remeasure entry (null or its block's result);
   - a loom-card/3 card's top-level performance is its primary GPU's (strix-halo when it has results), the other GPUs
     sit under "devices", and a Strix-only/legacy card has no results lost;
   - a loom-card/2 card and the same card as loom-card/3 summarize to the same top level.
@@ -77,12 +78,15 @@ for name, path, pkg in CARDS:
     out[name] = s
     ok = KEYS <= set(s) and PERF <= set(s["performance"]) and s["schema"] == S.SCHEMA
     check(ok, f"{name}: {info['schema']} summarizes with the keys the site reads")
-    check(not {"needle", "needle_full"} & set(s["gates"]["status"]), f"{name}: no retired needle gates")
+    check(not {"needle", "needle_full", "gufo"} & set(s["gates"]["status"]), f"{name}: no retired needle or gufo gates")
     check(any(m["loom"] is not None for m in s["performance"]["metrics"].values()) or
           any(m["loom"] is not None for m in s["performance"]["devlab"]["metrics"].values()),
           f"{name}: the top-level performance has measured values")
     if info["schema"] == "loom-card/3":
         devs = info["devices"]
+        check("logits" in s["gates"]["status"] and "remeasure" in s, f"{name}: logits gate and remeasure entry present")
+        rm = devs[next(g for g in ("strix-halo", "radeon-r9700") if has_results(devs.get(g)))].get("remeasure")
+        check((s["remeasure"] or {}).get("result") == (rm or {}).get("result"), f"{name}: remeasure result is the card's")
         want = next(g for g in ("strix-halo", "radeon-r9700") if has_results(devs.get(g)))
         check(s.get("primary_device") == want, f"{name}: primary device is {want}")
         others = [g for g in devs if g != want]
@@ -92,11 +96,15 @@ for name, path, pkg in CARDS:
             check((d.get("performance") is not None) == has_results(devs[g]) and (has_results(devs[g]) or d.get("state")),
                   f"{name}: {g} lists its results or its state")
     else:
-        check("devices" not in s, f"{name}: a loom-card/2 summary has no devices key")
+        check(not {"devices", "remeasure"} & set(s) and ("logits" in s["gates"]["status"]) == ("logits" in info["gates"]),
+              f"{name}: a loom-card/2 summary has no devices or remeasure keys and a logits gate only when the card has one")
 
 for legacy, current in (("legacy/d1", "d1"), ("legacy/flint", "flint")):
     if legacy in out and current in out:
-        a, b = out[legacy], {k: v for k, v in out[current].items() if k not in ("primary_device", "devices")}
+        a, b = out[legacy], {k: v for k, v in out[current].items() if k not in ("primary_device", "devices", "remeasure")}
+        for x in (a, b):   # the logits gate exists only for loom-card/3 (n/a here: no package under test declares llm.logits)
+            x["gates"] = {"summary": x["gates"]["summary"], "status": {k: v for k, v in x["gates"]["status"].items() if k != "logits"}}
+        a["gates"]["summary"] = b["gates"]["summary"] = None
         check(a == b, f"{legacy} (loom-card/2) and {current} (loom-card/3) summarize to the same top level")
 if failures:
     sys.exit(f"{len(failures)} contract failure(s)")
