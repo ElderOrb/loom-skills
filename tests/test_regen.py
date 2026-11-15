@@ -52,7 +52,7 @@ class Base(unittest.TestCase):
 
     def plan(self, *args, slugs=(SLUG,), device="radeon-r9700"):
         with mock.patch.object(regen, "sh", self.gen), mock.patch.object(regen, "hf_head", lambda repo: "f" * 40), \
-                contextlib.redirect_stdout(io.StringIO()):
+                mock.patch.object(regen, "default_base", lambda: "refactor"), contextlib.redirect_stdout(io.StringIO()):
             regen.main(["plan", "--device", device, "--state", self.state, *args, *slugs])
         return regen.State(self.state)
 
@@ -138,6 +138,42 @@ class SubmitPollTest(Base):
             regen.main(["submit", self.state, "--dry-run"])
         self.assertIn("devlab-perf", buf.getvalue())
         self.assertEqual(regen.State(self.state).jobs[JOB]["stage"], "planned")
+
+    def test_base_is_stored_and_used_for_branch_point_and_pr_base(self):
+        self.plan("--base", "mxfp4st")
+        self.assertEqual(regen.State(self.state).d["opts"]["base"], "mxfp4st")
+        seen = []
+
+        def api(method, path, fields=None, jq=None):
+            seen.append((method, path.split("repos/loom-fun/loom-skills/")[-1], dict(fields or {})))
+            return {".object.sha": "a" * 40, ".sha": "b" * 40, ".number": "77"}.get(jq)
+        buf = io.StringIO()
+        with mock.patch.object(regen, "gh_api", api), contextlib.redirect_stdout(buf):
+            regen.main(["submit", self.state])
+        self.assertEqual(seen[0][:2], ("GET", "git/ref/heads/mxfp4st"))
+        self.assertEqual([f["base"] for m, p, f in seen if p == "pulls"], ["mxfp4st"])
+        with mock.patch.object(regen, "gh_api", side_effect=AssertionError("network")), contextlib.redirect_stdout(buf):
+            self.plan("--base", "mxfp4st", "--force")
+            regen.main(["submit", self.state, "--dry-run"])
+        self.assertIn("from mxfp4st", buf.getvalue())
+
+    def test_plan_without_base_uses_the_upstream_branch_or_refuses(self):
+        run = lambda out, rc: subprocess.CompletedProcess([], rc, out, "")
+        with mock.patch.object(regen.subprocess, "run", lambda *a, **k: run("origin/mxfp4st\n", 0)):
+            self.assertEqual(regen.default_base(), "mxfp4st")
+        with mock.patch.object(regen.subprocess, "run", lambda *a, **k: run("", 128)), self.assertRaises(SystemExit):
+            regen.default_base()
+
+    def test_state_planned_before_base_existed_submits_from_refactor(self):
+        self.plan()
+        st = regen.State(self.state)
+        del st.d["opts"]["base"]
+        st.save()
+        seen = []
+        with mock.patch.object(regen, "gh_api", lambda m, p, f=None, jq=None: seen.append(p) or {".object.sha": "a", ".sha": "b", ".number": "7"}.get(jq)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            regen.main(["submit", self.state])
+        self.assertTrue(seen[0].endswith("heads/refactor"))
 
     def test_submit_creates_branch_file_pr_label(self):
         self.plan()
