@@ -34,7 +34,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False, kmult=1, rf=4, a_pf=False):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False, kmult=1, rf=4, a_pf=False, nt=256):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -43,18 +43,22 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
     a_pf (with a_direct, not dbuf): the next step's activation fragments are loaded during this step (carried in registers).
     a_direct: the activation fragments are loaded from global memory straight into registers (no LDS staging of the activations)."""
     two_w = mode == "swiglu"
-    NT = 256
+    NT = nt                       # threads = waves * 32; the workgroup tile has NT rows (nt = 128 needs a_direct)
+    BM = NT
+    assert nt == 256 or a_direct
     TW = 128                      # weight rows staged per tile (swiglu: 64 gate + 64 up)
     TN = 64 if two_w else 128     # output columns per tile
     RF = rf                       # 16-row A fragments per wave (rf = 4: 64 rows); the accumulators are rf * cfr * (1 or 2 weights) = 16 fragments
     cfr = (8 if two_w else 16) // RF   # 16-column B fragments per wave and weight
-    WR = 256 // (16 * RF)         # waves stacked along the rows, WC = 8 // WR along the columns
-    WC = 8 // WR
-    assert RF in (2, 4, 8) and WR * WC == 8 and WC * 16 * cfr == TN
+    NWV = NT // 32
+    WR = BM // (16 * RF)          # waves stacked along the rows, WC = NWV // WR along the columns
+    WC = NWV // WR
+    HALVES = NT // TW             # staging threads per weight row
+    assert RF in (2, 4, 8) and WR * WC == NWV and WC * 16 * cfr == TN and HALVES in (1, 2)
     wave_cols = 16 * cfr
     KS = 128 * kmult              # K per step: 4 * kmult 32-value blocks (kmult > 1 needs a_direct)
     PX = KS + 16                  # LDS pitch (bytes) of both stages: KS data + 16 pad
-    NB = 2 * kmult                # blocks one staging thread decodes per step (half of a row's step)
+    NB = (KS // 32) // HALVES     # blocks one staging thread decodes per step (a half of a row's step; the whole step with 128 threads)
     assert kmult == 1 or a_direct
     name = f"{prefix}_gemm_mxfp4s_{mode}_f8_m256_rdna4"
     weights = ["w", "w2"] if two_w else ["w"]
@@ -63,14 +67,14 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
     A = L.append
     A(f'''kernel.def target(@rdna4) export("{name}") @{name}(%rows: index, %n: index) {{
   %c1 = index.constant 1 : index
-  %c256 = index.constant 256 : index
+  %cbm = index.constant {BM} : index
   %cnt = index.constant {NT} : index
   %tn = index.constant {TN} : index
-  %row_tiles = index.div %rows, %c256 : index
+  %row_tiles = index.div %rows, %cbm : index
   %out_tiles = index.div %n, %tn : index
   kernel.launch.config workgroups(%row_tiles, %out_tiles, %c1) workgroup_size(%cnt, %c1, %c1) : index
 }} launch(%rows_arg: index, %k_arg: index, %n_arg: index, %x: buffer, %scales: buffer, {", ".join(f"%{w}: buffer, %{w}s: buffer" for w in weights)}, %y: buffer) {{
-  %rows = index.assume %rows_arg [range(%rows_arg, 256, 8192), multiple_of(%rows_arg, 256)] : index
+  %rows = index.assume %rows_arg [range(%rows_arg, {BM}, 8192), multiple_of(%rows_arg, {BM})] : index
   %k = index.assume %k_arg [range(%k_arg, {KS}, 65536), multiple_of(%k_arg, {KS})] : index
   %n = index.assume %n_arg [range(%n_arg, {TN}, 262144), multiple_of(%n_arg, {TN})] : index
   %origin = index.constant 0 : offset
@@ -91,9 +95,9 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   %cks32 = index.constant {KS // 32} : index
   %cnb = index.constant {NB} : index
   %c128 = index.constant {KS} : index
-  %c256 = index.constant 256 : index
+  %cbm = index.constant {BM} : index
   %tn = index.constant {TN} : index
-  %row_tile_count = index.div %rows, %c256 : index
+  %row_tile_count = index.div %rows, %cbm : index
   %out_tile_count = index.div %n, %tn : index
   %row_group_id = kernel.workgroup.id<x> : index
   %out_group_id = kernel.workgroup.id<y> : index
@@ -108,13 +112,13 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   %wave_row_group = index.div %bounded_subgroup, %cwc : index
   %wave_col_group = index.rem %bounded_subgroup, %cwc : index
   %wave_row_value = index.mul %wave_row_group, %cwr : index
-  %wave_row = index.assume %wave_row_value [range(%wave_row_value, 0, {256 - 16 * RF})] : index''')
+  %wave_row = index.assume %wave_row_value [range(%wave_row_value, 0, {BM - 16 * RF})] : index''')
     for r in range(1, RF):
         A(f"  %wave_row{r}_c = index.constant {16 * r} : index\n  %wave_row{r} = index.add %wave_row, %wave_row{r}_c : index")
     A(f'''  %wave_cols = index.constant {wave_cols} : index
   %wave_col_value = index.mul %wave_col_group, %wave_cols : index
   %wave_col = index.assume %wave_col_value [range(%wave_col_value, 0, {TN - wave_cols})] : index
-  %row_origin = index.mul %row_group, %c256 : index
+  %row_origin = index.mul %row_group, %cbm : index
   %out_origin = index.mul %out_group, %tn : index
   %blocks = index.div %k, %c32 : index
   %k_half = index.div %k, %c2 : index
@@ -123,7 +127,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   %k16 = index.div %k, %c16 : index
   %x_view = buffer.view %x[%origin] : buffer -> view<[%rows]x[%k16]x16xi8>
   %s_view = buffer.view %scales[%origin] : buffer -> view<[%rows]x2xf32>
-  %x_bytes = index.constant {16384 if a_direct else 256 * PX} : offset
+  %x_bytes = index.constant {BM * 64 if a_direct else 256 * PX} : offset
   %x_stage = buffer.alloca<workgroup> align(16) %x_bytes : buffer
 {"" if a_direct else f"  %x_stage_st = buffer.view %x_stage[%origin] : buffer -> view<256x{PX}xi8>"}
   %w_bytes = index.constant {TW * PX} : offset
@@ -142,8 +146,9 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   %x_row_value = index.add %row_origin, %workitem : index
   %x_row = index.assume %x_row_value [lt(%x_row_value, %rows)] : index
   // W staging: thread t decodes two MXFP4 blocks (64 weights) of weight row t/2: columns (t%2) * 64
-  %stage_row = index.div %workitem, %c2 : index
-  %stage_half = index.rem %workitem, %c2 : index
+  %chalves = index.constant {HALVES} : index
+  %stage_row = index.div %workitem, %chalves : index
+  %stage_half = index.rem %workitem, %chalves : index
   %stage_col = index.mul %stage_half, %cks2 : index''')
     if two_w:
         A(f'''  %half_tw = index.constant {TN} : index
@@ -337,19 +342,19 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
     A("    scf.yield " + ", ".join(cur[a] for a in accs) + ", " + ", ".join(c[2] for c in carried) + " : " +
       ", ".join("vector<8xf32>" for _ in accs) + ", " + ", ".join(c[3] for c in carried) + "\n  }")
     # --- epilogue: scale rows by scales[row, 1] (through LDS: the lane holding result row i needs row i's value)
-    A(f'''  %inv_view = buffer.view %x_stage[%origin] : buffer -> view<256x16xf32>
+    A(f'''  %inv_view = buffer.view %x_stage[%origin] : buffer -> view<{BM}x16xf32>
   %inv_row_value = index.add %row_origin, %workitem : index
   %inv_row = index.assume %inv_row_value [lt(%inv_row_value, %rows)] : index
   %inverse = view.load %s_view[%inv_row, %c1] : view<[%rows]x2xf32> -> f32
   %inverse16 = vector.splat %inverse : vector<16xf32>
-  vector.store %inverse16, %inv_view[%workitem, %c0] : vector<16xf32>, view<256x16xf32>
+  vector.store %inverse16, %inv_view[%workitem, %c0] : vector<16xf32>, view<{BM}x16xf32>
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)''')
     for r in range(RF):
-        A(f"  %inv{r} = vector.fragment.load<result> %inv_view[{rowv[r]}, %c0] shape [%c16, %c16] : view<256x16xf32> -> vector<8xf32>")
+        A(f"  %inv{r} = vector.fragment.load<result> %inv_view[{rowv[r]}, %c0] shape [%c16, %c16] : view<{BM}x16xf32> -> vector<8xf32>")
     A(f'''  %y_layout = encoding.layout.strided [%n, %c1] : encoding<layout>
   %tile_first = index.madd %row_origin, %n, %out_origin : index
   %tile_offset = index.scale %tile_first, %four : index, offset -> offset
-  %y_view = buffer.view %y[%tile_offset] : buffer -> view<256x{TN}xf32, %y_layout>''')
+  %y_view = buffer.view %y[%tile_offset] : buffer -> view<{BM}x{TN}xf32, %y_layout>''')
     for r in range(RF):
         for c in range(cfr):
             row = rowv[r]
@@ -361,7 +366,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   %v{r}{c} = vector.mulf %sg{r}{c}, %u{r}{c} : vector<8xf32>''')
             else:
                 A(f"  %v{r}{c}_s = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>\n  %v{r}{c} = vector.addf %v{r}{c}_s, %zero8 : vector<8xf32>")
-            A(f"  vector.fragment.store<result> %v{r}{c}, %y_view[{row}, %oc{r}{c}] shape [%c16, %c16] : vector<8xf32>, view<256x{TN}xf32, %y_layout>")
+            A(f"  vector.fragment.store<result> %v{r}{c}, %y_view[{row}, %oc{r}{c}] shape [%c16, %c16] : vector<8xf32>, view<{BM}x{TN}xf32, %y_layout>")
     A("  kernel.return\n}\n")
     return "\n".join(L)
 
