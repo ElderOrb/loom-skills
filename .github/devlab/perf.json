@@ -5,20 +5,22 @@
  "llama_spec": "matched",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "name": "quark75-qwen3-8-27b-mxfp4-loom",
+   "card": "loom-fun-staging/quark75-Qwen3.8-27B-MXFP4-loom",
+   "require_preset_r9700": true,
    "kit": null,
    "llamacpp": "b1375",
    "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "memory_bytes_r9700": 34000000000,
+   "served_context": 134144,
    "variants": [
     {
      "name": "card",
-     "build": {}
+     "context": 134144
     },
     {
      "name": "nodraft",
-     "build": {},
+     "context": 134144,
      "execution": {
       "draft_depth": 0
      }
@@ -28,8 +30,12 @@
     "func:card",
     "ktest:card",
     "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
+    "perf:card:1",
+    "perf:card:1",
+    "perf:card:1",
+    "perf:card:1:long",
+    "perf:card:1:long",
+    "perf:card:1:long",
     "c4:nodraft",
     "llama@rocm.np1:3",
     "llama@rocm.np1:3:long",
@@ -40,7 +46,7 @@
    ]
   }
  ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+ "card": "loom-fun-staging/quark75-Qwen3.8-27B-MXFP4-loom",
  "kit": null,
  "llamacpp": "b1375",
  "llamacpp_vulkan": "b12211"
