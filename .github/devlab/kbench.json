@@ -65,14 +65,18 @@
         "nomma",
         "nodq",
         "nobar",
-        "nox"
+        "nox",
+        "nofrag",
+        "noload"
       ],
       "files": [
         "bench.loom",
         "bench_nomma.loom",
         "bench_nodq.loom",
         "bench_nobar.loom",
-        "bench_nox.loom"
+        "bench_nox.loom",
+        "bench_nofrag.loom",
+        "bench_noload.loom"
       ],
       "tests": [
         "test.loom"

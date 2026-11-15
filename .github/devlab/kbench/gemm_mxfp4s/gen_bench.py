@@ -37,6 +37,18 @@ def _nodq(t, mode):
     return t.replace("  %origin = index.constant 0 : offset\n", "  %origin = index.constant 0 : offset\n  %zero16 = vector.constant 0 : vector<16xi8>\n  %zero32 = vector.constant 0 : vector<32xi8>\n", 1)
 
 
+@_ablation("nofrag")     # LDS fragment reads of the first K substep only (every substep reuses them): ~1/8 of the LDS read traffic
+def _nofrag(t, mode):
+    return re.sub(r"(vector\.fragment\.load<(?:lhs|rhs)> %\w+\[%?\w+, )%fk\d+\]", r"\1%fk0]", t)
+
+
+@_ablation("noload")     # no next-step global loads of activations and weights: the carried registers are reused
+def _noload(t, mode):
+    t = re.sub(r"^(\s*)%xrn(\d) = vector\.load %x_view[^\n]*$", r"\1%xrn\2 = vector.andi %xrp\2, %xrp\2 : vector<16xi8>", t, flags=re.M)
+    t = re.sub(r"^(\s*)%wq(\d)n = vector\.load [^\n]*-> vector<4xi32>$", r"\1%wq\2n = vector.andi %wq\2p, %wq\2p : vector<4xi32>", t, flags=re.M)
+    return t
+
+
 @_ablation("nobar")      # no workgroup barriers (wrong results)
 def _nobar(t, mode):
     return re.sub(r"^\s*kernel\.barrier<workgroup>[^\n]*\n", "", t, flags=re.M)
@@ -78,6 +90,56 @@ def build(variant=""):
 check.benchmark<@{kn}_case> @{kn}_bm
 """)
     return out
+
+
+PEAK8 = """kernel.def target(@rdna4) export("k_peak8") @k_peak8() {
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  %groups = index.constant 512 : index
+  kernel.launch.config workgroups(%groups, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%y_arg: buffer) {
+  %origin = index.constant 0 : offset
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c16 = index.constant 16 : index
+  %c256 = index.constant 256 : index
+  %lane_id = kernel.workitem.id<x> : index
+  %lane = index.assume %lane_id [range(%lane_id, 0, 255)] : index
+  %yv = buffer.view %y_arg[%origin] : buffer -> view<256x8xf32>
+  %stage_bytes = index.constant 8192 : offset
+  %stage = buffer.alloca<workgroup> align(16) %stage_bytes : buffer
+  %a_schema = encoding.define #encoding.operand<element_format=f8e4m3, payload_elements=8, payload_registers=2> : encoding<schema>
+  %b_schema = encoding.define #encoding.operand<element_format=f8e5m2, payload_elements=8, payload_registers=2> : encoding<schema>
+  %a_layout = encoding.layout.dense : encoding<layout>
+  %b_layout = encoding.layout.strided [1, 64] : encoding<layout>
+  %a_storage = encoding.define #encoding.storage {layout = %a_layout : encoding<layout>, schema = %a_schema : encoding<schema>} : encoding<storage>
+  %b_storage = encoding.define #encoding.storage {layout = %b_layout : encoding<layout>, schema = %b_schema : encoding<schema>} : encoding<storage>
+  %a_view = buffer.view %stage[%origin] : buffer -> view<64x64xf8E4M3, %a_storage>
+  %b_view = buffer.view %stage[%origin] : buffer -> view<64x64xf8E5M2, %b_storage>
+  %lhs = vector.fragment.load<lhs> %a_view[%c0, %c0] shape [%c16, %c16] : view<64x64xf8E4M3, %a_storage> -> vector<2xi32>
+  %rhs = vector.fragment.load<rhs> %b_view[%c0, %c0] shape [%c16, %c16] : view<64x64xf8E5M2, %b_storage> -> vector<2xi32>
+  %zero = vector.constant 0.0 : vector<8xf32>
+  %init = vector.fragment<init> %zero shape [%c16, %c16] : vector<8xf32>
+  %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7 = scf.for %i = [%c0 to %c256 step %c1](%a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
+""" + "".join(f"    %n{i} = vector.mma %lhs, %rhs, %a{i} : vector<2xi32>, vector<2xi32>, vector<8xf32>\n" for i in range(8)) + """    scf.yield %n0, %n1, %n2, %n3, %n4, %n5, %n6, %n7 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
+  }
+  %s01 = vector.addf %r0, %r1 : vector<8xf32>
+  %s23 = vector.addf %r2, %r3 : vector<8xf32>
+  %s45 = vector.addf %r4, %r5 : vector<8xf32>
+  %s67 = vector.addf %r6, %r7 : vector<8xf32>
+  %s03 = vector.addf %s01, %s23 : vector<8xf32>
+  %s47 = vector.addf %s45, %s67 : vector<8xf32>
+  %sum = vector.addf %s03, %s47 : vector<8xf32>
+  vector.store %sum, %yv[%lane, %c0] : vector<8xf32>, view<256x8xf32>
+  kernel.return
+}
+check.case public @k_peak8_case {
+  %y = check.generate.fill value(0.0) : tensor<256x8xf32>
+  kernel.launch @k_peak8[](%y) : [](tensor<256x8xf32>)
+  check.return
+}
+check.benchmark<@k_peak8_case> @k_peak8_bm
+"""   # 4096 waves x 256 iterations x 8 WMMA of 8192 flop = 68.7 TFLOP: the fp8 WMMA ceiling of this runner (register-only chains)
 
 
 # -- correctness cases --------------------------------------------------------------------------------------------------
@@ -160,5 +222,7 @@ if __name__ == "__main__" and len(sys.argv) > 2:
     for v in (sys.argv[3:] or ["base"]):
         if v != "base" and v not in VARIANTS: raise SystemExit("unknown variant " + v)
         v = "" if v == "base" else v
-        open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)))
-    open(os.path.join(d, "test.loom"), "w").write(HEAD + "\n".join(tests(d)))
+        open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)) + ("\n" + PEAK8 if not v else ""))
+    # hrx-loom 0.1.0: float comparison is check.expect.approximate with the actual and expected types (as make_kernel_tests.py does)
+    text = re.sub(r"check\.expect\.close (actual\(.*\)) : (.*)$", r"check.expect.approximate \1 : \2, \2", HEAD + "\n".join(tests(d)), flags=re.M)
+    open(os.path.join(d, "test.loom"), "w").write(text)
