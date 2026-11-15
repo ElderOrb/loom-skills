@@ -40,6 +40,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "skills", "loom-benchmark", "scripts", "card"))
 import card_lib  # noqa: E402
+import matched_spec  # noqa: E402
 
 registry = card_lib.registry
 
@@ -165,8 +166,11 @@ def main(argv=None, device=None, tool="device_jobs.py"):
         llama = [] if st is not None else [f"llama@rocm.np1:{n}", f"llama@rocm.np1:{n}:long", "llamac4@rocm.nodraft",
                                            f"llama@vulkan.np1:{n}", f"llama@vulkan.np1:{n}:long", "llamac4@vulkan.perslot.nodraft"]
         gates = [f"gates:card:{a.gates}"] if a.gates and (st is None or st) else []
+        if st:   # vLLM ROCm is the baseline engine of a safetensors card, where the reference engine's install helper exists: same runner, out of the box
+            llama = [f"vllm:{n}", f"vllm:{n}:long", f"vllmc4:{n}"]
         jobs.append({
             **({"llama_kv_rocm": jf["llama_kv_rocm"]} if "llama_kv_rocm" in jf and st is None else {}),
+            **({"vllm_spec": spec} if st and (spec := matched_spec.vllm_spec(f"loom-fun/{slug}")) else {}),
             "name": slug.lower().replace(".", "-")[:40], **({"repeat_rows": rr} if rr > 1 else {}),
             "card": f"{a.card_org}/{slug}", **({f"require_preset_{K}": True} if preset else {}), "kit": m["kit"], **base,
             f"memory_bytes_{K}": jf[f"memory_bytes_{K}"], **({"served_context": ctx} if ctx else {}),

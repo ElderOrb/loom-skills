@@ -660,7 +660,8 @@
   "evidence": "safetensors header: mtp.fc, mtp.layers.0.*, mtp.norm, mtp.pre_fc_norm_* (bf16); text_config.mtp_num_hidden_layers=1",
   "llama_spec": "",
   "llama_n_max": null,
-  "nmax_src": "no llama.cpp baseline: llama.cpp cannot read the safetensors checkpoint",
-  "baseline_engine": "none"
+  "nmax_src": "no llama.cpp baseline: llama.cpp cannot read the safetensors checkpoint; the baseline engine is vLLM ROCm (vllm_spec, depth 3 as Loom's)",
+  "baseline_engine": "none",
+  "vllm_spec": "{\"method\": \"mtp\", \"num_speculative_tokens\": 3}"
  }
 }
