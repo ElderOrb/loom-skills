@@ -59,7 +59,7 @@ def _nox(t, mode):
     return re.sub(r"^\s*vector\.store %cr_x\d, %x_stage_st[^\n]*\n", "", t, flags=re.M)
 
 
-GEN = {"adirect": {"a_direct": True}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}}   # variants that are generator parameters (the levers), not text ablations
+GEN = {"adirect": {"a_direct": True}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}, "adr8": {"a_direct": True, "rf": 8}, "adr2": {"a_direct": True, "rf": 2}}   # variants that are generator parameters (the levers), not text ablations
 
 
 def kernel(mode, kn, variant="", order="pairs"):

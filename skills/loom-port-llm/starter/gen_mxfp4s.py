@@ -34,7 +34,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False, kmult=1):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=False, kmult=1, rf=4):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -45,8 +45,11 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
     NT = 256
     TW = 128                      # weight rows staged per tile (swiglu: 64 gate + 64 up)
     TN = 64 if two_w else 128     # output columns per tile
-    cfr = 2 if two_w else 4       # 16-column B fragments per wave and weight
-    RF = 4                        # 16-row A fragments per wave (64 rows)
+    RF = rf                       # 16-row A fragments per wave (rf = 4: 64 rows); the accumulators are rf * cfr * (1 or 2 weights) = 16 fragments
+    cfr = (8 if two_w else 16) // RF   # 16-column B fragments per wave and weight
+    WR = 256 // (16 * RF)         # waves stacked along the rows, WC = 8 // WR along the columns
+    WC = 8 // WR
+    assert RF in (2, 4, 8) and WR * WC == 8 and WC * 16 * cfr == TN
     wave_cols = 16 * cfr
     KS = 128 * kmult              # K per step: 4 * kmult 32-value blocks (kmult > 1 needs a_direct)
     PX = KS + 16                  # LDS pitch (bytes) of both stages: KS data + 16 pad
@@ -99,10 +102,12 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=False, dbuf=Fa
   %workitem = index.assume %workitem_id [range(%workitem_id, 0, {NT - 1})] : index
   %subgroup = kernel.subgroup.id : index
   %bounded_subgroup = index.assume %subgroup [range(%subgroup, 0, {NT // 32 - 1})] : index
-  %wave_row_group = index.div %bounded_subgroup, %c2 : index
-  %wave_col_group = index.rem %bounded_subgroup, %c2 : index
-  %wave_row_value = index.mul %wave_row_group, %c64 : index
-  %wave_row = index.assume %wave_row_value [range(%wave_row_value, 0, 192)] : index''')
+  %cwc = index.constant {WC} : index
+  %cwr = index.constant {16 * RF} : index
+  %wave_row_group = index.div %bounded_subgroup, %cwc : index
+  %wave_col_group = index.rem %bounded_subgroup, %cwc : index
+  %wave_row_value = index.mul %wave_row_group, %cwr : index
+  %wave_row = index.assume %wave_row_value [range(%wave_row_value, 0, {256 - 16 * RF})] : index''')
     for r in range(1, RF):
         A(f"  %wave_row{r}_c = index.constant {16 * r} : index\n  %wave_row{r} = index.add %wave_row, %wave_row{r}_c : index")
     A(f'''  %wave_cols = index.constant {wave_cols} : index
