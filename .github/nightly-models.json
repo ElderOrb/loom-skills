@@ -533,6 +533,18 @@
     "draft",
     "thinking-toggle"
    ]
+  },
+  {
+   "repo": "loom-fun/quark75-Qwen3.8-27B-MXFP4-loom",
+   "slug": "qwen3.8-27b-mxfp4",
+   "memory_bytes": 49000000000,
+   "kit": null,
+   "llamacpp": "b1374",
+   "features": [
+    "vision",
+    "draft",
+    "thinking-toggle"
+   ]
   }
  ]
 }

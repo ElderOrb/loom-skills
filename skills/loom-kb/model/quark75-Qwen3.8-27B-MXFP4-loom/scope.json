@@ -1,0 +1,22 @@
+{
+ "scope": "model/quark75-Qwen3.8-27B-MXFP4-loom",
+ "match": {
+  "slug": [
+   "quark75-Qwen3.8-27B-MXFP4-loom"
+  ]
+ },
+ "owner": "kb",
+ "choices": [
+  {
+   "when": {
+    "devices": [
+     "radeon-r9700"
+    ]
+   },
+   "set": {
+    "exec.prefill_capacity": 1024
+   },
+   "evidence": "same R9700 serving setting as the bartowski Q4_K_M package of the same model (prefill_capacity 1024, run 43745471701 profile); the MXFP4 package keeps it until measured otherwise"
+  }
+ ]
+}

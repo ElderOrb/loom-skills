@@ -1043,6 +1043,42 @@
     }
    }
   },
+  "quark75-Qwen3.8-27B-MXFP4-loom": {
+   "staging": {
+    "repo": "loom-fun-staging/quark75-Qwen3.8-27B-MXFP4-loom",
+    "revision": "cc16ef6729e1884f888386fe6bd728d3fd2dff32"
+   },
+   "model_id": "qwen3.8-27b-mxfp4",
+   "kit": null,
+   "arch": "qwen35",
+   "build": {
+    "preset": "chat",
+    "context": 262144,
+    "pool": 327680,
+    "prefill": 1024,
+    "rows": 4,
+    "max_tokens": 4096,
+    "draft_depth": 3
+   },
+   "files": {
+    "Qwen3.8-27B-MXFP4.gguf": {
+     "origin": "checkpoint",
+     "repo": "quark75/Qwen3.8-27B-MXFP4-GGUF",
+     "revision": "b60178e1a707c207b7888af2fee6e209773316a7",
+     "path": "Qwen3.8-27B-MXFP4.gguf",
+     "size": 16872625408,
+     "dump": "quark75-Qwen3.8-27B-MXFP4-loom/gguf/Qwen3.8-27B-MXFP4.gguf.json.gz"
+    },
+    "mmproj-Qwen3.8-27B-f16.gguf": {
+     "origin": "vision",
+     "repo": "bartowski/Qwen3.8-27B-GGUF",
+     "revision": "87410e7b9a5c21e6ca70c0c9cc5237de909fe621",
+     "path": "mmproj-Qwen3.8-27B-f16.gguf",
+     "size": 927607008,
+     "dump": "quark75-Qwen3.8-27B-MXFP4-loom/gguf/mmproj-Qwen3.8-27B-f16.gguf.json.gz"
+    }
+   }
+  },
   "rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom": {
    "staging": {
     "repo": "loom-fun-staging/rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom",

@@ -371,6 +371,18 @@
   "n_exp": 0
  },
  {
+  "slug": "quark75-Qwen3.8-27B-MXFP4-loom",
+  "w": 22607109963,
+  "kv": 18253611008,
+  "kv32": 2281701376,
+  "kvpp": 69632,
+  "ctx": 262144,
+  "mem": 49000000000,
+  "need": 42860720971.0,
+  "verdict": "fits (reduced ctx)",
+  "n_exp": 0
+ },
+ {
   "slug": "rippertnt-HyperCLOVAX-SEED-Text-Instruct-1.5B-loom",
   "w": 2201329760,
   "kv": 12884901888,

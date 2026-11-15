@@ -648,5 +648,18 @@
   "llama_spec": "--spec-type draft-mtp --spec-draft-model {hf:unsloth/Qwen3.8-Flash-Next-GGUF/mtp-Qwen3.8-Flash-Next-Q8_0.gguf} -ngl 99",
   "llama_n_max": null,
   "nmax_src": "llama.cpp default"
+ },
+ "loom-fun/quark75-Qwen3.8-27B-MXFP4-loom": {
+  "card": "loom-fun/quark75-Qwen3.8-27B-MXFP4-loom",
+  "live_kind": "mtp",
+  "live_depth": 3,
+  "choice": "mtp",
+  "provenance": [
+   "https://huggingface.co/quark75/Qwen3.8-27B-MXFP4-GGUF"
+  ],
+  "evidence": "qwen35.nextn_predict_layers=1, 4 nextn tensors (the blk.64.nextn.* tensors of the MXFP4 GGUF; README: --spec-type draft-mtp, ~82% acceptance)",
+  "llama_spec": "--spec-type draft-mtp",
+  "llama_n_max": null,
+  "nmax_src": "llama.cpp default"
  }
 }
