@@ -100,8 +100,7 @@ A change can sit in two classes (a pool-size change is card schema *and* program
 |---|---|
 | `"${LOOM_SKILL_DIR}/scripts/sweep.py" --sdk VENV FLEET_DIR [--json OUT] [--no-link]` | version-agnostic: `loom-opt` parse of every program file and `loom-link` link of every variant/service of every package (a fleet dir or one package), the first-error-class histogram, JSON out. Run it with the old venv as control and the new venv as the test |
 | `"${LOOM_SKILL_DIR}/scripts/rewrite_v010_v020.py" [--check] [--json OUT] [--no-widen-pool] [--py] PATH...` | the v0.1.0 to v0.2.0 source migration on a file, package or tree: `vector.constant` to `splati`/`splatf` by element type, `command.program.*` to `command.*`, the `publish_epoch` control-state argument, the weights-policy import key range, `pool_capacity` out of cards, the KV pool bounds, the one-token conv guard, the vision finite-batch ABI; idempotent; prints `manual: FILE:LINE: ... section N` for what needs a hand edit |
-
-| `"${LOOM_SKILL_DIR}/scripts/tag_org.py" --org ORG --tag TAG [--message M] [--dry-run]` | tags the head of every `*-loom` repo of the org (skips a repo that has the tag, reports per repo whether the tag's commit is the head); used before promotion |
+| `"${LOOM_SKILL_DIR}/scripts/tag_org.py" --org ORG --tag vX.Y.Z [--message M] [--only REPO...] [--force] [--dry-run]` | tags the head of every `*-loom` repo of the org with the OUTGOING SDK version; skips a repo that has the tag; refuses a repo whose head is not on that SDK (its `llm_config.json` pin) unless `--force`; exit 1 if any repo failed, was refused, or has the tag on another commit; used before promotion |
 
 A new pair gets its own `rewrite_<from>_<to>.py` beside these and a row here; keep scripts standard-library only.
 
