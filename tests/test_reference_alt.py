@@ -8,13 +8,17 @@ from unittest import mock
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "skills", "loom-benchmark", "scripts"))
-import bench_common as bc  # noqa: E402
+try:
+    import bench_common as bc  # noqa: E402
+except ImportError:   # the CI python has no requests / numpy: the tests skip
+    bc = None
 
 
 class Pkg:
     cfg = {"gguf": None, "source": {"kind": "safetensors", "repo": "org/model", "revision": "abc"}}
 
 
+@unittest.skipIf(bc is None, "bench_common needs requests")
 class Alt(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
