@@ -124,7 +124,7 @@ def build(variant=""):
         out.append(kernel(mode, kn, variant))
         YT = ytype(variant)
         planes = ["w"] + (["u"] if mode == "swiglu" else [])
-        decl = "".join((f"  %{p} = check.generate.fill value(0) : tensor<{N * K // 2}xi8>\n" if zd else f"  %{p} = check.generate.random.uniform seed(%seed) range(-128 to 127) : tensor<{N * K // 2}xi8>\n")
+        decl = "".join((f"  %{p} = check.generate.fill value(0) : tensor<{N * K // 2}xi8>\n" if zd else f"  %{p} = check.generate.random.uniform seed(%seed) range(-128 to 127) : tensor<{N * K // 2}xi8>\n") +
                        f"  %{p}s = check.generate.random.uniform seed(%seed) range(116 to 126) : tensor<{N * K // 32}xi8>\n" for p in planes)
         args = ", ".join(f"%{p}, %{p}s" for p in planes)
         tys = ", ".join(f"tensor<{N * K // 2}xi8>, tensor<{N * K // 32}xi8>" for _ in planes)
