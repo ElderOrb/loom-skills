@@ -58,7 +58,9 @@ class FuseVerify(unittest.TestCase):
         cls.off = build(os.path.join(cls.tmp, "off"), {})
         cls.on = build(os.path.join(cls.tmp, "on"), {"VERIFY_FUSE": "full", "MV_PERSIST": "256"})
         os.makedirs(os.path.join(cls.tmp, "swq"))
-        cls.swq = build(os.path.join(cls.tmp, "swq"), {"VERIFY_FUSE": "swq"})
+        cls.swq = build(os.path.join(cls.tmp, "swq"), {"VERIFY_FUSE": "swqn"})
+        os.makedirs(os.path.join(cls.tmp, "swq1"))
+        cls.swq1 = build(os.path.join(cls.tmp, "swq1"), {"VERIFY_FUSE": "swq"})
 
     @classmethod
     def tearDownClass(cls):
@@ -105,6 +107,8 @@ class FuseVerify(unittest.TestCase):
             self.assertEqual(pairs, 1 if i == 0 else 2, i)
             self.assertEqual(len(re.findall(r"kernel\.launch", orig)) - len(re.findall(r"kernel\.launch", f)), 3 + 4 + 1 + 2 + pairs, i)
         self.assertIn('export("g_pmv_mxfp4s_k5120_t4_swq_r32")', self.swq)
+        self.assertNotIn("g_post_add_norm_q8", self.swq1)   # swq alone keeps the norm + quant launches
+        self.assertEqual(verify(self.swq1).count("@g_pmv_mxfp4s_k5120_t4_swq_r32["), 64)
 
     def test_hout_where_f32_projections_read_h(self):
         for f in re.findall(r"^  scf\.if %pz \{\n(.*?)^  \} else \{\n", verify(self.on), re.M | re.S):

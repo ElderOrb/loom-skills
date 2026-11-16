@@ -5742,14 +5742,14 @@ if __name__ == "__main__":
     if os.environ.get("POST_ADD_ROW_SCALE", "1") != "0":   # after live_row_scale; =0 A/B it off
         program, _fused = fuse_post_add_row_scale(program)
         COMMON += _fused
-    if os.environ.get("VERIFY_FUSE", "") in ("swq", "full") and spec_kernels and USED_MVQ:   # choice decode.verify.fuse (gen_pstep.py): fused layers for 2-4 token epochs
+    if os.environ.get("VERIFY_FUSE", "") in ("swq", "swqn", "full") and spec_kernels and USED_MVQ:   # choice decode.verify.fuse (gen_pstep.py): fused layers for 2-4 token epochs
         import gen_pstep
         def _pz_src(name):
             f, k, r = re.match(r"g_mv_(\w+?)_k(\d+)_t4_q8_r(\d+)$", name).groups()
             return mv(f, int(k), R=int(r), TG=4, suffix=f"_r{r}" if int(r) != 16 else "", iq=True)
         program, _pk = gen_pstep.fuse_verify(program, _pz_src, EPS, H, G=int(os.environ.get("MV_PERSIST", "0") or 0),
-                                             n_of=lambda vt, k: int(re.search(r"\d+", vt).group(0)) * 2 // k, mode=os.environ["VERIFY_FUSE"],
-                                             norm_src=_re.search(r'^kernel\.def export\("g_post_add_norm"\)(?:.|\n)*?^\}\n', NORMS, _re.M).group(0))
+                                             n_of=lambda vt, k: int(re.search(r"\d+", vt).group(0)) * 2 // k, mode="swq" if os.environ["VERIFY_FUSE"] == "swqn" else os.environ["VERIFY_FUSE"],
+                                             norm_src=_re.search(r'^kernel\.def export\("g_post_add_norm"\)(?:.|\n)*?^\}\n', NORMS, _re.M).group(0) if os.environ["VERIFY_FUSE"] == "swqn" else None)
         COMMON += "".join(_pk[n] for n in sorted(_pk))
     if any(f == "f32" for f, *_ in USED_MV | USED_MV_R) or "f32" in USED_GEMM:
         COMMON += F32_VALUES
