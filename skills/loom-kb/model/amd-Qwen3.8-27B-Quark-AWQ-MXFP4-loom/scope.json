@@ -15,10 +15,11 @@
    },
    "set": {
     "exec.prefill_capacity": 1024,
-    "exec.context_capacity": 65536,
-    "exec.pool_capacity": 65536
+    "exec.context_capacity": 113664,
+    "exec.pool_capacity": 113664,
+    "exec.context_cap": 113664
    },
-   "evidence": "first DevLab R9700 runs (devlab-perf 43771486278, 43772073750): the package rebuilt at context = pool = 65536 serves with --pool_backing=fixed, func pass, decode 38.8 tok/s and prefill 33k 866 tok/s (decode_32k 36.5); 98304 also starts and answers (func pass) but no full-context request was run; 32768 (the first card) and 1024-token prefill chunks as the Q4_K_M 27B card. Serving settings to be re-measured with the fast kernels (kern PR) and the verify scratch of depth 3."
+   "evidence": "first DevLab R9700 runs (devlab-perf 43771486278, 43772073750: 64k serves) and the context sweeps (43776909193: context = pool 65536 / 81920 / 98304 / 113664 each admit a request of ~the context, func passes, decode_32k 31-35 tok/s; 131072 aborts the connection, func fails; 43778943962: a request of 98226 and of 113586 tokens is prefilled to the end and answered, in 132 s and 159 s, MTP depth 3, then decode 38.4 tok/s at 113664). 113664 is also the fit table's value for 32 GB (r9700_fit.json). Prefill chunks of 1024 tokens as the Q4_K_M 27B card. Serving settings to be re-measured with the fast kernels (kern PR) and the verify scratch of depth 3."
   }
  ]
 }

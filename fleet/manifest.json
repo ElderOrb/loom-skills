@@ -73,8 +73,8 @@
    "arch": "qwen35",
    "build": {
     "preset": "chat",
-    "context": 32768,
-    "pool": 32768,
+    "context": 262144,
+    "pool": 327680,
     "prefill": 1024,
     "rows": 4,
     "max_tokens": 4096,
