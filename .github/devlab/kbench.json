@@ -8,25 +8,21 @@
       "gen": "gemm_mxfp4s/gen_bench.py",
       "gen_variants": [
         "base",
-        "zd",
-        "nomma",
-        "lv",
-        "lv+zd",
         "lvs",
-        "lvk2",
-        "lvk2s",
-        "adk2"
+        "ws",
+        "wsr4",
+        "r1024",
+        "lvs+r1024",
+        "ws+r1024"
       ],
       "files": [
         "bench.loom",
-        "bench_zd.loom",
-        "bench_nomma.loom",
-        "bench_lv.loom",
-        "bench_lv+zd.loom",
         "bench_lvs.loom",
-        "bench_lvk2.loom",
-        "bench_lvk2s.loom",
-        "bench_adk2.loom"
+        "bench_ws.loom",
+        "bench_wsr4.loom",
+        "bench_r1024.loom",
+        "bench_lvs+r1024.loom",
+        "bench_ws+r1024.loom"
       ],
       "tests": [
         "test.loom"
