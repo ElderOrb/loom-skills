@@ -39,6 +39,10 @@ B_MODE = "2" if os.environ.get("FLASH2_B") in ("2", "3", "6") and os.environ.get
 # FLASH2_B=6 (gfx12 twin, head_dim 256 / 6 query heads per KV head): the whole-tile kernel is flash2_g6.py's one-head-per-wave loop (all six
 # heads of a KV head per workgroup, no workgroup memory); the partial-tile kernel keeps the key-split loop of FLASH2_B=2.
 G6 = B_MODE == "2" and os.environ.get("FLASH2_B") == "6" and (D, G) == (256, 6) and os.environ.get("FLASH2_ROLE") != "partial"
+B2_OPTS = json.loads(os.environ.get("FLASH2_B2_OPTS") or "{}")   # flash2_b2.py experiment options
+# B2_OPTS wg = 3 (head_dim 256 / 6 heads per KV head): one workgroup of 12 waves holds the three head pairs of a KV head (the pairs share every
+# K / V line in lockstep: the same-quarter waves of the three pairs read the same keys / dims between the same barriers)
+WG3 = B_MODE == "2" and B2_OPTS.get("wg") == 3 and (D, G) == (256, 6)
 B_HEADS = 3 if os.environ.get("FLASH2_B") == "3" and (D, G) == (256, 6) else 2   # query heads per wave of the key-split loop (3: two head triples per KV head)
 HALF = D // 4 if B_MODE == "2" else 128   # dims per wave (key-split loop: four waves share a head pair, each owns a quarter of the dims)
 NFH = HALF // 16                  # 16-dim fragments per wave (8)
@@ -52,7 +56,7 @@ VTC = KT + 8                      # padded V^T row
 # Query-head groups per KV head: one workgroup per (tile, KV head, group) when the G heads' S partials don't fit
 # next to the K and V^T tiles in 64 KiB of workgroup memory (G = 8: 70 KiB; Qwen3.5/3.6 MoE). Each group stages
 # K/V itself (the staging is repeated per group; the score/softmax/output work is not).
-NG = G // B_HEADS if B_MODE == "2" else next(n for n in (1, 2, 4) if G % n == 0 and (KT * DP8 * 2 + D * VTC * 2 + (WPH * G // n) * KB * 16 * 16 * 4 <= 65536
+NG = (1 if WG3 else G // B_HEADS) if B_MODE == "2" else next(n for n in (1, 2, 4) if G % n == 0 and (KT * DP8 * 2 + D * VTC * 2 + (WPH * G // n) * KB * 16 * 16 * 4 <= 65536
                                                                              or WPH * G // n == 8))   # key-split loop: a workgroup is the four waves of a head pair
 if D == 512 and os.environ.get("FLASH2_NG512"):   # experiment: query-head groups per KV head at head_dim 512 (more groups: fewer waves per workgroup, cheaper barriers)
     NG = int(os.environ["FLASH2_NG512"])
@@ -60,7 +64,7 @@ if D == 512 and os.environ.get("FLASH2_NG512"):   # experiment: query-head group
 GW = G // NG                      # query heads per workgroup
 WAVES = WPH * GW
 if B_MODE == "2":   # two heads per wave: a workgroup is the four waves of a head pair
-    WAVES = WPH
+    WAVES = WPH * (3 if WG3 else 1)
 LANES = 32 * WAVES
 # Staging: lane = key (workitem % KT), workitem / KT = dim segment. 256 dims over 2G segments: G = 6 -> 12
 # segments of 21.3: use 16 segments of 16 dims on the first 16*32 = 512 lanes when there are that many, else 8
@@ -541,8 +545,8 @@ if R4:
     text = to_rdna4(text)
     if B_MODE == "2":
         from flash2_b2 import rewrite_b2
-        assert GW == B_HEADS and WPH == 4 and WAVES == 4
-        text = rewrite_b2(text, KVH, D, PARTIAL, QH, B_HEADS, json.loads(os.environ.get("FLASH2_B2_OPTS") or "{}"))
+        assert (GW == B_HEADS and WAVES == 4 or WG3 and WAVES == 12) and WPH == 4
+        text = rewrite_b2(text, KVH, D, PARTIAL, QH, B_HEADS, B2_OPTS)
     if G6:
         from flash2_g6 import g6_kernel
         assert WINDOW >= 262144, "flash2_g6: no sliding window"

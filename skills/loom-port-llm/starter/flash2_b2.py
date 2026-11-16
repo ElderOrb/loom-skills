@@ -171,7 +171,7 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     sinit = ", ".join(f"%s{x} = %init : vector<8xf32>" for x in ABC)
     sres = ", ".join(f"%s{x}_f" for x in ABC)
     sty = ", ".join(["vector<8xf32>"] * nh)
-    A(f"    {sres} = scf.for %kw = [%c0 to %c{NKW} step %c1]({sinit}) -> ({sty}){{")
+    A(f"    {sres} = scf.for %kw = [%c0 to %c{NKW} step %c1]({sinit}) -> ({sty}){' unroll' if opts.get('kwu') else ''}{{")
     A(f"""      %kw_a = index.assume %kw [range(%kw, 0, {NKW - 1})] : index
       %kw_o = index.mul %kw_a, %c64k : index
       %kw_c = index.add %kw_h, %kw_o : index
@@ -303,7 +303,37 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     A("    scf.yield " + ", ".join(f"%m{SUF[hh]}_new, %l{SUF[hh]}_new" for hh in range(nh)) + ", " + ", ".join(f"%{ON[hh]}{k}" for hh in range(nh) for k in range(NO)) + f" : {mlt}, {ty16}\n  }}\n")
     loop = "".join(x if x.endswith("\n") else x + "\n" for x in L)
     loop = _ablate(loop, (opts or {}).get("abl", ""))
-    text = text[:h0] + alloc + defs + qst + loop + epilogue + "".join(epis) + tail
+    if opts.get("e2"):   # exp2 domain: Q^T staged pre-scaled by scale * log2(e); S^T comes out in log2 units, P = exp2(S - m)
+        c2 = float(re.search(r"%scale = scalar\.constant (\S+) : f32", text).group(1)) * 1.4426950408889634
+        qst = (f"  %e2c = scalar.constant {c2!r} : f32\n  %e2c_v = vector.splat %e2c : vector<8xf32>\n"
+               + re.sub(r"(%fqh\w+) = vector\.fptrunc (%fqraw\w+) : vector<8xf32>",
+                        r"\2s = vector.mulf \2, %e2c_v : vector<8xf32>\n  \1 = vector.fptrunc \2s : vector<8xf32>", qst))
+        for m in list(re.finditer(r"^ *(%sc\w*) = vector\.mulf (%s\w+_f), %scale_v : vector<8xf32>\n", loop, flags=re.M)):
+            loop = loop.replace(m.group(0), "")
+            loop = re.sub(re.escape(m.group(1)) + r"\b(?!\w)", m.group(2), loop)
+        loop = loop.replace("vector.expf<afn>", "vector.exp2f<afn>").replace("scalar.expf<afn>", "scalar.exp2f<afn>")
+    mid = alloc + defs + qst + loop
+    head_text = text[:h0]
+    if opts.get("wg") == 3:   # 12-wave workgroup: the three head pairs of the KV head (gen_flash2s.py WG3); wave = 4 pair + quarter
+        assert nh == 2 and d == 256
+        np_ = 3
+        head_text = text[:h0].replace("  %head_value = index.madd %kv, %cg, %head_in_group : index",
+                            "  %hig2 = index.mul %head_in_group, %c2 : index\n  %head_value = index.madd %kv, %cg, %hig2 : index")
+        mid = mid.replace("%fb_wv = index.assume %wave [range(%wave, 0, 3)]", "%fb_wv = index.assume %dim_half [range(%dim_half, 0, 3)]")
+        pre = "  %wg_pair = index.assume %head_in_group [range(%head_in_group, 0, 2)] : index\n  %wg_cnh = index.constant 2 : index\n" + "".join(
+            f"  %wg_q{hh}_v = index.madd %wg_pair, %wg_cnh, %c{hh}_i : index\n  %wg_q{hh} = index.assume %wg_q{hh}_v [range(%wg_q{hh}_v, 0, 5)] : index\n"
+            for hh in range(nh))
+        if not opts.get("qshare"):   # qshare: timing ablation, the three pairs read pair 0's Q^T region (wrong results)
+            mid = mid.replace(f"view<{nh}x32x{QP}xf16>", f"view<{np_ * nh}x32x{QP}xf16>").replace(
+                f"%ql_bytes = index.constant {nh * 32 * QP * 2}", f"%ql_bytes = index.constant {np_ * nh * 32 * QP * 2}")
+            for hh in range(nh):
+                mid = mid.replace(f"%ql_view[%c{hh}_i,", f"%ql_view[%wg_q{hh},")
+        mid = mid.replace(f"view<1x{nh}x{waves}x", f"view<{np_}x{nh}x{waves}x").replace("[%c0_i, %c", "[%wg_pair, %c")
+        mid = mid.replace(f"%pl_bytes = index.constant {nh * waves * 32 * 16}", f"%pl_bytes = index.constant {np_ * nh * waves * 32 * 16}").replace(
+            f"%mx_bytes = index.constant {nh * waves * 32 * 4}", f"%mx_bytes = index.constant {np_ * nh * waves * 32 * 4}")
+        i = mid.index("  %pl_bytes")
+        mid = mid[:i] + pre + mid[i:]
+    text = head_text + mid + epilogue + "".join(epis) + tail
     return text
 
 
@@ -315,7 +345,7 @@ def _ablate(loop, abl):
             loop = re.sub(r"(%rw\d) = index\.assume %rw\d_v \[range\(%rw\d_v,", r"\1 = index.assume %c0 [range(%c0,", loop)
             loop = re.sub(r"lt\(%rw\d_v, %pl_rows_m\)", "lt(%c0, %pl_rows_m)", loop)
         elif a in ("noqk", "nopv"):
-            pat = r"^ *(%sq\w+) = vector\.mma \S+, \S+, (%\w+) :.*\n" if a == "noqk" else r"^ *(%bn\w+) = vector\.mma \S+, \S+, (%\w+) :.*\n"
+            pat = r"^ *(%sq\w+) = vector\.mma \S+, \S+, (%\w+) :.*\n" if a == "noqk" else r"^ *(%(?:bn|on)\w+) = vector\.mma \S+, \S+, (%\w+) :.*\n"
             for m in list(re.finditer(pat, loop, flags=re.M)):
                 loop = loop.replace(m.group(0), "")
                 loop = re.sub(re.escape(m.group(1)) + r"\b(?!\w)", m.group(2), loop)
