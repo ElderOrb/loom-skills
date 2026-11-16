@@ -124,6 +124,8 @@ def request(url, model, durl, question, tokens, llama=False):
 
 _BOS = {}
 def adds_bos(gguf_path):
+    if not gguf_path:   # a safetensors package (vLLM reference): the HF tokenizer's add_bos is not modelled; Qwen-family: none
+        return False
     if gguf_path not in _BOS:
         import gguf
         f = gguf.GGUFReader(gguf_path).fields.get("tokenizer.ggml.add_bos_token")
