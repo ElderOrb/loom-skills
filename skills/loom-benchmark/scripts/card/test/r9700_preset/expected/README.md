@@ -15,7 +15,7 @@ A [Loom](https://github.com/ROCm/hrx-system) package (`.loom` programs and a `mo
 ## Quick start
 
 ```bash
-pip install "hrx-loom[hf]==0.1.0"
+pipx install "hrx-loom[hf]==0.1.0"
 ```
 
 Fetch and serve on the AMD Ryzen AI Max+ 395 "Strix Halo" (gfx1151):

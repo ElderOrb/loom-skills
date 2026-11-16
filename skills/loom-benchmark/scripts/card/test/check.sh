@@ -516,7 +516,7 @@ for n in flint d1 ratchet r9700_two r9700_none r9700_staging r9700_preset r9700_
 done
 # Quick start pins the hrx-loom the package was generated with (flint: PyPI 0.1.0 recorded in llm_config.json);
 # a card with no recorded SDK (d1 fixture) is the only one that installs unpinned
-grep -qF 'pip install "hrx-loom[hf]==0.1.0"' "$tmp/flint/README.md" && echo "OK   quick start pins the recorded hrx-loom version" \
+grep -qF 'pipx install "hrx-loom[hf]==0.1.0"' "$tmp/flint/README.md" && echo "OK   quick start pins the recorded hrx-loom version" \
   || { echo "FAIL flint: Quick start does not pin hrx-loom==0.1.0"; bad=1; }
 # the first paragraph of every card ends with the ecosystem link, exactly once
 for n in flint d1; do

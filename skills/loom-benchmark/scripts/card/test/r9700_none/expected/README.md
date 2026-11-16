@@ -14,7 +14,7 @@ A [Loom](https://github.com/ROCm/hrx-system) package (`.loom` programs and a `mo
 ## Quick start
 
 ```bash
-pip install "hrx-loom[hf]==0.1.0"
+pipx install "hrx-loom[hf]==0.1.0"
 loom-fetch https://huggingface.co/loom-fun/unsloth-Qwen3-0.6B-loom/resolve/main/model.json --materialize=copy --output=Qwen3-0.6B
 loom-serve --model=Qwen3-0.6B/model.json '--device=amdgpu://?completion_spin_ns=4294967295' --memory_bytes=17000000000
 ```
