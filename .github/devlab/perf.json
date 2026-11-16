@@ -94,6 +94,14 @@
      "context": 65536
     },
     {
+     "name": "q8c113",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "context": 113664
+    },
+    {
      "name": "q8c98",
      "build": {
       "MTP_BLOCK_PREP": "q8_0",
@@ -102,17 +110,27 @@
      "context": 98304
     },
     {
-     "name": "basec98",
+     "name": "q8c82",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "context": 81920
+    },
+    {
+     "name": "basec113",
      "build": {
       "MTP_BLOCK_PREP": "",
       "PROPOSE_HEAD_ROWS": "0"
      },
-     "context": 98304
+     "context": 113664
     }
    ],
    "steps": [
+    "func:q8c113",
     "func:q8c98",
-    "func:basec98",
+    "func:q8c82",
+    "func:basec113",
     "gates:q8:dev",
     "perf:base:1",
     "perf:q8:1",
