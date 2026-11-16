@@ -93,6 +93,26 @@ class KernelTests(unittest.TestCase):
                 self.assertGreaterEqual(i, 0)
                 self.assertEqual(blob[i + len(b".private_segment_fixed_size")], 0, "the kernel spills to scratch")
 
+    @unittest.skipUnless(loom_compile(), "loom-compile not available")
+    def test_sweep_options_compile_for_gfx1201_without_spills(self):
+        """the tile shape / pipelining / grid / prefetch / output / pitch options of the generator (device/rdna4/prefill.md: all measured, none a win)"""
+        for mode, kw in (("store", dict(bm=128, tn=256)), ("store", dict(bm=256, tn=256)), ("swiglu", dict(bm=256, tn=128)), ("store", dict(swp=True)),
+                         ("store", dict(rf=2, swp=True)), ("swiglu", dict(swz=True)), ("store", dict(pfa=2)), ("swiglu", dict(yf16=True)), ("store", dict(pad=32))):
+            with tempfile.TemporaryDirectory() as d:
+                f = Path(d) / "t.loom"
+                f.write_text(HEADER + R.gemm_mxfp4s_f8_m256(mode, **kw))
+                out = Path(d) / "o.hsaco"
+                r = subprocess.run([loom_compile(), str(f), "--format=amdgpu-hsaco", "--target=amdgpu:gfx1201", f"--output={out}"], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, (mode, kw, r.stderr[:1500]))
+                blob = out.read_bytes()
+                i = blob.find(b".private_segment_fixed_size")
+                self.assertEqual(blob[i + len(b".private_segment_fixed_size")], 0, f"{mode} {kw} spills to scratch")
+
+    def test_default_kernel_is_independent_of_the_sweep_options(self):
+        """the options default to the kernel of #879: the explicit defaults produce the same text"""
+        for mode in ("store", "swiglu"):
+            self.assertEqual(R.gemm_mxfp4s_f8_m256(mode), R.gemm_mxfp4s_f8_m256(mode, swp=False, swz=False, pfa=0, yf16=False, pad=16, bm=256))
+
     def test_gemm_kernel_text_contract(self):
         for mode in ("store", "swiglu"):
             t = R.gemm_mxfp4s_f8_m256(mode)

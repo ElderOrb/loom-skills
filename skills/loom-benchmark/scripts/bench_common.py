@@ -190,6 +190,18 @@ class Package:
         return text
 
 
+def reference_identity(cfg):
+    """Cache identity of a safetensors package's reference: its checkpoint repo@revision (llm_config.json "source"), or None
+    for a GGUF package. The reference engine of such a package is vLLM (vllm_shim.py, a llama-server look-alike), the
+    cached answers depend on the checkpoint revision and the request, not on the Loom build or the machine."""
+    if os.environ.get("REFERENCE_CHECKPOINT"):   # a vLLM reference forced on a GGUF package (adapter checks on small models)
+        return f"safetensors:{os.environ['REFERENCE_CHECKPOINT']}@{os.environ.get('VLLM_REVISION', '')}"
+    src = cfg.get("source") or {}
+    if src.get("kind") != "safetensors":
+        return None
+    return f"safetensors:{src.get('repo', '')}@{src.get('revision', '')}"
+
+
 def _gguf_fingerprint(path):
     """Identity of a GGUF without hashing gigabytes: name, size and the first 4 MiB."""
     if not path or not os.path.exists(path):
@@ -222,7 +234,10 @@ def llama_completion(url, body, pkg=None, salt="", timeout=7200):
     `url` and $LLAMA_START is set, that command is run once to start llama-server.
     """
     gguf = pkg.cfg.get("gguf") if pkg is not None else os.environ.get("LLAMA_GGUF")
-    if gguf not in _FP:
+    ident = reference_identity(pkg.cfg) if pkg is not None else os.environ.get("REFERENCE_IDENTITY")
+    if ident:   # a safetensors checkpoint (the vLLM reference): no GGUF file to fingerprint
+        _FP[gguf] = ident
+    elif gguf not in _FP:
         _FP[gguf] = _gguf_fingerprint(gguf)
     key = hashlib.sha256(json.dumps({"gguf": _FP[gguf], "build": os.environ.get("LLAMA_CACHE_BUILD") or os.environ.get("LLAMACPP_DIR", ""),
                                      "body": body, "salt": salt}, sort_keys=True).encode()).hexdigest()
@@ -236,7 +251,7 @@ def llama_completion(url, body, pkg=None, salt="", timeout=7200):
     defer = os.environ.get("LLAMA_DEFER")
     if defer:
         with open(defer, "a") as f:
-            f.write(json.dumps({"key": key, "gguf": gguf, "body": body, "salt": salt}) + "\n")
+            f.write(json.dumps({"key": key, "gguf": gguf, "identity": ident, "body": body, "salt": salt}) + "\n")
         return {"_suspect": "deferred: answered by llama_fill.py, then the gate re-runs", "_pending": True,
                 "content": "", "completion_probabilities": []}
     variant = body.get("_server")   # SERVER_VARIANTS: only llama_fill.py starts such a server; a running one cannot be switched

@@ -77,3 +77,12 @@ Doubling each kernel family in prefill (2k, ms/token of 0.608; single runs, nois
 GDN recurrence 0.046, post-add norm 0.013, row scale 0.013, f32 mv (ssm alpha/beta) 0.012, conv 0.011, silu_mul 0.020 (one outlier), gated norm 0.007,
 q/k norm 0.004, quant 0.003. Only the recurrence is above the noise: the chunked gfx12 kernel (facet hybrid-gdn prefill) takes it from 0.042 to 0.016
 (+4.4 % prefill). The small kernels (together ~0.06) are individually below what a doubling resolves and below what one fusion could save (<= 1 % each).
+
+- **Second sweep (pfgemm, kbench runs 43788662357, 43790112436, 43790618518, 43791938638; rows 1024 = the card's prefill chunk, and 2048; all vs the default kernel, same job).** None beats the default by more than noise (+-2 %):
+  - Tile shape: 128 x 256 (8 waves of 64 x 64, 240 VGPR, 36 KB LDS) +9..11 % slower on store, +17 % on swiglu (128 x 128 per weight pair); 256 x 256 (16 waves, 512 threads) +20..26 % store, +16 % swiglu; 128 x 128 with 32-row wave tiles +7 %. Larger tiles lose because fewer workgroups fit a WGP (3 x 8 waves at 218 VGPR), not because of global traffic.
+  - Software-pipelined fragment loads (`swp`, the next K substep's A and B fragments loaded before this substep's WMMAs): store +0.2..+2.8 %, swiglu +1.2 % (no gain); with 32-row wave tiles (`rf` 2 + `swp`, 190 VGPR store) -1..-2 % at 2048 rows then -0.9..+1.3 % in a second job: noise.
+  - Grid order swapped (output tile fastest, `swz`): +0.2..+2 % store, +4.7 % swiglu at 2048 rows. L2 prefetch of the activation lines two steps ahead (`pfa`, `view.prefetch` read/l2, one scalar prefetch per row of the wave's share): tie (-0.2..+0.5 %).
+  - f16 output (`yf16`, halving the output write): store +3 % slower at 2048 rows, ties at 1024: the f32 write is not a bound (the swiglu consumer saving is therefore not worth a producer change).
+  - LDS pitch of both stages (`pad` bytes after each 128-value row): 16 (default) and 32 / 80 / 112 tie; 0 is 2.3-4x slower, 8 +25 %, 48 +7 %, 64 +36 %: the pitch sets the bank mapping of the fragment reads, 144 B is already on the good side.
+  - Occupancy and wave quantization: at 1024 rows the 17408 x 5120 store has 160 tiles (1.7 x 96 resident workgroups) and still runs at the same TFLOP/s as at 2048 rows (234 vs 238), so the tail is not a loss. Remaining gap to the 312 TFLOP/s random-data peak (76 %): WMMA issue overlaps the staging and fragment traffic only partly (ablations above); every restructuring tried moves the time by under 3 %.
+
