@@ -1044,10 +1044,13 @@ command.program.def public @llm_mtp_warm() launch(%w_embed: buffer, %weights: bu
     Pp += "  %attn_tiles = index.cmp uge, %t, %c_never : index\n"
     head_name, hsize = g["head_name"], g["head_size"]
     head_root = "" if head_name == "token_embd.weight" else "%w_head: buffer, "
+    head_ref, phead_root = "%w_embed" if head_name == "token_embd.weight" else "%w_head", ""
+    if g.get("phead"):   # PROPOSE_HEAD_ROWS: the proposals read a load-time Q4_0 copy of (a row subset of) the head, the last root
+        head_ref, hsize, phead_root, head_root = "%w_phead", g["phead"], ", %w_phead: buffer", ""
     propose = (f"""
 // MTP proposals: draft_depth autoregressive rounds of the NextN block for the PROPOSE spans; each round's
 // greedy token goes straight into the verifier's input slot and feeds the next round.
-command.program.def public @llm_mtp_propose() launch(%w_embed: buffer, {head_root}%weights: buffer, %epoch: buffer, %target_tokens: buffer, %origins: buffer, %arena: buffer, %carry: buffer) {{
+command.program.def public @llm_mtp_propose() launch(%w_embed: buffer, {head_root}%weights: buffer{phead_root}, %epoch: buffer, %target_tokens: buffer, %origins: buffer, %arena: buffer, %carry: buffer) {{
 {Pp}  %owners = index.constant 1 : index
   %epoch_spans = config.get @llm.epoch_spans : index
   %epoch_tokens = config.get @llm.epoch_tokens : index
@@ -1061,7 +1064,7 @@ command.program.def public @llm_mtp_propose() launch(%w_embed: buffer, {head_roo
   %slots = buffer.alloca<global> align(256) %word_size : buffer
   %proposals = buffer.alloca<global> align(256) %word_size : buffer
   %hidden = buffer.alloca<global> align(256) %x_size : buffer
-  %head = command.parameter {"%w_embed" if head_name == "token_embd.weight" else "%w_head"}, "{head_name}" : view<{hsize}xi8>
+  %head = command.parameter {head_ref}, "{head_name}" : view<{hsize}xi8>
   %head_norm = command.parameter %weights, "blk.{M}.nextn.shared_head_norm.weight" : view<{H}xf32>
   kernel.launch @g_mtp_prepare(%epoch_spans, %t, %epoch_tokens, %epoch, %target_tokens, %metadata, %tokens, %slots) : (index, index, index, buffer, buffer, buffer, buffer, buffer)
   kernel.launch @g_mtp_gather[%t](%t, %owners, %metadata, %carry, %hidden) : [index](index, index, buffer, buffer, buffer)

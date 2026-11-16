@@ -1132,6 +1132,9 @@ def selector_kernels(g):
     K = F["selector"]["top_k"]
     R = F["selector"]["rank"]
     CH, V = g["CHUNKS"], g["V"]
+    PR = g.get("phead_rows")   # PROPOSE_HEAD_ROWS: (rows, split, shift): the head copy's row r is token r (< split) or r + shift
+    if PR:
+        CH, V = (PR[0] + 127) // 128, PR[0]
     assert K == 16 and R % 32 == 0 and R <= 256
     RG = R // 32                       # 32-value groups per selector row
     scale = F["logit_scale"] or 1.0
@@ -1283,7 +1286,12 @@ kernel.def export("g_dfl_topk") @g_dfl_topk(%rows: index) {{
       scf.if %first {{
         %lg = scalar.addf %best, %zero_f : f32
 {unary}
-        view.store %win, %iv[%row, %rb] : i32, view<[%rows]x{K}xi32>
+{f"""        %pr_split = scalar.constant {PR[1]} : i32
+        %pr_shift = scalar.constant {PR[2]} : i32
+        %pr_tail = scalar.cmpi sge, %win, %pr_split : i32
+        %pr_moved = scalar.addi %win, %pr_shift : i32
+        %win_id = scf.select %pr_tail, %pr_moved, %win : i32
+        view.store %win_id, %iv[%row, %rb] : i32, view<[%rows]x{K}xi32>""" if PR else f"""        view.store %win, %iv[%row, %rb] : i32, view<[%rows]x{K}xi32>"""}
         view.store %zu, %sv[%row, %rb] : f32, view<[%rows]x{K}xf32>
       }}
       kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
