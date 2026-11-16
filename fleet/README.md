@@ -38,6 +38,16 @@ Adding a model: `python fleet/add_model.py SLUG PACKAGE_DIR --staging-revision R
     regen.py rerun S.json && regen.py submit S.json                          # ONE confirming -r2 job where the ratchet asks for it
     regen.py publish S.json --dry-run                                        # card-only upload to loom-fun-staging (no flag: uploads)
     regen.py status S.json --status-json status.json                         # models.<slug>.<gpu> stage / verdict / run
+    regen.py plan --base BRANCH --device strix-halo --device radeon-r9700 --mode sdk-ab --all --state S.json   # SDK migration A/B (below)
+
+**SDK A/B (`--mode sdk-ab`)**: per model and device ONE job, ABBA on one runner: `fun` = the published staging card (manifest `staging.revision`) served on
+its own pin (hrx-loom 0.1.0), `staging` = the package BUILT in the job from the job's branch (`--base`) and served on hrx-loom 0.2.0rc1 (variants name
+their `"sdk"`; `devlab_perf.sh` gives each SDK its own root and runs `serve.sh` with that root's VENV; the one-server `ab` step refuses mixed SDKs),
+plus the card job's func / ktest / gates and llama.cpp baselines. `collect` writes `perf` = % delta v0.2 vs v0.1 for decode, prefill (8k), longctx
+(decode_32k) and 4stream (positive = v0.2 faster) per model and device; `status --status-json` writes it as `models.<slug>.perf.<gpu>`. A metric more
+than 3 % slower queues ONE confirming `-r2` job (`rerun`); slower than 3 % in both runs = `needs_decision` with both numbers. `ingest` builds the v0.2
+card on the staging head (publish the v0.2 package first: `make_info.py` refuses programs other than the ones the job built) and puts the delta line
+into the publish message.
 
 Time model (measured on this campaign's 86 DevLab jobs; new GPU, 35 fitting models, 3 runners, `--mode card`): about 12.8 runner-h, 6.3 h wall
 (3.8 h of it measuring), 1 engineer with about 2 h of active work. `--mode card` costs about 0.75x of an A/B job (0.6x for large models); a
