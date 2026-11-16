@@ -393,8 +393,19 @@ serve_alone() { # serve_alone VARIANT
     vmem=none
   fi
   [ -n "${PROFILE_SA:-}" ] && sa="$sa $PROFILE_SA"   # the profile step: --print_device_statistics
-  step "serve $1"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
-  grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
+  local try fl=(); [ -n "$safetensors" ] && [ -z "${REFERENCE_CHECKPOINT:-}" ] && grep -q '"vision"' "$D/$1/pkg/llm_config.json" 2>/dev/null && fl=(--vision)
+  for try in 1 2 3; do
+    step "serve $1${try:+ (try $try)}"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
+    grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
+    # safetensors packages: the first weight load of a fresh R9700 VM fails (HAL RESOURCE_EXHAUSTED in libamdf memory_create) and leaves the model
+    # "unavailable"; the next server start loads fine (notes/sdk_blockers.md, run 43822281517). Load once here (text, + image), restart on failure.
+    [ -n "$safetensors" ] && [ -n "$RDEV" ] || break
+    "$T" -I "$here/.github/scripts/warm_first_load.py" "$url" "$cardid" ${fl[@]+"${fl[@]}"} > "$out/warm_$1.try$try.log" 2>&1; wrc=$?; cat "$out/warm_$1.try$try.log"
+    [ $wrc = 0 ] && break
+    echo "first weight load failed (try $try): restarting loom-serve"; cp "$LOOM_SERVE_STATE/perf-$1.log" "$out/serve_$1.try$try.log" 2>/dev/null
+    "$SV/stop.sh" "perf-$1" >/dev/null 2>&1; sleep 3
+    [ $try = 3 ] && { echo "FAIL: the first weight load failed 3 times"; return 1; }
+  done
   curl -sf "$url/v1/models" >/dev/null
 }
 gufo_bundle() {   # gufo_bundle -> exports GUFO_BUNDLE (the experiment's/job's "bundle" tarball, fetched once per runner), or fails
@@ -685,6 +696,36 @@ PY
       ) > "$out/vllmdet_$p1.log" 2>&1; tail -1 "$out/vllmdet_$p1.log"
       cp "$D/$p1"/bench/det_*.json "$out/" 2>/dev/null; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT"
       res[$s]="$(grep -h DETERMINISM "$out/vllmdet_$p1.log" | tail -1) ($(( $(date +%s) - t1 )) s incl. install+load)";;
+    cold)   # cold:V[:drop|preread|plain]: first-serve crash probe. drop = drop the page cache first (sudo -n), preread = drop then `cat` the checkpoint files, plain = as is.
+            # V served alone; a 1 s sampler (MemAvailable, Cached, serve RSS/threads, /v1/status) runs from before the serve to after the first requests; out/cold_V_MODE.*
+      mode=${p2:-drop}; ct=$out/cold_${p1}_$mode; : > "$ct.timeline"
+      free_gpu
+      if [[ "$mode" == drop* || "$mode" == preread* ]]; then sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 && echo "page cache dropped" || echo "WARNING: could not drop the page cache"; fi
+      if [[ "$mode" == preread* ]]; then
+        t1=$(date +%s); find "$HOME/.cache" "$WORK" -name '*.safetensors' -size +100M 2>/dev/null | tee "$ct.files" | xargs -r cat > /dev/null; echo "preread $(wc -l < "$ct.files") files in $(( $(date +%s) - t1 )) s"; fi
+      grep -E 'MemTotal|MemAvailable|^Cached' /proc/meminfo | tr '\n' ' '; echo
+      for g in /sys/class/drm/card*/device; do [ -f "$g/mem_info_vram_total" ] && echo "gpu $g vram_used=$(cat $g/mem_info_vram_used) vram_total=$(cat $g/mem_info_vram_total) gtt_used=$(cat $g/mem_info_gtt_used) gtt_total=$(cat $g/mem_info_gtt_total)" | tee -a "$ct.gpu"; done
+      echo "ulimit -l: $(ulimit -l); kfd users: $(sudo -n fuser -v /dev/kfd 2>&1 | tr '\n' ' ')" | tee -a "$ct.gpu"
+      { sudo -n dmesg -T || dmesg -T; } 2>/dev/null | wc -l > "$ct.dmesg_n"
+      ( while :; do
+          sp=$(pgrep -f "loom-serve.*--listen=127.0.0.1:$PORT" | head -1)
+          echo "$(date +%T.%N | cut -c1-12) avail_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo) cached_kb=$(awk '/^Cached/{print $2}' /proc/meminfo) pid=${sp:-none} rss_anon_kb=$(awk '/RssAnon/{print $2}' /proc/${sp:-0}/status 2>/dev/null) thr=$(awk '/Threads/{print $2}' /proc/${sp:-0}/status 2>/dev/null) vram=$(cat /sys/class/drm/card*/device/mem_info_vram_used 2>/dev/null | head -1) gtt=$(cat /sys/class/drm/card*/device/mem_info_gtt_used 2>/dev/null | head -1) st=$(curl -s -m 1 $url/v1/status | head -c 400 | tr '\n' ' ')" >> "$ct.timeline"
+          sleep 1; done ) &
+      samp=$!
+      if serve_alone "$p1"; then
+        for i in 1 2 3; do
+          step "cold request $i ($mode)"; t1=$(date +%s)
+          curl -s -m 600 -w "\nHTTP %{http_code} in %{time_total}s\n" "$url/v1/chat/completions" -H 'Content-Type: application/json' \
+            -d '{"model":"'"$cardid"'","messages":[{"role":"user","content":"What is the capital of France? One word."}],"max_tokens":32,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}' 2>&1 | tail -c 600 | tee -a "$ct.requests"
+          echo "request $i after $(( $(date +%s) - t1 )) s" | tee -a "$ct.requests"
+          curl -s -m 3 $url/v1/status | head -c 1500 >> "$ct.requests"; echo >> "$ct.requests"
+        done
+      fi
+      kill $samp 2>/dev/null
+      { sudo -n dmesg -T || dmesg -T; } 2>/dev/null | tail -n +"$(( $(cat "$ct.dmesg_n") + 1 ))" > "$ct.dmesg"
+      cp "$LOOM_SERVE_STATE/perf-$p1.log" "$ct.serve.log" 2>/dev/null
+      echo "min avail_kb: $(grep -o 'avail_kb=[0-9]*' "$ct.timeline" | cut -d= -f2 | sort -n | head -1); max rss_anon_kb: $(grep -o 'rss_anon_kb=[0-9]*' "$ct.timeline" | cut -d= -f2 | sort -n | tail -1)"
+      res[$s]="$(grep -c 'HTTP 200' "$ct.requests" 2>/dev/null) of 3 requests HTTP 200 ($mode)";;
     admit)   # admit:V[:TOKENS]: ctx_admit.py on V served as configured (its execution context/pool): is a request of TOKENS (default ~ the served context) admitted? (the card's served context on the device)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "context admission $p1 ${p2:-}"
