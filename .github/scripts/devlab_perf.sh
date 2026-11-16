@@ -487,7 +487,12 @@ vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned 
     --served-model-name vllm-card --port "$VPORT" $args > "$out/vllm_serve.log" 2>&1 &
   echo $! > "$vpid"; VLLM_MODE=$1
   for _ in $(seq 1800); do
-    curl -sf "$vurl/v1/models" >/dev/null 2>&1 && { echo "vLLM ready"; return 0; }
+    curl -sf "$vurl/v1/models" >/dev/null 2>&1 && {
+      echo "vLLM ready"
+      # what the engine can hold at once (a request longer than the KV cache never finishes) and what it spent its memory on
+      { grep -m1 -o "GPU KV cache size: [0-9,]* tokens" "$out/vllm_serve.log"; grep -m1 -o "Model loading took [0-9.]* GiB" "$out/vllm_serve.log"
+        grep -m1 -o "Available KV cache memory: [0-9.]* GiB" "$out/vllm_serve.log"; } | tee "$out/vllm_kv.txt"
+      return 0; }
     kill -0 "$(cat "$vpid")" 2>/dev/null || { echo "vLLM died:"; tail -15 "$out/vllm_serve.log" | cut -c1-250; return 1; }
     sleep 1
   done
@@ -579,9 +584,14 @@ k='decode_tps_32k' if '${p2:-}' else 'decode_tps'
 print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v), 2) if (v := [x[k] for x in r if x.get(k)]) else 'n/a (no row served: beyond the served context)')");;
     vllm)   # vllm:N[:long]: the vLLM baseline of a safetensors card, N serve-session-less runs on one server (the card's drafting config), perf.py --kind vllm
       vllm_up on || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
+      vkv=$(grep -o "cache size: [0-9][0-9,]* tokens" "$out/vllm_kv.txt" 2>/dev/null | grep -o "[0-9][0-9,]*" | tr -d ',')
+      if [ -n "${p2:-}" ] && [ -n "$vkv" ] && [ "$vkv" -lt 40000 ]; then   # the long rows (8k/16k/32k documents, decode after 32k) can never finish: vLLM would wait for KV blocks forever
+        echo "vLLM's KV cache holds $vkv tokens: the 8k/16k/32k rows are not measured" | tee "$out/vllm_note.txt"
+        res[$s]="SKIP (vLLM KV cache $vkv tokens)"; continue
+      fi
       step "vllm perf x $p1 ${p2:-} (thinking $TH)"
       for i in $(seq 1 "$p1"); do
-        (cd "$out" && "$T" "$B/perf.py" "$vurl" vllm --kind vllm --model vllm-card --no-campaign --thinking "$TH" --repeat-rows "$rrows" --log "perf_vllm_n$p1.jsonl" ${p2:+--long} | tail -1)
+        (cd "$out" && timeout 3600 "$T" "$B/perf.py" "$vurl" vllm --kind vllm --model vllm-card --no-campaign --thinking "$TH" --repeat-rows "$rrows" --log "perf_vllm_n$p1.jsonl" ${p2:+--long} | tail -1)
         echo "{\"session_end\": \"vllm\"}" >> "$out/perf_vllm_n$p1.jsonl"
       done
       res[$s]=$("$T" -c "
@@ -592,7 +602,7 @@ print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v)
       vllm_up off || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
       step "vllm c4"
       cn=${p1:-3}
-      for i in $(seq 1 "$cn"); do (cd "$out" && "$T" "$B/c4_steady.py" "$vurl" 4 --model vllm-card --thinking "$TH" | tail -1 | tee -a "c4_vllm_n$cn.txt"); done
+      for i in $(seq 1 "$cn"); do (cd "$out" && timeout 1800 "$T" "$B/c4_steady.py" "$vurl" 4 --model vllm-card --thinking "$TH" | tail -1 | tee -a "c4_vllm_n$cn.txt"); done
       echo "{\"session_end\": \"vllm\"}" >> "$out/c4_vllm_n$cn.txt"
       res[$s]=$("$T" -c "import json,statistics as st; print('vllm c4 median', st.median(r['agg_tps'] for l in open('$out/c4_vllm_n$cn.txt') if 'agg_tps' in (r := json.loads(l))))");;
     llamac4)   # llamac4[:N_MAX]
