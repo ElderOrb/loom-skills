@@ -1020,6 +1020,9 @@ def _defer_rows(text, G, CW, RL):
         text = text.replace(old, new)
     anchor = f"  %a = view.load %a_view[%vh] : view<{HV}xf32> -> f32\n"
     V = ", ".join([VR] * CW)
+    # GDN_PEND_NT (A/B instrument): the folded-state write with a non-temporal device-scope cache policy (it is read again only
+    # by the next verification, one step later: no point keeping it in L2 / MALL ahead of the weight stream)
+    nt = " {cache_scope = device, cache_temporal = non_temporal}" if os.environ.get("GDN_PEND_NT", "") not in ("", "0") else ""
     code = (_pend_views(G, "reader", "dfr")
             + "  %dfr_zero32 = scalar.constant 0 : i32\n"
             "  %dfr_n32 = scf.if %fresh -> (i32) {\n    scf.yield %dfr_zero32 : i32\n  } else {\n"
@@ -1040,7 +1043,7 @@ def _defer_rows(text, G, CW, RL):
                       f"    %dfr_n{j} = vector.fmaf %dfr_kv, %dfr_dkv{j}, %dfr_sd{j} : {VR}\n" for j in J)
             + f"    scf.yield {', '.join(f'%dfr_n{j}' for j in J)} : {V}\n  }}\n"
             "  scf.if %rank_spec {\n"
-            + "".join(f"    vector.store %pinit{j}, %next_view[%si{j}] : {VR}, view<{NS}xf32>\n" for j in J)
+            + "".join(f"    vector.store %pinit{j}, %next_view[%si{j}]{nt} : {VR}, view<{NS}xf32>\n" for j in J)
             + "  }\n")
     sub(anchor, code + anchor)
     for j in J:
