@@ -210,9 +210,11 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
                     A(f"    {nm} = vector.mma %kf{kw}_{sl}, {qb}, {cur[hh]} : vector<8xf16>, vector<8xf16>, vector<8xf32>")
                     cur[hh] = nm
     else:
-        sinit = ", ".join(f"%s{x} = %init : vector<8xf32>" for x in ABC)
-        sres = ", ".join(f"%s{x}_f" for x in ABC)
-        sty = ", ".join(["vector<8xf32>"] * nh)
+        CH = int(opts.get("sacc", 1))   # independent S^T accumulation chains per head (2: even / odd fragments, summed after the loop)
+        SN = [[f"%s{x}" + ("" if c == 0 else f"c{c}") for c in range(CH)] for x in ABC]
+        sinit = ", ".join(f"{SN[hh][c]} = %init : vector<8xf32>" for c in range(CH) for hh, x in enumerate(ABC))
+        sres = ", ".join(f"%s{x}_f" for x in ABC) if CH == 1 else ", ".join(f"%s{x}_p{c}" for c in range(CH) for x in ABC)
+        sty = ", ".join(["vector<8xf32>"] * (nh * CH))
         A(f"    {sres} = scf.for %kw = [%c0 to %c{NKW} step %c1]({sinit}) -> ({sty}){' unroll' if opts.get('kwu') else ''}{{")
         A(f"""      %kw_a = index.assume %kw [range(%kw, 0, {NKW - 1})] : index
       %kw_o = index.mul %kw_a, %c64k : index
@@ -224,14 +226,24 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
       %kqo = index.assume %kqo_v [range(%kqo_v, 0, {QP - 64})] : index""" + "".join(f"""
       %qrw{x} = vector.load %ql_view[%c{hh}_i, %lane, %kqo] : view<{nh}x32x{QP}xf16> -> vector<64xf16>""" for hh, x in enumerate(ABC)))
         cur = [f"%s{x}" for x in ABC]
+        curc = {(hh, c): SN[hh][c] for hh in range(nh) for c in range(CH)}
         for sl in range(8):
+            if CH > 1:
+                cur = [curc[(hh, sl % CH)] for hh in range(nh)]
             A(f"""      %kfs{sl} = vector.slice %kwv[{8 * sl}] : vector<64xf16> -> vector<8xf16>
       %kf{sl} = vector.fragment<lhs> %kfs{sl} shape [%c16, %c16] : vector<8xf16>
 """ + "".join(f"      %qr{x}{sl} = vector.slice %qrw{x}[{8 * sl}] : vector<64xf16> -> vector<8xf16>\n" for x in ABC)
               + "".join(f"      %qb{x}{sl} = vector.fragment<rhs> %qr{x}{sl} shape [%c16, %c16] : vector<8xf16>\n" for x in ABC)
               + "\n".join(f"      %sq{x}{sl} = vector.mma %kf{sl}, %qb{x}{sl}, {cur[hh]} : vector<8xf16>, vector<8xf16>, vector<8xf32>" for hh, x in enumerate(ABC)))
             cur = [f"%sq{x}{sl}" for x in ABC]
-        A(f"      scf.yield {', '.join(cur)} : {sty}\n    }}")
+            for hh, x in enumerate(ABC):
+                curc[(hh, sl % CH)] = f"%sq{x}{sl}"
+        if CH > 1:
+            A(f"      scf.yield {', '.join(curc[(hh, c)] for c in range(CH) for hh in range(nh))} : {sty}\n    }}")
+            for x in ABC:
+                A(f"    %s{x}_f = vector.addf %s{x}_p0, %s{x}_p1 : vector<8xf32>")
+        else:
+            A(f"      scf.yield {', '.join(cur)} : {sty}\n    }}")
     if VPF in ("mid", "top2"):
         A(vloads(range(4) if VPF == "mid" else (2, 3)))
     A(f"""    %tf32 = index.cast %blk_first : index to i32

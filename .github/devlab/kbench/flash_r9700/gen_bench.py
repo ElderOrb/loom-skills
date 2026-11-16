@@ -43,6 +43,7 @@ VARIANTS = {   # name -> flash2_g6.py options (FLASH2_G6_OPTS)
     "vtop2": {"B": "2", "vpf": "top2"},
     "e2": {"B": "2", "e2": 1},
     "wg3qs": {"B": "2", "wg": 3, "qshare": 1},   # timing only (the three pairs read one Q^T region)
+    "sacc2": {"B": "2", "sacc": 2},
 }
 TESTED = []
 
@@ -66,6 +67,70 @@ def kernel(variant, name):
     t = open(env["FLASH2_OUT"]).read(); os.remove(env["FLASH2_OUT"])
     t = t[:t.index('kernel.def target(@rdna4) export("g_attention_flash2_partial_rdna4")')]
     return t.replace('export("g_attention_flash2_rdna4") @g_attention_flash2_rdna4(', f'export("{name}") @{name}(')
+
+
+def micro(k, lds=0, waves=4):
+    """WMMA throughput microbenchmark (variant mm<K>[l<KB>]): 4096 workgroups of WAVES waves, each wave 1024 x 16 f16 WMMAs spread round-robin
+    over K independent accumulators (K = 1: one dependent chain); LDS KB of workgroup memory (touched once) limits the waves per SIMD."""
+    acc = ", ".join(f"%a{j} = %init : vector<8xf32>" for j in range(k))
+    ty = ", ".join(["vector<8xf32>"] * k)
+    body, cur = [], [f"%a{j}" for j in range(k)]
+    for i in range(16):
+        j = i % k
+        body.append(f"      %m{i} = vector.mma %fa, %fb, {cur[j]} : vector<8xf16>, vector<8xf16>, vector<8xf32>")
+        cur[j] = f"%m{i}"
+    tot = cur[0]
+    fin = ""
+    for j in range(1, k):
+        fin += f"  %t{j} = vector.addf {tot}, %r{j} : vector<8xf32>\n"
+        tot = f"%t{j}"
+    res = ", ".join(f"%r{j}" for j in range(k)).replace("%r0", "%r0")
+    ldst = (f"  %lb = index.constant {lds * 1024} : offset\n  %lt = buffer.alloca<workgroup> align(16) %lb : buffer\n"
+            f"  %lv = buffer.view %lt[%origin] : buffer -> view<{lds * 256}xf32>\n  %z1 = scalar.constant 0.0 : f32\n  view.store %z1, %lv[%lane] : f32, view<{lds * 256}xf32>\n") if lds else ""
+    t = f"""kernel.def target(@rdna4) export("k_mm") @k_mm(%n: index) {{
+  %c1 = index.constant 1 : index
+  %cw = index.constant 4096 : index
+  %cl = index.constant {32 * waves} : index
+  kernel.launch.config workgroups(%cw, %c1, %c1) workgroup_size(%cl, %c1, %c1) : index
+}} launch(%n_arg: index, %a: buffer, %o: buffer) {{
+  %n = index.assume %n_arg [range(%n_arg, 1, 65536)] : index
+  %origin = index.constant 0 : offset
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c16 = index.constant 16 : index
+  %lane_id = kernel.subgroup.lane.id : index
+  %lane = index.assume %lane_id [range(%lane_id, 0, 31)] : index
+  %av = buffer.view %a[%origin] : buffer -> view<32x16xf16>
+  %ah = vector.load %av[%lane, %c0] : view<32x16xf16> -> vector<16xf16>
+  %a8 = vector.slice %ah[0] : vector<16xf16> -> vector<8xf16>
+  %b8 = vector.slice %ah[8] : vector<16xf16> -> vector<8xf16>
+  %fa = vector.fragment<lhs> %a8 shape [%c16, %c16] : vector<8xf16>
+  %fb = vector.fragment<rhs> %b8 shape [%c16, %c16] : vector<8xf16>
+{ldst}  %z = vector.constant 0.0 : vector<8xf32>
+  %init = vector.fragment<init> %z shape [%c16, %c16] : vector<8xf32>
+  {", ".join(f"%r{j}" for j in range(k))} = scf.for %i = [%c0 to %n step %c1]({acc}) -> ({ty}) {{
+{chr(10).join(body)}
+      scf.yield {", ".join(cur)} : {ty}
+  }}
+{fin.replace(cur[0], "%r0", 1) if False else ""}"""
+    tot = "%r0"
+    for j in range(1, k):
+        t += f"  %t{j} = vector.addf {tot}, %r{j} : vector<8xf32>\n"
+        tot = f"%t{j}"
+    t += f"""  %ov = buffer.view %o[%origin] : buffer -> view<32x8xf32>
+  vector.store {tot}, %ov[%lane, %c0] : vector<8xf32>, view<32x8xf32>
+  kernel.return
+}}
+check.case public @k_mm_case {{
+  %n = check.literal value(1024) : index
+  %a = check.generate.fill value(0.01) : tensor<512xf16>
+  %o = check.generate.fill value(0.0) : tensor<256xf32>
+  kernel.launch @k_mm[%n](%n, %a, %o) : [index](index, tensor<512xf16>, tensor<256xf32>)
+  check.return
+}}
+check.benchmark<@k_mm_case> @k_mm_bm
+"""
+    return t
 
 
 def save(name, a):
@@ -169,8 +234,12 @@ if __name__ == "__main__" and len(sys.argv) > 2:
     for tag, ctx in CTXS:
         inputs(f"b{tag}", ctx, T, rng)
     for v in (sys.argv[3:] or ["base"]):
-        if v != "base" and not all(x in VARIANTS for x in v.split("+")):
+        if v != "base" and not re.fullmatch(r"mm\d+(l\d+)?(w\d+)?", v) and not all(x in VARIANTS for x in v.split("+")):
             raise SystemExit("unknown variant " + v)
+        m = re.fullmatch(r"mm(\d+)(?:l(\d+))?(?:w(\d+))?", v)
+        if m:
+            open(os.path.join(OUT, f"bench_{v}.loom"), "w").write(HEAD + micro(int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 4)))
+            continue
         v = "" if v == "base" else v
         open(os.path.join(OUT, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(bench(v)))
     text = re.sub(r"check\.expect\.close (actual\(.*\)) : (.*)$", r"check.expect.approximate \1 : \2, \2", HEAD + "\n".join(tests()), flags=re.M)
