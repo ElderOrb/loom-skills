@@ -4817,6 +4817,19 @@ def moe_kernels(row_scale, gemm_fn):
     return "".join(parts)
 
 
+def ab_q8(text, first):
+    """GDN_AB_Q8 (mxfp4s, GEMM-shape epochs): the alpha / beta projections as the 16-token int8 matvec on h quantized once to int8
+    (g_quant_q8 before alpha) instead of the f32 4-token matvec over h (two reads of the f32 rows)."""
+    if os.environ.get("GDN_AB_Q8", "") in ("", "0") or "@g_mv_mxfp4s_k5120_t4[" not in text:
+        return text
+    def sub(m):
+        ind, line = m.group(1), m.group(2)
+        new = line.replace("@g_mv_mxfp4s_k5120_t4[", "@g_mv_mxfp4s_k5120_t16_q8[", 1).replace("%zero_i32, %h,", "%zero_i32, %h16q,", 1)
+        q = f"{ind}kernel.launch @g_quant_q8[%t, %nH](%t, %nH, %h, %h16q) : [index, index](index, index, buffer, buffer)\n" if first else ""
+        return q + ind + new
+    return re.sub(r"^( *)(kernel\.launch @g_mv_mxfp4s_k5120_t4\[.*)$", sub, text, count=1, flags=re.M)
+
+
 def gdn_layer(i, b, nm, sz, par):
     """Gated delta-net token mixer of layer i: h -> o (VD wide), then o16 for the output GEMM."""
     g = GDN
@@ -4851,8 +4864,8 @@ def gdn_layer(i, b, nm, sz, par):
     T = P + [
         "  " + lin(fmt_of(nm("attn_qkv")), "%h", "%s_h", f"%wqkv_{i}", sz("attn_qkv"), "%gq", "%nH", "%nC", H) + "\n",
         "  " + lin(fmt_of(nm("attn_gate")), "%h", "%s_h", f"%wz_{i}", sz("attn_gate"), "%gz", "%nH", "%nVD", H) + "\n",
-        "  " + lin_mv(fmt_of(nm("ssm_alpha")), "%h", f"%walpha_{i}", sz("ssm_alpha"), "%galpha", "%nHV", H) + "\n",
-        "  " + lin_mv(fmt_of(nm("ssm_beta")), "%h", f"%wbeta_{i}", sz("ssm_beta"), "%gbeta", "%nHV", H) + "\n",
+        ab_q8("  " + lin_mv(fmt_of(nm("ssm_alpha")), "%h", f"%walpha_{i}", sz("ssm_alpha"), "%galpha", "%nHV", H), True) + "\n",
+        ab_q8("  " + lin_mv(fmt_of(nm("ssm_beta")), "%h", f"%wbeta_{i}", sz("ssm_beta"), "%gbeta", "%nHV", H), False) + "\n",
         f"""{MIX}
   scf.if %gemm {{
     kernel.launch @g_row_scale_f16[%t](%t, %nVD, %o, %s_o, %o16) : [index](index, index, buffer, buffer, buffer)
