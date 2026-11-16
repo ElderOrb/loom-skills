@@ -1,47 +1,89 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
+ "_comment": "R9700 image-input context sweep 110592..131072 on the draft-copies package; two warm-up serves first (the first serves of a job crashed on their first request)",
  "runner": "r9700",
  "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+ "kit": null,
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "name": "ctx-img",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "require_preset_r9700": true,
    "kit": null,
-   "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "memory_bytes_r9700": 34000000000,
    "variants": [
     {
-     "name": "card",
-     "build": {}
+     "name": "w1",
+     "context": 65536,
+     "execution": {
+      "context_capacity": 65536,
+      "pool_capacity": 65536
+     }
     },
     {
-     "name": "nodraft",
-     "build": {},
+     "name": "w2",
+     "context": 65536,
      "execution": {
-      "draft_depth": 0
+      "context_capacity": 65536,
+      "pool_capacity": 65536
+     }
+    },
+    {
+     "name": "c110",
+     "context": 110592,
+     "execution": {
+      "context_capacity": 110592,
+      "pool_capacity": 110592
+     }
+    },
+    {
+     "name": "c113",
+     "context": 113664,
+     "execution": {
+      "context_capacity": 113664,
+      "pool_capacity": 113664
+     }
+    },
+    {
+     "name": "c118",
+     "context": 118784,
+     "execution": {
+      "context_capacity": 118784,
+      "pool_capacity": 118784
+     }
+    },
+    {
+     "name": "c122",
+     "context": 122880,
+     "execution": {
+      "context_capacity": 122880,
+      "pool_capacity": 122880
+     }
+    },
+    {
+     "name": "c128",
+     "context": 131072,
+     "execution": {
+      "context_capacity": 131072,
+      "pool_capacity": 131072
      }
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
-   ]
+    "func:w1",
+    "func:w2",
+    "func:c110",
+    "func:c113",
+    "func:c118",
+    "func:c122",
+    "func:c128",
+    "fullctx:c110",
+    "fullctx:c113",
+    "fullctx:c118",
+    "fullctx:c122",
+    "fullctx:c128"
+   ],
+   "runner": "r9700"
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
