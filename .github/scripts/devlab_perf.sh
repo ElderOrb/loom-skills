@@ -68,6 +68,7 @@
 #          vllm:N[:long]        vLLM ROCm (vllm_server.sh --install) serving the card's checkpoint, the card's drafting (job "vllm_spec" = the --speculative-config JSON), perf.py --kind vllm N times
 #                               (job "vllm_max_len": --max-model-len, default the served context); perf_vllm_nN.jsonl, vllm_args.txt, vllm_version.txt (a card with no llama.cpp baseline)
 #          vllmc4[:N]           4 streams on vLLM without drafting, N (default 3) runs of c4_steady.py: c4_vllm_nN.txt
+#          fullctx:V[:TOKENS]   ctx_admit.py --complete: a request of ~the served context (or TOKENS) is prefilled to the end and answered (fullctx_V*.txt)
 #          func:V               V served alone: the functional checks the card claims (chat, tool calling, image input;
 #                               r9700_func.py: the same checks as the Windows red-team harness), out/func_V.json
 #          logits:V[:N]         host logits readback (loom-skills#736): V's package through the Gufo bundle (loom-gufo-extension
@@ -618,6 +619,11 @@ print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v)
       step "context admission $p1 ${p2:-}"
       (cd "$out" && "$T" "$B/ctx_admit.py" "$D/$p1/pkg" "$url" ${p2:+--tokens "$p2"} 2>&1 | tee "admit_${p1}${p2:+_$p2}.txt" | tail -3)
       res[$s]=$(tail -1 "$out/admit_${p1}${p2:+_$p2}.txt" | cut -c1-200);;
+    fullctx)   # fullctx:V[:TOKENS]: one request of ~the served context that must finish (ctx_admit.py --complete): the card's context is a measured one
+      serve_alone "$p1" || { res[$s]=ERROR; continue; }
+      step "full-context request $p1 ${p2:-}"
+      (cd "$out" && "$T" "$B/ctx_admit.py" "$D/$p1/pkg" "$url" ${p2:+--tokens "$p2"} --complete 2>&1 | tee "fullctx_${p1}${p2:+_$p2}.txt" | tail -3)
+      res[$s]=$(tail -1 "$out/fullctx_${p1}${p2:+_$p2}.txt" | cut -c1-200);;
     gates)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
