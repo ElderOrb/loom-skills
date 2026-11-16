@@ -15,6 +15,7 @@ no clock, no environment. Every sentence is part of this template; only the fill
 cards. Never edit a rendered README by hand: change the data (make_info.py) or this template, and re-render.
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -147,9 +148,63 @@ def llama_draft(args):
     return (LLAMA_METHOD.get(m.group(1), m.group(1)) if m else None), (int(n.group(1)) if n else None)
 
 
-def methodology(base, extra, spec, drafter, values, runs_c4):
+def vllm_draft(args):
+    """(method, num_speculative_tokens or None) of a vLLM server's arguments (--speculative-config JSON), (None, None) without drafting."""
+    m = re.search(r"--speculative-config\s+'?(\{[^']*\})", args or "")
+    if not m:
+        return None, None
+    try:
+        c = json.loads(m.group(1))
+    except ValueError:
+        return "drafting", None
+    return LLAMA_METHOD.get("draft-" + str(c.get("method")), str(c.get("method", "drafting")).upper() if c.get("method") != "mtp" else "MTP"), c.get("num_speculative_tokens")
+
+
+def has_baseline_values(perf_metrics_):
+    """Whether any shown row carries a baseline value."""
+    return any((m or {}).get("baseline") is not None for m in perf_metrics_)
+
+
+def methodology_other(base, spec, drafter, values, runs_c4, measured):
+    """The methodology of a card whose baseline engine is not llama.cpp (a safetensors checkpoint llama.cpp cannot read): vLLM ROCm on the
+    same runner, same requests, timed by the client on both engines; or no baseline at all (measured False) with the reason."""
+    name = f"{base['name']} ROCm"
+    loom_m = METHOD.get(spec[0], spec[0]) if spec else None
+    notes = [f"{name}: {u}" if not u.startswith("Loom:") else u for u in (base.get("differs") or [])]
+    if not measured:
+        out = [f"- No baseline engine is measured on this card: llama.cpp cannot read the safetensors checkpoint, and {name} has no rows yet. "
+               "The Loom column is one DevLab session on the same runner and job as the roofline; rates are timed by the client. "
+               + values + f" (4 streams: median of {runs_c4}).",
+               "- Rows: decode = short-context decode; decode_2k / decode_32k = decode after a ~2k / ~32k-token context; "
+               "prefill_Nk = prompt processing of an N k-token prompt; streams4 = 4-stream aggregate decode."]
+    else:
+        ver = f"{name} `{base['version']}`" if base.get("version") else f"{name} (build not recorded)"
+        m, n = vllm_draft(base.get("args"))
+        if spec and m == loom_m:
+            draft = f"{loom_m}" + (f" ({drafter})" if drafter else "") + " on both engines" + f"; draft depth: Loom {spec[1]}, {base['name']} {n or 'default'} (each engine its own)"
+        else:
+            draft = f"Loom {loom_m + ' depth ' + str(spec[1]) if spec else 'no drafting'}; {name} {m or 'no drafting'} (NOT the same choice on both engines)"
+        out = [f"- Compared: Loom against {ver}; the same checkpoint, the same DevLab runner and job, the same prompts (llama.cpp cannot read a safetensors "
+               f"checkpoint); Loom served with the active wait. {values} (4 streams: median of {runs_c4}); both engines are timed by the client "
+               "(first streamed token and the stream's token rate).",
+               f"- Out of the box on both engines: Loom serves the preset shipped in this package; {name} runs its defaults plus only the server "
+               "arguments listed below. No tuning sweep on either engine.",
+               f"- Drafting, 1-stream rows (decode, decode_2k, decode_32k, prefill): {draft}. Each engine is loaded once for all these rows.",
+               "- 4 streams: both engines loaded with drafting off, 4 parallel requests, aggregate tokens per second.",
+               "- Rows: decode = short-context decode; decode_2k / decode_32k = decode after a ~2k / ~32k-token context; "
+               "prefill_Nk = prompt processing of an N k-token prompt; streams4 = 4-stream aggregate decode. A margin within "
+               f"+-{round(TIE_BAND * 100)} % (the measured same-runner noise) is a tie.",
+               f"- {name} server arguments: " + (f"`{base['args']}`." if base.get("args") else "not recorded.")]
+    if notes:
+        out.append("- Not supported / not measured: " + "; ".join(notes) + ".")
+    return out
+
+
+def methodology(base, extra, spec, drafter, values, runs_c4, measured=True):
     """The card's methodology: the same short template on every card, filled from the card's own data (baseline server
     arguments, drafting setting, runs). Anything that differs between the engines is stated as it is, not smoothed over."""
+    if base["name"] != "llama.cpp":
+        return methodology_other(base, spec, drafter, values, runs_c4, measured)
     vk = next((x["baseline"] for b, x in extra.items() if b == "vulkan"), None)
     engines = [(base["name"] + " ROCm", base)] + ([(base["name"] + " Vulkan", vk)] if vk else [])
     ver = ", ".join(f"{n} `{b['version']}`" if b.get("version") else f"{n} (build not recorded)" for n, b in engines)
@@ -304,7 +359,7 @@ def roofline_note(info):
     if r:
         t, d, dr = r["tool"], r["device"], r.get("drafting")
         commit = short(t["skills_commit"]) if t["skills_commit"] != "unknown" else "unknown commit"
-        out = (f"Roofline: the hardware ceiling for this GGUF on {d['name']} at {d['bandwidth_bytes_per_s'] / 1e9:.0f} GB/s "
+        out = (f"Roofline: the hardware ceiling for this {'checkpoint' if str(r.get('checkpoint', '')).endswith('.safetensors') else 'GGUF'} on {d['name']} at {d['bandwidth_bytes_per_s'] / 1e9:.0f} GB/s "
                f"and {d['peak_flops'] / 1e12:.0f} TFLOP/s, from loom-roofline `roofline.py` (loom-skills {commit}"
                + (", with local changes" if t.get("dirty") else "") + ")")
         if dr:
@@ -334,6 +389,8 @@ def gpu_line(info, g):
     if dev.get("state") == "unsupported":
         return (f"{GPUS[g]['name']} ({gpu_arch(g)}): this package does not fit its "
                 f"{GPUS[g]['memory'] or 'memory'} (it needs about {dev['required_bytes'] / 1e9:.0f} GB).")
+    if dev.get("state") == "not_a_target":
+        return f"{GPUS[g]['name']} ({gpu_arch(g)}): not a target of this package, not measured: {dev['reason']}"
     if not has_runner(g):   # no DevLab runner is registered for the device: it cannot be measured, so the card does not claim to serve it
         return f"{GPUS[g]['name']} ({gpu_arch(g)}): not measured (no runner for this GPU yet)."
     return f"{GPUS[g]['name']} ({gpu_arch(g)}): the results for this package are not yet re-measured."
@@ -344,7 +401,7 @@ def single_layout(info):
     reads exactly as the cards of one GPU always did. Otherwise each GPU gets its own table and column."""
     gpus = card_gpus(info)
     res = [g for g in gpus if has_results(info["devices"][g])]
-    return len(res) == 1 and all(info["devices"][g].get("state") == "unsupported" for g in gpus if g not in res)
+    return len(res) == 1 and all(info["devices"][g].get("state") in ("unsupported", "not_a_target") for g in gpus if g not in res)
 
 
 def serve_command(info, facts, feats, gpu, output):
@@ -478,7 +535,8 @@ def perf_section(L, info, facts, feats, d, g, here, ctx):
     drafter = None
     if facts["drafter"]:
         drafter = f"{facts['drafter']['repo']} / {facts['drafter']['file']}"
-    L += ["", "**Methodology**", "", *methodology(base, extra, facts["spec"], drafter, values_of(tps_keys), runs_of(["streams4"], True)),
+    L += ["", "**Methodology**", "", *methodology(base, extra, facts["spec"], drafter, values_of(tps_keys), runs_of(["streams4"], True),
+                                                        has_baseline_values(m for m, _ in (shown[k] for k, _ in METRICS if k in shown))),
           f"- Measured on AMD DevLab Dispatch {GPUS[g]['runner']} runners (`devlab-perf` jobs); runners differ between sessions."]
     if psrc:
         L.append(f"- Measured {text(sessions[primary]['date'])}; device {device_text(psrc['device'])}; "
@@ -531,7 +589,7 @@ def render(d):
     gpus = card_gpus(info)
     solo = single_layout(info)
     live = [g for g in gpus if has_results(info["devices"][g])]
-    named = [g for g in gpus if info["devices"][g].get("state") != "unsupported" and (has_results(info["devices"][g]) or has_runner(g))]
+    named = [g for g in gpus if info["devices"][g].get("state") not in ("unsupported", "not_a_target") and (has_results(info["devices"][g]) or has_runner(g))]
     output = card.get("output") or facts["output"] or facts["name"]
     native = native_context(feats)
 
@@ -539,15 +597,18 @@ def render(d):
     if card.get("license"):
         L.append(f"license: {card['license']}")
     tags = derived_tags(feats, named) + [t for t in card.get("tags") or [] if t not in derived_tags(feats, named)]
+    st = c["file"].endswith(".safetensors")   # an HF safetensors checkpoint (inspect_safetensors.py), not a GGUF
+    if st:
+        tags = ["safetensors" if t == "gguf" else t for t in tags]
     L += ["tags:", *[f"- {t}" for t in tags], "---", ""]
 
     quant = f" ({c['quant']})" if c["quant"] else ""
     where = " and ".join(GPUS[g]["name"] for g in named) if named else GPUS[DEFAULT_GPU]["name"]
     L += [f"# {facts['name']}{quant} for AMD Loom", "",
-          f"A [Loom]({LOOM_URL}) package (`.loom` programs and a `model.json` card) for the unmodified GGUF checkpoint "
+          f"A [Loom]({LOOM_URL}) package (`.loom` programs and a `model.json` card) for the unmodified {'safetensors' if st else 'GGUF'} checkpoint "
           f"{hf(c['repo'])} (`{c['file']}`), generated on an {where} with the "
           f"[loom-skills]({SKILLS_URL}) workflow. {LEARN_MORE}" if solo or len(named) < 2 else
-          f"A [Loom]({LOOM_URL}) package (`.loom` programs and a `model.json` card) for the unmodified GGUF checkpoint "
+          f"A [Loom]({LOOM_URL}) package (`.loom` programs and a `model.json` card) for the unmodified {'safetensors' if st else 'GGUF'} checkpoint "
           f"{hf(c['repo'])} (`{c['file']}`), for the {where} GPUs, generated with the "
           f"[loom-skills]({SKILLS_URL}) workflow. {LEARN_MORE}", ""]
 
@@ -568,7 +629,7 @@ def render(d):
     else:
         install = ['pipx install "hrx-loom[hf]"']   # no SDK version recorded anywhere (cannot happen for a built card)
     # a GPU with no runner and no results is not measured at all: no Quick start for it (its line below says so)
-    serving = [g for g in gpus if info["devices"][g].get("state") != "unsupported"
+    serving = [g for g in gpus if info["devices"][g].get("state") not in ("unsupported", "not_a_target")
                and (has_results(info["devices"][g]) or has_runner(g))] or [DEFAULT_GPU]
     if len(serving) == 1:
         L += ["## Quick start", "", "```bash", *install, fetch_for(serving[0]), serve_command(info, facts, feats, serving[0], output), "```", ""]
@@ -609,7 +670,7 @@ def render(d):
                       + ", ".join(f"`{k}` {v:,}" if isinstance(v, int) and not isinstance(v, bool) else f"`{k}` {v}" for k, v in sorted(diff.items()))
                       + f" for its {GPUS[g]['memory'] or 'memory'}. The programs, weights and tokenizer are the same.", ""]
     for g in gpus:
-        if info["devices"][g].get("state") == "unsupported":
+        if info["devices"][g].get("state") in ("unsupported", "not_a_target"):
             L += [gpu_line(info, g), ""]
 
     # ---- performance
@@ -711,7 +772,13 @@ def render(d):
     return "\n".join(L) + "\n"
 
 
-def method_text(gpus, aggs=(None,)):
+def engine_of(info, gpus, facts):
+    """(baseline engine name, "GGUF" | "safetensors checkpoint") for the report's method text."""
+    names = {((gpu_view(info, g).get("performance") or {}).get("baseline") or {}).get("name") for g in gpus} - {None}
+    return (sorted(names)[0] if names else "llama.cpp"), ("checkpoint" if facts["checkpoint"]["file"].endswith(".safetensors") else "GGUF")
+
+
+def method_text(gpus, aggs=(None,), engine="llama.cpp", checkpoint="GGUF"):
     """The report's method bullets; the runner is the one GPU's (the same text a one-GPU card always had). aggs: the
     "aggregate" of every session shown (None: the mean of its runs, recorded before the median rule)."""
     aggs = set(aggs)
@@ -726,15 +793,15 @@ def method_text(gpus, aggs=(None,)):
     f"metric; {value}.",
     "- `c4_steady.py` runs 4 concurrent streams and reports the aggregate decode rate over the window in which all "
     "4 are decoding; the card shows the median of the runs.",
-    "- One engine runs at a time on the same machine, with the same GGUF. Loom rates are timed by the client; "
-    "llama.cpp rates come from its server-side `timings`.",
+    f"- One engine runs at a time on the same machine, with the same {checkpoint}. Loom rates are timed by the client; "
+    + ("llama.cpp rates come from its server-side `timings`." if engine == "llama.cpp" else f"{engine} rates are timed by the client the same way."),
     f"- Every performance value comes from a `devlab-perf` job (loom-skills) on an AMD DevLab Dispatch {runner} runner: "
-    "Loom, served with the active wait (`--device=amdgpu://?completion_spin_ns=4294967295`), and llama.cpp on the same "
+    f"Loom, served with the active wait (`--device=amdgpu://?completion_spin_ns=4294967295`), and {engine} on the same "
     "runner, with the published programs.",
     "- Drafted tokens accepted is the `spec` gate's count: accepted over proposed draft tokens across its requests.",
     "- Gates are loom-benchmark's `gates.sh` at the LEVEL shown; DevLab runs are the nightly-gates workflow on AMD "
     "DevLab Dispatch.",
-    "- Roofline: per metric, the rate at the hardware limit computed from the GGUF's tensors by loom-roofline "
+    "- Roofline: per metric, the rate at the hardware limit computed from the " + ("GGUF's" if checkpoint == "GGUF" else "checkpoint's") + " tensors by loom-roofline "
     "`roofline.py`: decode is memory bandwidth / bytes read per token (weights, active experts, KV cache), prefill is "
     "peak FLOP/s / flops per token, 4 streams reads the weights once for 4 tokens. With speculative decoding, decode "
     "and 4 streams are verify passes per second x (1 + acceptance x depth) tokens per pass, with the acceptance measured "
@@ -871,7 +938,8 @@ def render_report(d):
     L += ["- Programs measured: the sha256 below is card_lib.programs_sha256, over `program/*.loom` without each file's "
           "first-line generator comment.", "",
           "## Method", "", *method_text(live, [s.get("aggregate") for g in live
-                                                    for s in (gpu_view(info, g).get("performance") or {}).get("sessions", [])]), ""]
+                                                    for s in (gpu_view(info, g).get("performance") or {}).get("sessions", [])],
+                                       *engine_of(info, live, facts)), ""]
     if solo:
         report_gpu(L, info, facts, live[0], here, "##", True)
     else:
