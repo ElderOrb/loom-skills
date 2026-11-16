@@ -133,6 +133,10 @@ separately. Tools: `fleet/README.md`; process: [targeted-fix.md](targeted-fix.md
     a new checkpoint revision, a changed vision case) is recorded by that job as before; add its `gates_V/llama_cache.tgz` to the store
     with `reference_cache.py merge --repo ORG/REPO --engine ENGINE TGZ` in the same PR. Job field `"reference_cache": "none"` forces a cold
     recording.
+    The store is one coherent recording: vLLM's answer to the same request varies between jobs (28 of 101 keys recorded in different jobs of this
+    campaign differ in their tokens, mostly late near-tie flips), so `merge` only ever adds keys, never replaces one, and the store is not a union of
+    every job's tgz. A fixed recording also makes the gate deterministic. Agent-turn requests contain Loom's own earlier replies: a change that alters
+    Loom's text creates new keys (a miss, recorded by that job); a change that keeps the text identical never misses.
 
 ## Regenerating many cards: `fleet/regen.py`
 
