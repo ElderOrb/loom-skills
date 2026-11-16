@@ -59,6 +59,7 @@ elif [ -n "${LLAMA_URL:-}" ]; then
   L=$LLAMA_URL   # an already running llama-server (both models loaded: only if memory allows)
 elif [ -n "$safetensors" ]; then
   L=http://127.0.0.1:$lport
+  [ -n "$MMPROJ" ] && export VLLM_IMAGES=${VLLM_IMAGES:-2}   # the vision gate sends images; text-only packages keep vLLM's vision profile off
   export VLLM_STATE=${VLLM_STATE:-$bench/vllm-state} LLAMA_CACHE_BUILD=vllm-${VLLM_VERSION:-0.18.0}
   export LLAMA_START="'$S/vllm_server.sh' '$ckpt' $lport $slot"
   export LLAMA_STOP="'$S/vllm_server.sh' --stop $lport"

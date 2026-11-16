@@ -21,9 +21,34 @@ if [ "${1:-}" = --stop ]; then
 fi
 venv=${VLLM_VENV:-$state/venv}
 ldextra() { export LD_LIBRARY_PATH=$(ls -d "$venv"/extra/usr/lib/*/ "$venv"/extra/usr/lib/*/openmpi/lib 2>/dev/null | tr '\n' ':')${LD_LIBRARY_PATH:-}; }
+# Quark's MXFP4 emulation (what vLLM runs on a GPU without native MXFP4) JIT-compiles HIP kernels at first use: it needs hipcc + the HIP headers,
+# which the runners lack (R9700: none; no passwordless sudo on Strix). The TheRock pip packages bring them: rocm[libraries,devel] from
+# repo.amd.com/rocm/whl/<arch index>, into $venv-rocm. VLLM_NO_HIPDEV=1 skips it (checkpoints that never emulate).
+rocmenv() {
+  local r
+  if [ -d "$venv-rocm" ] && [ -x "$venv-rocm/bin/rocm-sdk" ]; then
+    r=$("$venv-rocm/bin/rocm-sdk" path --root 2>/dev/null) || r=
+    if [ -n "$r" ]; then export ROCM_PATH=$r HIP_PATH=$r ROCM_HOME=$r PATH=$r/bin:$PATH LD_LIBRARY_PATH=$r/lib:${LD_LIBRARY_PATH:-}; fi
+  fi
+  [ -n "${GFX_ARCH:-}" ] && export PYTORCH_ROCM_ARCH=$GFX_ARCH
+  return 0
+}
+hipdev() {
+  [ "${VLLM_NO_HIPDEV:-0}" = 1 ] && return 0
+  GFX_ARCH=$("$venv/bin/python" -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName.split(':')[0])" 2>/dev/null || true)
+  rocmenv
+  command -v hipcc >/dev/null && [ -f "${ROCM_PATH:-/opt/rocm}/include/hip/hip_runtime.h" ] && return 0
+  local idx; case "$GFX_ARCH" in gfx120*) idx=gfx120X-all;; gfx1151) idx=gfx1151;; gfx1150) idx=gfx1150;; gfx110*) idx=gfx110X-all;; *) idx=gfx120X-all;; esac
+  echo "HIP dev packages for $GFX_ARCH ($idx)" | tee -a "$state/vllm-install.log"
+  uv venv --clear --python 3.12 "$venv-rocm" >> "$state/vllm-install.log" 2>&1 \
+    && uv pip install --python "$venv-rocm/bin/python" "rocm[libraries,devel]" --index-url "https://repo.amd.com/rocm/whl/$idx/" --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match >> "$state/vllm-install.log" 2>&1 \
+    || { echo "WARNING: rocm[devel] install failed (Quark emulation JIT will fail)"; tail -5 "$state/vllm-install.log"; return 0; }
+  rocmenv
+  echo "ROCM_PATH=${ROCM_PATH:-unset} hipcc=$(command -v hipcc || echo none) hip_runtime.h=$(ls "${ROCM_PATH:-/x}"/include/hip/hip_runtime.h 2>&1 | tail -1)" | tee -a "$state/vllm-install.log"
+}
 install() {
   ldextra
-  [ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import vllm,sys; sys.exit(0 if vllm.__version__.split('+')[0]=='$VLLM_VERSION' else 1)" 2>/dev/null && return 0
+  [ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import vllm,sys; sys.exit(0 if vllm.__version__.split('+')[0]=='$VLLM_VERSION' else 1)" 2>/dev/null && { GFX_ARCH=$("$venv/bin/python" -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName.split(':')[0])" 2>/dev/null || true); rocmenv; return 0; }
   local t0=$(date +%s)
   export PATH=$HOME/.local/bin:$PATH
   if ! command -v uv >/dev/null; then   # no uv on the runner: the official installer (to ~/.local/bin), else pip
@@ -52,6 +77,7 @@ install() {
   fi
   ldextra
   "$venv/bin/python" -c "import torch; print('torch', torch.__version__, 'hip', torch.version.hip, 'devices', torch.cuda.device_count())" 2>&1 | tee -a "$state/vllm-install.log" | tail -3
+  hipdev
   echo "INSTALLED vllm $VLLM_VERSION $VLLM_ROCM_VARIANT in $(( $(date +%s) - t0 )) s" | tee -a "$state/vllm-install.log"
 }
 if [ "${1:-}" = --install ]; then install && echo "$venv/bin/python"; exit; fi
