@@ -46,4 +46,4 @@ make_kernel_tests):
 - Exactness: `scan_mxfp4s_exponents.py` (local or HF range read) reports the E8M0 range of a checkpoint; the AMD Qwen3.8-27B checkpoint has e = 107..128 in all 760,954,880
   blocks, so the bf8 decode (exact for 107..132) loses nothing. A checkpoint outside the range needs a wider shift or the f16 path (not built).
 - Bytes: nibble plane 16 B + scale plane 1 B per 32 weights = 4.25 bits per weight, the same as ggml's 17-byte blocks; the planes are two streams per row.
-- Choice `prefill.mxfp4s.fuse` (fprod): the SwiGLU GEMM writes f16 x 2^-4 and the down projection's producer reads it; see `device/rdna4/prefill.md`.
+- Choice `prefill.mxfp4s.fuse` (fprod): the fp8 post-add-norm producers skip the f32 `h` write (bit-exact); the f16 SwiGLU intermediate fails the agent gate; see `device/rdna4/prefill.md`.

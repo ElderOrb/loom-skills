@@ -98,7 +98,7 @@ class KernelTests(unittest.TestCase):
         """the tile shape / pipelining / grid / prefetch / output / pitch options of the generator (device/rdna4/prefill.md: all measured, none a win)"""
         for mode, kw in (("store", dict(bm=128, tn=256)), ("store", dict(bm=256, tn=256)), ("swiglu", dict(bm=256, tn=128)), ("store", dict(swp=True)),
                          ("store", dict(rf=2, swp=True)), ("swiglu", dict(swz=True)), ("store", dict(pfa=2)), ("swiglu", dict(yf16=True)), ("store", dict(pad=32)),
-                         ("store", dict(radd=True)), ("swiglu", dict(ysc16=True))):
+                         ("store", dict(radd=True))):
             with tempfile.TemporaryDirectory() as d:
                 f = Path(d) / "t.loom"
                 f.write_text(HEADER + R.gemm_mxfp4s_f8_m256(mode, **kw))
@@ -301,16 +301,20 @@ command.program.def public @llm_advance() launch(%weights: buffer) {{
         self.assertNotIn("radd", text)
         self.assertNotIn("%fz_", text)
         self.assertNotIn("_bf16_", text)
+        self.assertNotIn("%wh_on", text)
 
-    def test_fuse_writes_the_swiglu_output_as_f16s_and_flags_its_producer(self):
+    def test_fuse_drops_the_f32_h_write_of_the_post_add_twins_only(self):
         text, n = R.fuse_mxfp4s_f8(self.program_with_next_layer(), fuse=True)
         self.assertEqual(n, 3)
-        self.assertIn("@g_gemm_mxfp4s_swiglu_f8_f16s_m256_rdna4[", text)
-        self.assertRegex(text, r"@g_row_scale_f16_live_lv_f8_rdna4\[%t\]\(%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8, %w16_\w+, %fz_huge\)")
-        self.assertRegex(text, r"@g_post_add_norm_rs_live_lv_f8_rdna4\[%t\]\(%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_\w+, %fz_zero\)")
+        self.assertNotIn("f16s", text)   # the SwiGLU output stays f32 (f16 x 2^-4 and bf16 move the agent gate)
         self.assertNotIn("radd", text)   # the residual add in the projections is opt-in (radd=True): a tie with the plain GEMM + producer
-        self.assertIn("%fz_huge = scf.select %huge, %fz_one, %fz_zero : index", text)
-        self.assertIn("%fl: index) {", text)   # the twins take the flag
+        self.assertNotIn("%fz_", text)   # no flag arguments without radd
+        self.assertIn("@g_row_scale_f16_live_lv_f8_rdna4[%t](%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8, %w16_flag)", text)
+        self.assertIn("@g_post_add_norm_rs_live_lv_f8_rdna4[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_flag)", text)
+        t = R.f8_producer(ProducerTests().kernel("g_post_add_norm_rs_live_lv"), noh=True)
+        self.assertIn("scf.if %wh_on {", t)   # the f32 h store runs only when %w16 != 0
+        self.assertEqual(t.count("vector.store %hv, %h_view"), 1)
+        self.assertNotIn("scf.if %wh_on {", R.f8_producer(ProducerTests().kernel("g_post_add_norm_rs_live_lv")))
 
     def test_fuse_with_radd_adds_the_output_projection_into_the_residual(self):
         text, n = R.fuse_mxfp4s_f8(self.program_with_next_layer(), fuse=True, radd=True)
@@ -333,10 +337,10 @@ command.program.def public @llm_advance() launch(%weights: buffer) {{
         for name in ("g_row_scale_f16_live_lv", "g_post_add_norm_rs_live_lv"):
             with tempfile.TemporaryDirectory() as d:
                 f = Path(d) / "t.loom"
-                f.write_text(HEADER + R.f8_producer(ProducerTests().kernel(name), flag=True))
+                f.write_text(HEADER + R.f8_producer(ProducerTests().kernel(name), flag=name.startswith("g_post"), noh=True))
                 r = subprocess.run([loom_compile(), str(f), "--format=amdgpu-hsaco", "--target=amdgpu:gfx1201", f"--output={d}/o.hsaco"], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr[:2000])
-        t = R.f8_producer(ProducerTests().kernel("g_post_add_norm_rs_live_lv"), flag=True)
+        t = R.f8_producer(ProducerTests().kernel("g_post_add_norm_rs_live_lv"), flag=True, noh=True)
         self.assertNotIn("%ysq", t)   # no post-norm: the y statistics are dead code in the twin
         self.assertIn("scf.if %fl_off {", t)   # x is not rewritten when the projection already added
 

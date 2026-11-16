@@ -289,11 +289,12 @@ CHOICE("prefill.gemm.mxfp4s_f8_kernel", "str", None, "GEMM_MXFP4S_F8_KERNEL", ke
            "(one 16-byte load per lane covers two K substeps: activations global_load_b128 with immediate offsets, weights ds_load_b128; both operands in the same permuted K "
            "order) and issue the next K pair's loads before this pair's WMMAs; the SwiGLU pair stays v1. lv: lane-vector without the pipelining (SwiGLU at 64-row waves); "
            "ws: wave-specialized (4 producer waves decode the next step into a second LDS buffer). kbench gemm_mxfp4s (R9700): lvs store -5..-6 % at 1024 rows, lv +3..7 %, ws +8..19 %.")
-CHOICE("prefill.mxfp4s.fuse", "bool", False, "MXFP4S_FUSE", kernels=["g_gemm_mxfp4s_swiglu_f8_f16s_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
+CHOICE("prefill.mxfp4s.fuse", "bool", False, "MXFP4S_FUSE", kernels=["g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
        devices=["rdna4"], from_pr="mxfp4st-fprod",
-       doc="gfx12 fp8 prefill of an MXFP4 split-plane model (needs prefill.gemm.mxfp4s_f8), fewer bytes between the kernels: the SwiGLU GEMM writes its output as f16 times 2^-4 "
-           "(half the bytes of the f32 intermediate; exact power-of-two scaling, range 1e6) and the down projection's row-scale producer reads it (trailing flag argument of the fp8 twins). "
-           "Only the %huge epochs (256-row multiples); other epoch shapes and the gfx11 programs are unchanged. bf16 instead of f16 moved two prompts of the compare gate (fail). Opt-in per model.")
+       doc="gfx12 fp8 prefill of an MXFP4 split-plane model (needs prefill.gemm.mxfp4s_f8): the fp8 twins of the post-add-norm producers write the f32 normalized row h only when "
+           "the epoch takes the f16 GEMMs (%w16 != 0); the fp8 epochs read h8, so the dropped store has no reader. Bit-exact (the generated fp8 GEMM inputs are identical); "
+           "%huge epochs only, the gfx11 programs and the other epoch shapes are unchanged. Opt-in per model. (An f16 x 2^-4 SwiGLU intermediate, bf16 instead, and the residual add in the "
+           "output projections' epilogue were measured: the f16 and bf16 intermediates fail the agent gate on the current base, the residual add ties; see device/rdna4/prefill.md.)")
 CHOICE("prefill.attn.no_flash2", "bool", False, "NO_FLASH2", kernels=["*_attention_flash2*"], rows=ROWS_PREFILL, enc=("1", "0"),
        doc="No prefill flash attention (every token takes the listed split-K path).")
 CHOICE("prefill.gemm.off", "bool", False, "NO_GEMM", kernels=["g_gemm_*"], rows=ROWS_PREFILL, enc=("1", None), experiment=True,
