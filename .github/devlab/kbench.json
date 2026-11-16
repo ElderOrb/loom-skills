@@ -8,21 +8,23 @@
       "gen": "flash_r9700/gen_bench.py",
       "gen_variants": [
         "base",
-        "b3",
-        "kv0",
-        "noqk",
-        "nopv",
-        "nobar",
-        "noexp"
+        "vtop",
+        "vmid",
+        "vtop2",
+        "vtop+kv0",
+        "vtop+noqk",
+        "vmid+noqk",
+        "vtop+nopv"
       ],
       "files": [
         "bench.loom",
-        "bench_b3.loom",
-        "bench_kv0.loom",
-        "bench_noqk.loom",
-        "bench_nopv.loom",
-        "bench_nobar.loom",
-        "bench_noexp.loom"
+        "bench_vtop.loom",
+        "bench_vmid.loom",
+        "bench_vtop2.loom",
+        "bench_vtop+kv0.loom",
+        "bench_vtop+noqk.loom",
+        "bench_vmid+noqk.loom",
+        "bench_vtop+nopv.loom"
       ],
       "tests": [
         "test.loom"
