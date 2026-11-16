@@ -54,10 +54,11 @@ def rewrite_b2(text, kvh, d, partial, qh=None):
     epi_b = re.sub(r"(?<![\w%])%head\b(?!\w)", "%head1", epi_b)
     epi_b = re.sub(r"%head\b(?!\w)", "%head1", epi_b)
     # Q^T staging of both heads
-    qst = ("  %fb_c8 = index.constant 8 : index\n  %fb_cfpw = index.constant " + str(FPW) + " : index\n  %fb_cdw = index.constant " + str(FPW * 8) + " : index\n"
-           "  %fb_chalf = index.constant " + str(d // 2) + " : index\n"
-           "  %fb_dh8 = index.mul %dim_half, %fb_cfpw : index\n  %fb_dh64 = index.mul %dim_half, %fb_cdw : index\n"
-           "  %fb_h256 = index.mul %lane_half, %fb_chalf : index\n  %fb_qb = index.add %fb_h256, %fb_dh64 : index\n"
+    cfpw = "%fb_c8" if FPW == 8 else "%fb_cfpw"   # d 512 keeps its original text (the gemma4 program stays byte-identical)
+    qst = ("  %fb_c8 = index.constant 8 : index\n  %fb_c64 = index.constant " + str(FPW * 8) + " : index\n  %fb_c256 = index.constant " + str(d // 2) + " : index\n"
+           + ("" if FPW == 8 else "  %fb_cfpw = index.constant " + str(FPW) + " : index\n") +
+           "  %fb_dh8 = index.mul %dim_half, " + cfpw + " : index\n  %fb_dh64 = index.mul %dim_half, %fb_c64 : index\n"
+           "  %fb_h256 = index.mul %lane_half, %fb_c256 : index\n  %fb_qb = index.add %fb_h256, %fb_dh64 : index\n"
            "  %head1_v = index.add %head, %c1 : index\n  %head1 = index.assume %head1_v [range(%head1_v, 1, " + str(qh - 1) + ")] : index\n")
     for hh, hn in ((0, "%head"), (1, "%head1")):
         for c in range(FPW):
