@@ -123,12 +123,27 @@ def required_sdk(facts, versions, sources):
     if pin and (pin.get("source") == "ci" or pin.get("hrx_loom")):
         return pin
     gen = (facts.get("generator") or {}).get("hrx_loom")
-    pypi = lambda x: isinstance(x, dict) and x.get("hrx_loom") and x.get("source") == "pypi"
+    pypi = lambda x: isinstance(x, dict) and x.get("hrx_loom") and (x.get("source") == "pypi" or release(x))
     for x in (gen, (versions.get("package") or {}).get("hrx_loom")):
         if pypi(x):
             return x
     seen = {x["hrx_loom"] for x in (s.get("hrx_loom") for s in sources.values()) if pypi(x)}
     return {"hrx_loom": seen.pop(), "source": "pypi"} if len(seen) == 1 else None
+
+
+RELEASE_URL = "https://github.com/ROCm/hrx-system/releases/download"
+
+
+def release(pin):
+    """True for a pin the Quick start can install from a GitHub release: source "release" with the wheel's sha256."""
+    return isinstance(pin, dict) and pin.get("source") == "release" and bool(pin.get("hrx_loom") and pin.get("wheel_sha256"))
+
+
+def release_wheel(pin):
+    """(tag, wheel file name, url#sha256) of a release pin's Linux wheel (the pin names the sdk's own tag in "branch")."""
+    tag = pin.get("branch") or f"v{pin['hrx_loom']}"
+    whl = f"hrx_loom-{pin['hrx_loom']}-py3-none-manylinux_2_39_x86_64.whl"
+    return tag, whl, f"{RELEASE_URL}/{tag}/{whl}#sha256={pin['wheel_sha256']}"
 
 
 def margin(loom, base):
@@ -347,8 +362,9 @@ def single_layout(info):
     return len(res) == 1 and all(info["devices"][g].get("state") == "unsupported" for g in gpus if g not in res)
 
 
-def serve_command(info, facts, feats, gpu, output):
-    serve = ["loom-serve", f"--model={output}/model.json", "'--device=amdgpu://?completion_spin_ns=4294967295'"]
+def serve_command(info, facts, feats, gpu, output, bare=False):
+    """bare: SDK 0.2 takes the package directory (it finds model.json in it); 0.1 needs the model.json path."""
+    serve = ["loom-serve", f"--model={output}" if bare else f"--model={output}/model.json", "'--device=amdgpu://?completion_spin_ns=4294967295'"]
     pkg_serve = (facts.get("serve") or {}).get("args")   # llm_config.json "serve": flags the package must be served with
     memory = gpu_memory(info, facts["memory_bytes"], gpu)
     gpu_serve = gpu_serve_args(gpu)   # the GPU's own flags (R9700: --pool_backing=fixed), which take no --memory_bytes either
@@ -551,14 +567,19 @@ def render(d):
           f"{hf(c['repo'])} (`{c['file']}`), for the {where} GPUs, generated with the "
           f"[loom-skills]({SKILLS_URL}) workflow. {LEARN_MORE}", ""]
 
+    pin = required_sdk(facts, versions, sources)
+
     def fetch_for(g):   # the fetch command of a GPU: its preset (the R9700's own when the package has one)
         pr = gpu_preset(facts, g)
+        if release(pin):   # SDK 0.2: SOURCE is PROVIDER:OWNER/REPO[:PRESET]; the revision is resolved and pinned by loom-fetch
+            return " ".join(["loom-fetch", f"huggingface:{info['repo']}" + (f":{pr}" if pr else ""), "--materialize=copy", f"--output={output}"])
         return " ".join(["loom-fetch", f"{HF}/{info['repo']}/resolve/main/model.json"] + ([f"--preset={pr}"] if pr else [])
                         + ["--materialize=copy", f"--output={output}"])
     api = ("answers OpenAI-style `/v1/chat/completions` requests" if kind == "chat"
            else f"answers SystemOne decision requests at `{feats['api']['value']['endpoint']}`")
-    pin = required_sdk(facts, versions, sources)
-    if pin and pin.get("source") == "ci":
+    if release(pin):   # a GitHub release is not on PyPI: install the wheel by URL, checked against its sha256
+        install = [f"pipx install 'hrx-loom[hf] @ {release_wheel(pin)[2]}'"]
+    elif pin and pin.get("source") == "ci":
         root = f"~/loom-{pin['artifact_id']}"
         install = [f"git clone {SKILLS_URL}",
                    f"loom-skills/skills/loom-setup/scripts/install_loom.sh {root} ci:{pin['artifact_id']}",
@@ -571,17 +592,22 @@ def render(d):
     serving = [g for g in gpus if info["devices"][g].get("state") != "unsupported"
                and (has_results(info["devices"][g]) or has_runner(g))] or [DEFAULT_GPU]
     if len(serving) == 1:
-        L += ["## Quick start", "", "```bash", *install, fetch_for(serving[0]), serve_command(info, facts, feats, serving[0], output), "```", ""]
+        L += ["## Quick start", "", "```bash", *install, fetch_for(serving[0]), serve_command(info, facts, feats, serving[0], output, release(pin)), "```", ""]
     elif len({fetch_for(g) for g in serving}) == 1:   # the same install and fetch; the serve line differs by the GPU's memory
         L += ["## Quick start", "", "```bash", *install, fetch_for(serving[0]), "```", ""]
         for g in serving:
             L += [f"Serve on the {GPUS[g]['name']} ({gpu_arch(g)}):", "", "```bash",
-                  serve_command(info, facts, feats, g, output), "```", ""]
+                  serve_command(info, facts, feats, g, output, release(pin)), "```", ""]
     else:   # a GPU with its own preset (R9700: larger prefill chunk): the fetch differs too, same install
         L += ["## Quick start", "", "```bash", *install, "```", ""]
         for g in serving:
             L += [f"Fetch and serve on the {GPUS[g]['name']} ({gpu_arch(g)}):", "", "```bash",
-                  fetch_for(g), serve_command(info, facts, feats, g, output), "```", ""]
+                  fetch_for(g), serve_command(info, facts, feats, g, output, release(pin)), "```", ""]
+    if release(pin):
+        tag, whl, _ = release_wheel(pin)
+        L += [f"hrx-loom {pin['hrx_loom']} is a pre-release published on its [GitHub release]({RELEASE_URL.replace('/download', '/tag')}/{tag}), "
+              f"not on PyPI (the command above checks the wheel's sha256). On Windows install `{whl.replace('manylinux_2_39_x86_64', 'win_amd64')}` "
+              "from the same release.", ""]
     if pin and pin.get("source") == "ci":
         sha = (pin.get("hrx_system_sha") or "")[:8]
         L += [f"This package needs an hrx-loom development build (hrx-loom {pin.get('hrx_loom')}, ROCm/hrx-system "
