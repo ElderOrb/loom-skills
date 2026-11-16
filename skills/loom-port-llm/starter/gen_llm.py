@@ -4247,6 +4247,7 @@ def head_pieces(text, root, key, prefix, sizes, rows):
     return "\ncommand.program.def".join(parts), used
 
 
+PHEAD_MAIN = {}      # proposal-head piece entries prepared by the main weight policy (draft.propose.head_pieces)
 HEAD_PIECES = []     # (root, key, piece key prefix, rows per piece, format, kernel suffix, head rows): heads read as several prepared tensors
 
 
@@ -5727,7 +5728,13 @@ if __name__ == "__main__":
                 assert PSRC == "bf16r", "PROPOSE_HEAD_PIECES: a BF16 (safetensors) head"
                 _hpol, _sizes = prep_weights.piece_entries(PDST, HKEY, PROWS, PBASE, V, H, HEAD_PIECE_ROWS, HKEY + "#p")
                 HEAD_PIECES.append(("%w_phead", HKEY, HKEY + "#p", _sizes, PDST, "_p40", PHEAD_ROWS[2]))
-            open(os.path.join(out_dir, "head_weights.loom"), "w", newline="\n").write(prep_weights.policy(_hpol, "the proposal head"))
+                # The pieces' keys are not checkpoint tensors, so the main weight policy prepares them (one load-time preparation plan; a
+                # separate head_weights.loom plan made the first load of a fresh R9700 VM fail, RESOURCE_EXHAUSTED); build_draft binds the
+                # proposals' head root with it.
+                PHEAD_MAIN.update(_hpol)
+                open(os.path.join(out_dir, "phead_main"), "w").write("")
+            if not PHEAD_MAIN:
+                open(os.path.join(out_dir, "head_weights.loom"), "w", newline="\n").write(prep_weights.policy(_hpol, "the proposal head"))
             gfacts["phead"] = prep_weights.dst_bytes(PDST, HPREP[HKEY][2])
             if PHEAD_ROWS[2] < V:
                 gfacts["phead_rows"] = (PHEAD_ROWS[2], PHEAD_ROWS[0], PHEAD_ROWS[1] - PHEAD_ROWS[0])
@@ -5950,11 +5957,12 @@ if __name__ == "__main__":
         text = seg_attention(text)
     SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in text}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
     MB_USED = {n: e for n, e in MBLK_PREP.items() if f'"{n}"' in text}   # MTP_BLOCK_PREP: the NextN block's matrices the programs read
-    if SRC_PREP or MB_USED or VHEAD_PREP:
+    if SRC_PREP or MB_USED or VHEAD_PREP or PHEAD_MAIN:
         import prep_weights
         entries = {t["hf"]: ("bf16e", "f32_" + t["prep"]["op"], int(math.prod(t["shape"]))) for t in SRC_PREP.values()}
         assert all(t["prep"]["src"] == "bf16" for t in SRC_PREP.values()), "prepared tensors are bf16 in the checkpoint"
         entries.update({TENS[n]["hf"]: e for n, e in MB_USED.items()})
+        entries.update(PHEAD_MAIN)
         if VHEAD_PREP:   # the verified head: a Q8_0 copy of every row, HEAD_PIECE_ROWS rows per prepared tensor
             _hk = TENS["output.weight"]["hf"]
             _ve, _vs = prep_weights.piece_entries(VHEAD_PREP, _hk, V, V, V, H, HEAD_PIECE_ROWS, _hk + "#v")
@@ -5966,7 +5974,7 @@ if __name__ == "__main__":
         text += "\n" + _lib
         open(os.path.join(out_dir, "weights.loom"), "w", newline="\n").write(
             prep_weights.policy(entries, "the safetensors checkpoint's bf16 norms, A_log, dt_bias and conv1d" + (" and the MTP block's matrices" if MB_USED else "")
-                                + (" and the verified head's Q8_0 copy" if VHEAD_PREP else "")))
+                                + (" and the verified head's Q8_0 copy" if VHEAD_PREP else "") + (" and the proposal head's Q4_0 pieces" if PHEAD_MAIN else "")))
     text = hf_rename(text)
     if HEAD_PIECES:   # heads read as several prepared tensors (draft.propose.head_pieces, decode.head.verify): one launch per piece
         _pk = []
