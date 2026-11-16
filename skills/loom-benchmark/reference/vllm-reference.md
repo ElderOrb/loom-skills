@@ -19,3 +19,14 @@ card with the evidence, never loosened.
   near-tie rule uses the single-batch view.
 - **Fallback** (vLLM cannot run on any runner): transformers + amd-quark on CPU behind the same `/completion` shim (a second engine class in
   `vllm_shim.py`).
+
+## Runner findings (vLLM 0.18.0 rocm700, Qwen3.8-27B Quark MXFP4, DevLab 2026-11-15)
+- Install: uv + python 3.12 venv + the vllm.ai ROCm wheel, 35-80 s per runner (once; the venv is reused by later jobs). The runners lack three things the
+  install adds: libopenmpi3t64/libnuma (apt, or downloaded .debs unpacked into the venv where there is no sudo), Python.h (python3.12-dev, else uv's
+  standalone python), and hipcc + HIP headers (the TheRock `rocm[libraries,devel]` pip packages) for Quark's MXFP4 emulation, which JIT-compiles HIP kernels.
+- R9700 (32 GB): the packed weights stay packed (18.1 GiB resident; vLLM dequantizes per forward), engine up in about 70-330 s (weights download included
+  the first time: 332 s), peak VRAM 29.9 GiB at gpu_memory_utilization 0.92 and max_model_len 66560, host MemAvailable never below 11 GiB, RssAnon 1.7 GiB.
+- Run-to-run determinism: the 22 dev-golden prompts recorded twice give identical tokens (22/22), so no `--alt` second recording is needed.
+- Strix Halo: Loom's gates run there from references recorded on the R9700 (`reference_cache`, 234 s); vLLM itself did not come up on gfx1151 with the image
+  tower enabled (the encoder-profile attention uses torch's math SDPA and asks for a 256 GiB matrix; a smaller `max_num_batched_tokens` does not change it).
+  References are recorded on the R9700 and reused.
