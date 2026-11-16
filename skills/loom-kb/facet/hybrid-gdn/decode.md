@@ -31,6 +31,13 @@
     and runs a 4-token span in the 32-token chunk form. The chain records them with decode's sequential kernel and chunks the prompt
     spans; @llm_advance (every prompt-only epoch) keeps the fused pair. ktest `gdn_fold_serve`: fold == replay bit-exact on a 210-row
     mixed epoch (prompt 150 + 40, anchor, three speculative spans, rows out of packet order, gaps, stale packets).
-  - What is left: the fold reads + writes 288 MiB at the bandwidth roof (0.48 ms) and the verify recurrence still reads the state once
-    (0.58 ms, latency-bound). A deferred fold (applied by the next verification's recurrence, ninfer / Lucebox SpecLA) would merge
-    the two reads, but every other reader of the state (advance epochs, prefix captures, forks) would then need the pending factors.
+  - Deferred fold (`decode.spec.gdn_fold_defer`, opt-in, off everywhere): the accepted steps' factors become the writer slot's
+    pending fold (a block per layer after every layer's state, +8 % slot); the next verification's recurrence applies them in
+    registers and writes the folded state back (one state pass per step instead of two); every other reader (advance epochs,
+    publishing spans, forks from a retained slot) runs `g_gdn_flush` + `g_gdn_pend_clear` first. Bit-identical to the eager fold
+    (ktest `gdn_fold_defer`: two verifications, a fork, a slot read by two spans). R9700 MXFP4 card, DevLab, base pinned: GDN
+    1.05 -> 0.79 ms/step, but drafted decode ties (75.38 vs 75.11, 4 ABBA sessions; device step 32.15 vs 32.21 ms) and 4-stream
+    ties. Measured lesson: the folded-state write, issued inside the per-layer stream with a regular cache policy, slowed the next
+    weight matvecs by ~0.35 ms/step (dirty lines written back during the weight stream); a non-temporal store removes that, and what
+    is left is the extra write the latency-bound recurrence now carries (+0.15-0.2 ms). ninfer reports the same (net ~0 at one
+    stream). Not a decode lever on this hardware; a last-use cache hint on the state read made the recurrence slower (0.68 -> 0.88).

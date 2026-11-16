@@ -241,6 +241,13 @@ CHOICE("decode.spec.gdn_fold", "bool", False, "GDN_FOLD", enc=("1", None),
            "step's fold factors (raw conv input + key, update scalar per value column, decay per head) and, after acceptance, one launch "
            "folds the accepted steps into every layer's state and one commits the conv histories (gen_gdn.fold_kernels). Published state "
            "bit-identical to the replay's; the verify scratch holds 8 rows per span instead of every epoch token's replay inputs.")
+CHOICE("decode.spec.gdn_fold_defer", "bool", False, "GDN_FOLD_DEFER", enc=("1", None),
+       kernels=["g_gdn_recurrence_rec*", "g_gdn_fold*", "g_gdn_pend*", "g_gdn_flush"], rows=ROWS_DECODE, from_pr="mxfp4st-defold",
+       doc="With decode.spec.gdn_fold: the fold of a drafted verification is deferred. The accepted steps' factors become the writer "
+           "slot's pending fold (each slot layer holds 8 steps of keys + dk + decay); the next verification's recurrence applies them in "
+           "registers and writes the folded state back (one state read per drafted step instead of two), and every other reader (advance "
+           "epochs, publishing spans, forks) applies them first (g_gdn_flush + g_gdn_pend_clear at the program start). Bit-identical to "
+           "the eager fold (gen_gdn.defer_kernels).")
 CHOICE("decode.mv.pair_proj", "str", "qg", "PAIR_PROJ", kernels=["g_mv*_pair"], rows=ROWS_DECODE + ROWS_STREAMS,
        doc="Paired projections: qg (q + gate), kv (k + v), 1 (both), 0 (off). k + v measured no faster end to end.")
 
@@ -277,6 +284,11 @@ CHOICE("prefill.gemm.mxfp4s_f8", "bool", False, "GEMM_MXFP4S_F8", kernels=["g_ge
        doc="gfx12: MXFP4 split-plane (mxfp4s) prefill GEMMs on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): the nibble and scale planes are read as stored, weights decoded to bf8 "
            "exactly in LDS, activations fp8 e4m3 with a per-row power-of-two scale written by the row-scale producers' _f8_rdna4 twins (lossy activations, gated against the "
            "golden reference). Opt-in per model; every block exponent of the checkpoint must be in 107..132 (scan_mxfp4s_exponents.py). The gfx11 programs are unchanged.")
+CHOICE("prefill.gemm.mxfp4s_f8_kernel", "str", None, "GEMM_MXFP4S_F8_KERNEL", kernels=["g_gemm_mxfp4s_*_f8_*"], rows=ROWS_PREFILL, devices=["rdna4"], from_pr="mxfp4st-ogemm",
+       doc="The design of prefill.gemm.mxfp4s_f8's GEMM kernels (gen_mxfp4s.F8_KERNELS; None = v1, the #879 kernel). lvs: the store GEMMs load their operands lane-vector "
+           "(one 16-byte load per lane covers two K substeps: activations global_load_b128 with immediate offsets, weights ds_load_b128; both operands in the same permuted K "
+           "order) and issue the next K pair's loads before this pair's WMMAs; the SwiGLU pair stays v1. lv: lane-vector without the pipelining (SwiGLU at 64-row waves); "
+           "ws: wave-specialized (4 producer waves decode the next step into a second LDS buffer). kbench gemm_mxfp4s (R9700): lvs store -5..-6 % at 1024 rows, lv +3..7 %, ws +8..19 %.")
 CHOICE("prefill.mxfp4s.fuse", "bool", False, "MXFP4S_FUSE", kernels=["g_gemm_mxfp4s_swiglu_f8_f16s_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
        devices=["rdna4"], from_pr="mxfp4st-fprod",
        doc="gfx12 fp8 prefill of an MXFP4 split-plane model (needs prefill.gemm.mxfp4s_f8), fewer bytes between the kernels: the SwiGLU GEMM writes its output as f16 times 2^-4 "

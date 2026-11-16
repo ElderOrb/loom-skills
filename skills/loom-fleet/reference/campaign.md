@@ -133,9 +133,14 @@ separately. Tools: `fleet/README.md`; process: [targeted-fix.md](targeted-fix.md
     a new checkpoint revision, a changed vision case) is recorded by that job as before; add its `gates_V/llama_cache.tgz` to the store
     with `reference_cache.py merge --repo ORG/REPO --engine ENGINE TGZ` in the same PR. Job field `"reference_cache": "none"` forces a cold
     recording.
-    The store is one coherent recording: vLLM's answer to the same request varies between jobs (28 of 101 keys recorded in different jobs of this
-    campaign differ in their tokens, mostly late near-tie flips), so `merge` only ever adds keys, never replaces one, and the store is not a union of
-    every job's tgz. A fixed recording also makes the gate deterministic. Agent-turn requests contain Loom's own earlier replies: a change that alters
+    The store is one coherent first recording plus a second, independent one: vLLM's answer to the same request varies between jobs (28 of 101
+    keys recorded in different jobs of this campaign differ in their tokens, mostly late near-tie flips), so `merge` only ever adds keys, never
+    replaces one, and the store is not a union of every job's tgz. The second recording is the store's form of the `--alt` / golden2 rule: the same
+    request under another salt (`bench_common.ALT_SALT_TEXT` "rec2" for golden/compare, `ALT_SALT_VISION` "2" for vision), taken by a DIFFERENT job
+    (job `env` `"REFERENCE_ALT": "record"`: gates.sh then runs only golden + vision, requests a second recording only for keys that were in the store
+    when the job started, and the job's `llama_cache.tgz` is merged). `compare.py` and `vision_golden.py` score a prompt/case the first recording
+    fails against the second one (a cache hit, no engine load), no threshold or near-tie change; `compare.json` rows carry `alt_decided`, the
+    summary counts them, and the vision result lists the cases. A fixed pair of recordings also makes the gate deterministic. Agent-turn requests contain Loom's own earlier replies: a change that alters
     Loom's text creates new keys (a miss, recorded by that job); a change that keeps the text identical never misses. The consistency gate asks the reference only to diagnose a concurrent-vs-alone mismatch (scheduling-dependent), so a mismatch
     is the one case in which a gate run on a cached store still loads vLLM.
 
