@@ -397,16 +397,21 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %y_view = buffer.view %y[%tile_offset] : buffer -> view<{BM}x{TN}x{YT}, %y_layout>''')
     for r in range(RF):
         for c in range(cfr):
-            row = rowv[r]
             A(f"  %oc{r}{c}_c = index.constant {c * 16} : index\n  %oc{r}{c} = index.add %wave_col, %oc{r}{c}_c : index")
+    if radd:   # every old tile first: Loom orders a global load after the stores before it, so loads interleaved with the stores would each wait for the previous store
+        for r in range(RF):
+            for c in range(cfr):
+                A(f"  %yo{r}{c} = vector.fragment.load<result> %y_view[{rowv[r]}, %oc{r}{c}] shape [%c16, %c16] : view<{BM}x{TN}xf32, %y_layout> -> vector<8xf32>")
+    for r in range(RF):
+        for c in range(cfr):
+            row = rowv[r]
             if two_w:
                 A(f'''  %g{r}{c} = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>
   %u{r}{c} = vector.mulf %o1r{r}c{c}, %inv{r} : vector<8xf32>
   %sg{r}{c} = vector.siluf<afn> %g{r}{c} : vector<8xf32>
   %v{r}{c} = vector.mulf %sg{r}{c}, %u{r}{c} : vector<8xf32>''')
             elif radd:
-                A(f"  %yo{r}{c} = vector.fragment.load<result> %y_view[{row}, %oc{r}{c}] shape [%c16, %c16] : view<{BM}x{TN}xf32, %y_layout> -> vector<8xf32>\n"
-                  f"  %v{r}{c}_s = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>\n  %v{r}{c} = vector.addf %yo{r}{c}, %v{r}{c}_s : vector<8xf32>")
+                A(f"  %v{r}{c}_s = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>\n  %v{r}{c} = vector.addf %yo{r}{c}, %v{r}{c}_s : vector<8xf32>")
             else:
                 A(f"  %v{r}{c}_s = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>\n  %v{r}{c} = vector.addf %v{r}{c}_s, %zero8 : vector<8xf32>")
             if yf16 or ybf16:
