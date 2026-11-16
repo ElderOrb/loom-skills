@@ -24,7 +24,7 @@ import gen_pstep  # noqa: E402
 
 SLUG = "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
 T = 4
-GS = (128, 256, 512)
+GS = (128, 256, 512, 1024)
 GB = (64, 256)
 PHASES = 64
 
@@ -183,6 +183,9 @@ def main():
              "down": re.search(r"kernel\.launch @(g_mv_mxfp4s_k%d_t4_q8_r\d+)\[%%nH" % FF, prog).group(1)}
     kt = {k: block(prog, "kernel.def", v) for k, v in names.items()}
     chain_k = {n: block(prog, "kernel.def", n) for n in ("g_post_add_norm", "g_quant_q8", "g_silu_mul")}
+    # standalone (no launch-site facts) the silu kernel's 4-wide tail is unproven: pin n to the FFN width (the program's only launch)
+    chain_k["g_silu_mul"] = re.sub(r"\[range\(%n_arg, 4, 65536\), multiple_of\(%n_arg, 4\)\]", f"[range(%n_arg, {cfg['ffn']}, {cfg['ffn']}), multiple_of(%n_arg, 1024)]", chain_k["g_silu_mul"])
+    assert f"range(%n_arg, {cfg['ffn']}" in chain_k["g_silu_mul"]
     kernels = dict(chain_k)
     kernels.update({names["gate"]: kt["gate"], names["down"]: kt["down"]})
     fused = {}
