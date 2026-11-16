@@ -34,7 +34,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, radd=False, ybf16=False):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, radd=False, ybf16=False, rpf=False):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -300,6 +300,15 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
         carried.append((f"%cr_q{j}", f"%wq{j}{'q' if dbuf else 'p'}", f"%wq{j}n", "vector<4xi32>"))
     if a_pf:
         carried += [(f"%ca{r}_{kk}", f"%lp{r}_{kk}", f"%ln{r}_{kk}", "vector<2xi32>") for kk in range(KS // 16) for r in range(RF)]
+    if rpf:   # radd: L2 prefetch of the tile's old y rows before the K loop (one 128-byte line per 32 columns of the thread's row), so the epilogue's loads hit
+        assert radd and NT == BM
+        A(f"""  %rp_yv = buffer.view %y[%origin] : buffer -> view<[%rows]x[%n]xf32>
+  %rp_rv = index.add %row_origin, %workitem : index
+  %rp_r = index.assume %rp_rv [lt(%rp_rv, %rows)] : index""")
+        for j in range(TN // 32):
+            A(f"""  %rp_cj{j} = index.constant {32 * j} : index
+  %rp_c{j} = index.add %out_origin, %rp_cj{j} : index
+  view.prefetch %rp_yv[%rp_r, %rp_c{j}] {{intent = read, locality = l2}} : view<[%rows]x[%n]xf32>""")
     A("  " + ", ".join(f"%o{a}" for a in accs) + ", " + ", ".join(f"%unused_{i}" for i in range(len(carried))) +
       " = scf.for %step = [%c0 to %k_steps step %c1](" +
       ", ".join(f"%i{a} = %init : vector<8xf32>" for a in accs) + ", " + ", ".join(f"{c[0]} = {c[1]} : {c[3]}" for c in carried) + ") -> (" +
@@ -663,7 +672,7 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
         converted[leaf_at[g]] += 4   # gate and up leaves
     f16_optional = {x: converted[x] == len(readers[x]) for x in used}
     radd_leaf, fl_prod = {}, set()   # store leaf line -> the residual buffer it accumulates into; producer lines whose trailing flag is the %huge epoch flag
-    if fuse:
+    if fuse and os.environ.get("MXFP4S_FUSE_RADD", "1") not in ("0", "off", "no"):   # MXFP4S_FUSE_RADD=0: the bf16 SwiGLU output only (an A/B)
         for pi, l in enumerate(lines):
             m = _LAUNCH.match(l)
             if not (m and m.group("k").startswith("g_post_add_norm_rs") and _PRODUCER.match(m.group("k"))):
