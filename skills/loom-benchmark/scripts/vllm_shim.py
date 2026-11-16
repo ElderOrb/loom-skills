@@ -91,7 +91,7 @@ class VllmEngine:
             print(f"max_model_len {max_model_len} -> {derived} (the checkpoint's max_position_embeddings)", flush=True)
             max_model_len = derived
         kw = dict(model=checkpoint, dtype=dtype, seed=seed, max_model_len=max_model_len, enable_prefix_caching=False, gpu_memory_utilization=gpu_util,
-                  limit_mm_per_prompt={"image": images}, **(extra or {}))
+                  limit_mm_per_prompt={"image": images, "video": 0}, **(extra or {}))
         if revision:
             kw["revision"] = revision
         self.llm = vllm.LLM(**kw)
