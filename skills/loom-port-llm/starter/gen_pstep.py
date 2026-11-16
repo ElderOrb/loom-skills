@@ -87,7 +87,7 @@ def _load(j, view, groups, name):
   }}"""
 
 
-def prologue(text, mode, groups, eps=None, count=None):
+def prologue(text, mode, groups, eps=None, count=None, hout=False):
     """Replace the int8 activation loads of an iq matvec by the producer computed in the lane (module doc)."""
     if mode == "q8":
         return text
@@ -103,6 +103,9 @@ def prologue(text, mode, groups, eps=None, count=None):
     if mode == "norm":
         new += (f"  %nw_view = buffer.view %nw[%zero] : buffer -> view<{groups}x32xf32>\n"
                 f"  %pn_count = scalar.constant {float(count)!r} : f32\n  %pn_eps = scalar.constant {eps!r} : f32\n")
+        if hout:
+            new += (f"  %hout_view = buffer.view %hout[%zero] : buffer -> view<[%tokens]x{groups}x32xf32>\n"
+                    "  %pn_first = index.cmp eq, %group_id, %c0 : index\n")
     text = _one(text, views, new, "activation views")
     # the zero constants the quant needs exist in every iq kernel (bfly / iq setup)
     for c in ("  %zero_i = scalar.constant 0 : i32\n", "  %zero8i = vector.constant 0 : vector<8xi32>\n"):
@@ -137,7 +140,12 @@ def prologue(text, mode, groups, eps=None, count=None):
   %pn_invs{j} = vector.splat %pn_inv{j} : vector<32xf32>
   %pn_xn{j} = vector.mulf %pv_x{j}, %pn_invs{j} : vector<32xf32>
   %pn_h{j} = vector.mulf %pn_xn{j}, %pn_w : vector<32xf32>
-""" + quant_lines(j, f"pn_h{j}"))
+""" + (f"""  %pn_hs{j} = scalar.andi %use{j}, %pn_first : i1
+  scf.if %pn_hs{j} {{
+    %tkh{j} = index.assume %tok{j}_raw [lt(%tok{j}_raw, %tokens)] : index
+    vector.store %pn_h{j}, %hout_view[%tkh{j}, %g, %c0] : vector<32xf32>, view<[%tokens]x{groups}x32xf32>
+  }}
+""" if hout else "") + quant_lines(j, f"pn_h{j}"))
     text = TOKEN_BLOCK.sub(sub, text)
     assert blocks == sorted(blocks) and blocks and blocks[0] == 0, f"gen_pstep prologue: token blocks {blocks}"
     extra = {"silu": "%u: buffer, ", "norm": "%nw: buffer, "}.get(mode, "")
@@ -146,33 +154,45 @@ def prologue(text, mode, groups, eps=None, count=None):
     return text
 
 
-def pmv(text, prologue_mode="q8", mats=1, G=0, groups=None, eps=None, count=None):
-    """The kernel text of gen_llm._mv (iq, one weight, no token chunks) -> its persistent / multi-matrix / prologue form."""
+def pmv(text, prologue_mode="q8", mats=1, G=0, groups=None, eps=None, count=None, hout=False):
+    """The kernel text of gen_llm._mv (iq, one weight, no token chunks) -> its persistent / multi-matrix / prologue form.
+    mats > 1: matrices 1..mats share the input and R (rows per row group; R does not change a row's sum), launch args
+    (n, n2.., tokens, accumulate, x, [u | nw], w, ws, w2, ws2, .., y, y2, ..). hout (norm prologue): workgroup 0 also
+    stores the normalized f32 rows to a last argument %hout (the f32-activation projections of the layer read them)."""
     name = re.search(r'kernel\.def export\("([^"]+)"\) @', text).group(1)
     m = re.match(r"g_mv_(\w+?)_k(\d+)_t(\d+)_q8_r(\d+)$", name)
     assert m, f"gen_pstep: {name} is not an int8 token-group matvec"
     fmt, K, TG, R = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
     groups = groups or K // 32
     assert "%nch = index.constant" not in text and "%w2: buffer" not in text, f"{name}: chunked / two-weight kernels are not handled"
-    new = f"g_pmv_{fmt}_k{K}_t{TG}_{prologue_mode}_r{R}" + (f"_m{mats}" if mats > 1 else "") + (f"_p{G}" if G else "")
+    assert not hout or prologue_mode == "norm"
+    new = (f"g_pmv_{fmt}_k{K}_t{TG}_{prologue_mode}_r{R}" + (f"_m{mats}" if mats > 1 else "") + ("_h" if hout else "")
+           + (f"_p{G}" if G else ""))
     text = text.replace(f'kernel.def export("{name}") @{name}(', f'kernel.def export("{new}") @{new}(', 1)
-    text = prologue(text, prologue_mode, groups, eps, count)
+    text = prologue(text, prologue_mode, groups, eps, count, hout)
+    sfx = [""] + [str(i) for i in range(2, mats + 1)]
     # launch config: the row groups of every matrix, at most G workgroups
     cfg_old = "  %row_groups = index.div %n, %rows_per : index\n"
-    cfg_new = cfg_old
-    if mats == 2:
-        text = _one(text, f"@{new}(%n: index, %tokens: index)", f"@{new}(%n: index, %n2: index, %tokens: index)", "config signature")
-        cfg_new = ("  %rg1 = index.div %n, %rows_per : index\n  %rg2 = index.div %n2, %rows_per : index\n"
-                   "  %row_groups = index.add %rg1, %rg2 : index\n")
+    if mats > 1:
+        text = _one(text, f"@{new}(%n: index, %tokens: index)", f"@{new}(" + "".join(f"%n{s}: index, " for s in sfx) + "%tokens: index)", "config signature")
+    rg = "".join(f"  %rg{i + 1} = index.div %n{s}, %rows_per : index\n" for i, s in enumerate(sfx))
+    acc = "%rg1"
+    for i in range(2, mats + 1):
+        rg += f"  %rgs{i} = index.add {acc}, %rg{i} : index\n"
+        acc = f"%rgs{i}"
+    cfg_new = rg + f"  %row_groups = index.add {acc}, %c0_rg : index\n"
+    cfg_new = "  %c0_rg = index.constant 0 : index\n" + cfg_new
     if G:
         cfg_new += f"  %cGp = index.constant {G} : index\n  %grid_rows = index.min %row_groups, %cGp : index\n"
         text = _one(text, "workgroups(%token_groups, %row_groups, %c1)", "workgroups(%token_groups, %grid_rows, %c1)", "grid")
     text = _one(text, cfg_old, cfg_new, "config row groups")
-    if mats == 2:
-        text = _one(text, "launch(%n_arg: index, %tokens_arg: index,", "launch(%n_arg: index, %n2_arg: index, %tokens_arg: index,", "launch signature")
-        text = _one(text, "%w: buffer, %ws: buffer, %y: buffer)", "%w: buffer, %ws: buffer, %w2: buffer, %ws2: buffer, %y: buffer, %y2: buffer)", "weights")
+    if mats > 1:
+        text = _one(text, "launch(%n_arg: index, %tokens_arg: index,", "launch(" + "".join(f"%n{s}_arg: index, " for s in sfx) + "%tokens_arg: index,", "launch signature")
+        text = _one(text, "%w: buffer, %ws: buffer, %y: buffer)", "".join(f"%w{s}: buffer, %ws{s}: buffer, " for s in sfx) + ", ".join(f"%y{s}: buffer" for s in sfx) + ")", "weights")
         nas = re.search(r"  %n = index\.assume %n_arg \[([^\n]*)\] : index\n", text)
-        text = text.replace(nas.group(0), nas.group(0) + "  %n2 = index.assume %n2_arg [" + nas.group(1).replace("%n_arg", "%n2_arg") + "] : index\n", 1)
+        text = text.replace(nas.group(0), nas.group(0) + "".join(f"  %n{s} = index.assume %n{s}_arg [" + nas.group(1).replace("%n_arg", f"%n{s}_arg") + "] : index\n" for s in sfx[1:]), 1)
+    if hout:
+        text = _one(text, ", %y: buffer)" if mats == 1 else ", %y" + sfx[-1] + ": buffer)", (", %y: buffer" if mats == 1 else ", %y" + sfx[-1] + ": buffer") + ", %hout: buffer)", "hout arg")
     # the row work (row loop, partial fold barrier, stores) becomes the body of the row-group loop
     text = _one(text, ROW_BASE, "", "row base")
     head, rest = text.split(ROW_LOOP, 1)
@@ -180,25 +200,162 @@ def pmv(text, prologue_mode="q8", mats=1, G=0, groups=None, eps=None, count=None
     assert not tail.strip(), f"{name}: text after the kernel"
     body = ROW_LOOP + body
 
-    def ind(s):
-        return "".join("  " + ln if ln.strip() else ln for ln in s.splitlines(True))
-    loop = ("  %grid_y = index.div %n, %rows_per : index\n" if mats == 1 else
-            "  %rg1 = index.div %n, %rows_per : index\n  %rg2 = index.div %n2, %rows_per : index\n  %grid_y = index.add %rg1, %rg2 : index\n")
-    step = f"%cGs" if G else "%grid_y"
+    def ind(s, k=1):
+        return "".join("  " * k + ln if ln.strip() else ln for ln in s.splitlines(True))
+    loop = "  %c0_rg = index.constant 0 : index\n" + rg + f"  %grid_y = index.add {acc}, %c0_rg : index\n"
     if G:
         loop += f"  %cGs = index.constant {G} : index\n"
-    loop += f"  scf.for %vg = [%group_id to %grid_y step {step}] {{\n"
-    if mats == 1:
-        loop += "    %row_base = index.mul %vg, %rows_per : index\n" + ind(body)
-    else:
-        b2 = body
-        for a, b in (("@g_mxfp4s_icodes(%w, %ws, ", "@g_mxfp4s_icodes(%w2, %ws2, "), ("[lt(%row_value, %n)]", "[lt(%row_value, %n2)]"),
-                     ("func.call @g_store_row(%y, %tokens, %n, ", "func.call @g_store_row(%y2, %tokens, %n2, ")):
-            assert b2.count(a) == 1, f"{name}: second matrix anchor {a}"
-            b2 = b2.replace(a, b)
-        loop += ("    %in1 = index.cmp ult, %vg, %rg1 : index\n    scf.if %in1 {\n      %row_base = index.mul %vg, %rows_per : index\n"
-                 + ind(ind(body)) + "    } else {\n      %vg2 = index.sub %vg, %rg1 : index\n      %row_base = index.mul %vg2, %rows_per : index\n"
-                 + ind(ind(b2)) + "    }\n")
+    loop += f"  scf.for %vg = [%group_id to %grid_y step {'%cGs' if G else '%grid_y'}] {{\n"
+
+    def mat_body(i):
+        s = sfx[i]
+        b = body
+        if s:
+            for a, c in (("@g_mxfp4s_icodes(%w, %ws, ", f"@g_mxfp4s_icodes(%w{s}, %ws{s}, "), ("[lt(%row_value, %n)]", f"[lt(%row_value, %n{s})]"),
+                         ("func.call @g_store_row(%y, %tokens, %n, ", f"func.call @g_store_row(%y{s}, %tokens, %n{s}, ")):
+                assert b.count(a) == 1, f"{name}: matrix {i + 1} anchor {a}"
+                b = b.replace(a, c)
+        return b
+
+    def chain(i, depth):
+        """row groups of matrices i.. : scf.if vg < end of matrix i { matrix i } else { chain(i + 1) }"""
+        base = "%vg" if i == 0 else f"%vgo{i}"
+        if i == mats - 1:
+            return ind(f"%row_base = index.mul {base}, %rows_per : index\n", depth) + ind(mat_body(i), depth - 1)
+        nxt = f"%vgo{i + 1}"
+        return (ind(f"%in{i} = index.cmp ult, {base}, %rg{i + 1} : index\nscf.if %in{i} {{\n", depth)
+                + ind(f"%row_base = index.mul {base}, %rows_per : index\n", depth + 1) + ind(mat_body(i), depth)
+                + ind("} else {\n", depth) + ind(f"{nxt} = index.sub {base}, %rg{i + 1} : index\n", depth + 1)
+                + chain(i + 1, depth + 1) + ind("}\n", depth))
+    loop += chain(0, 2)
     # the next row group's wave partials overwrite the LDS the stores just read
     loop += "    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n  }\n"
     return head + loop + TAIL
+
+
+# ======================================================================================================================
+# The verify program pass (choice decode.verify.fuse, env VERIFY_FUSE): epochs of at most 4 tokens on the int8 matvec path
+# take a fused copy of every layer; every other epoch keeps the layer as generated.
+# ======================================================================================================================
+_PROJ = re.compile(r"kernel\.launch @g_mv_(\w+?)_k(\d+)_t4_q8_r(\d+)\[(%\w+), %t\]\(\4, %t, %zero_i32, (%\w+), (%\w+), (%\w+), (%\w+)\) : "
+                   r"\[index, index\]\(index, index, i32, buffer, (view<\d+xi8>), (view<\d+xi8>), buffer\)")
+_QUANT = re.compile(r"kernel\.launch @g_quant_q8\[%t, (%\w+)\]\(%t, \1, (%\w+), (%\w+)\)")
+_SILU = re.compile(r"kernel\.launch @g_silu_mul\[%t\]\(%t, (%\w+), (%\w+), (%\w+)\)")
+_PRE = re.compile(r"kernel\.launch @g_post_add_norm\[%t\]\(%t, %y, %\w+, %x, (%\w+), %h\)")
+_DEF = re.compile(r"  %[\w.]+ = (?!.*kernel\.launch)")
+
+
+def _statements(lines):
+    """Top-level statements of a layer's text: single lines, or a line opening regions up to the line that closes them
+    (brace count: the generated GEMM branches close at uneven indentation)."""
+    out, cur, depth = [], [], 0
+    for ln in lines:
+        cur.append(ln)
+        depth += ln.count("{") - ln.count("}")
+        assert depth >= 0, ln
+        if depth == 0:
+            out.append("".join(cur))
+            cur = []
+    assert not cur, "unbalanced layer text"
+    return out
+
+
+def fuse_verify(program, src, eps, hidden, G=0, n_of=None):
+    """llm_verify with every layer duplicated: scf.if %pz {fused} else {as generated}, %pz = an epoch of at most 4 tokens
+    off the GEMM path and not a single token. The fused layer:
+      input projections that read the int8 rows of h (qkv + z, q|gate + k + v, gate + up): one g_pmv_*_norm_* launch whose
+          prologue is rmsnorm(x) * w + the int8 quant (the g_post_add_norm / g_quant_q8 launches are gone); workgroup 0
+          writes h when the layer's f32-activation projections (alpha / beta) read it;
+      a projection of a g_quant_q8 output (attention / GDN out_proj): the f32 prologue, accumulate into x (x += o W^T is
+          g_post_add_norm's x += y with the same f32 add);
+      the down projection: the silu prologue (g_silu_mul + g_quant_q8 gone), accumulate into x; the last layer stores y
+          (the program's final g_post_add_norm adds it).
+    src(name) -> kernel text of the int8 matvec `name` (gen_llm.mv). n_of(view type, K) -> rows. Returns (program, kernels)."""
+    start = program.index("@llm_verify()")
+    end = program.index("\n}\n", start)
+    body = program[start:end]
+    marks = list(re.finditer(r"^  // ---- layer (\d+)[^\n]*\n", body, re.M))
+    assert marks, "llm_verify has no layer markers"
+    last_layer = len(marks) - 1
+    # the final norm (x += y of the last layer, h = rmsnorm(x) * output norm) is the first top-level post_add_norm after the last layer
+    tail_at = re.compile(r"^  kernel\.launch @g_post_add_norm\[%t\]\(%t, %y, ", re.M).search(body, marks[-1].end()).start()
+    kernels = {}
+    first_norm = re.search(r"kernel\.launch @g_embed\[%t\]\([^)]*?, (%\w+), %x, %h\)", body)
+    assert first_norm, "g_embed launch"
+    out = [body[:marks[0].start()]]
+    out.append("  %pz_c4 = index.constant 4 : index\n  %pz_le4 = index.cmp ule, %t, %pz_c4 : index\n"
+               "  %pz_true = scalar.constant true : i1\n  %pz_a = scalar.xori %mm, %pz_true : i1\n"
+               "  %pz_b = scalar.xori %single, %pz_true : i1\n  %pz_ab = scalar.andi %pz_a, %pz_b : i1\n"
+               "  %pz = scalar.andi %pz_ab, %pz_le4 : i1\n  %pz_one = scalar.constant 1 : i32\n")
+    for li, mk in enumerate(marks):
+        seg_end = marks[li + 1].start() if li + 1 < len(marks) else tail_at
+        text = body[mk.end():seg_end]
+        stmts = _statements(text.splitlines(True))
+        hoist = [s for s in stmts if "\n" == s[-1] and s.count("\n") == 1 and _DEF.match(s)]
+        rest = [s for s in stmts if s not in hoist]
+        norm_w, quant_of, silu, fused, groups = (first_norm.group(1) if li == 0 else None), {}, None, [], {}
+        reads_h = any(re.search(r"%zero_i32, %h, ", s) for s in rest)
+        for s in rest:
+            pm, qm, sm, mm = _PRE.search(s), _QUANT.search(s), _SILU.search(s), _PROJ.search(s)
+            if pm:
+                norm_w = pm.group(1)
+                continue
+            if qm and "g_mv_" not in s:
+                if qm.group(2) == "%h":
+                    continue
+                quant_of[qm.group(3)] = qm.group(2)
+                continue
+            if sm:
+                silu = (sm.group(1), sm.group(2), sm.group(3))
+                continue
+            if mm:
+                fmt, K, R, n, xin, w, ws, y, wt, wst = mm.groups()
+                if xin == "%h16q" or xin == "%hq":
+                    assert norm_w, f"layer {li}: a projection of h without its norm"
+                    group = groups.get(norm_w)
+                    if group is None or group["K"] != int(K):
+                        group = groups[norm_w] = {"norm": norm_w, "K": int(K), "R": int(R), "fmt": fmt, "mats": []}
+                        fused.append(group)
+                    group["mats"].append((n, w, ws, y, wt, wst))
+                    continue
+                src_x = quant_of.get(xin)
+                assert src_x, f"layer {li}: {xin} has no producer in the layer"
+                if silu and src_x == silu[1]:
+                    mode, xs = "silu", f"{silu[1]}, {silu[2]}"
+                else:
+                    mode, xs = "f32", src_x
+                down_last = mode == "silu" and li == last_layer
+                kname, ktext = _kernel(src, fmt, int(K), int(R), mode, 1, G, eps, hidden, False)
+                kernels[kname] = ktext
+                acc, dst = ("%zero_i32", y) if down_last else ("%pz_one", "%x")
+                xt = "buffer, buffer" if mode == "silu" else "buffer"
+                fused.append(f"  kernel.launch @{kname}[{n}, %t]({n}, %t, {acc}, {xs}, {w}, {ws}, {dst}) : [index, index](index, index, i32, {xt}, {wt}, {wst}, buffer)\n")
+                continue
+            fused.append(s)
+        new = []
+        for f in fused:
+            if isinstance(f, str):
+                new.append(f)
+                continue
+            mats = f["mats"]
+            for n, w, ws, y, wt, wst in mats:
+                if n_of:
+                    assert n_of(wt, f["K"]) % f["R"] == 0, f"layer {li}: {n} rows are not a multiple of R={f['R']}"
+            hout = reads_h and f is next(g for g in fused if not isinstance(g, str))
+            kname, ktext = _kernel(src, f["fmt"], f["K"], f["R"], "norm", len(mats), G, eps, hidden, hout)
+            kernels[kname] = ktext
+            ns = ", ".join(m[0] for m in mats)
+            args = ", ".join(f"{m[1]}, {m[2]}" for m in mats) + ", " + ", ".join(m[3] for m in mats) + (", %h" if hout else "")
+            tys = ", ".join(f"{m[4]}, {m[5]}" for m in mats) + ", " + ", ".join("buffer" for _ in mats) + (", buffer" if hout else "")
+            idx = ", ".join("index" for _ in range(len(mats) + 1))
+            new.append(f"  kernel.launch @{kname}[{ns}, %t]({ns}, %t, %zero_i32, %x, {f['norm']}, {args}) : [{idx}]({idx}, i32, buffer, view<{hidden}xf32>, {tys})\n")
+        ind = lambda s: "".join("  " + ln if ln.strip() else ln for ln in s.splitlines(True))
+        out.append(mk.group(0) + "".join(hoist) + "  scf.if %pz {\n" + ind("".join(new)) + "  } else {\n" + ind("".join(rest)) + "  }\n")
+    out.append(body[tail_at:])
+    return program[:start] + "".join(out) + program[end:], kernels
+
+
+def _kernel(src, fmt, K, R, mode, mats, G, eps, hidden, hout):
+    base = f"g_mv_{fmt}_k{K}_t4_q8_r{R}"
+    t = pmv(src(base), mode, mats=mats, G=G, eps=eps if mode == "norm" else None, count=float(hidden) if mode == "norm" else None, hout=hout)
+    return re.search(r'export\("([^"]+)"', t).group(1), t
