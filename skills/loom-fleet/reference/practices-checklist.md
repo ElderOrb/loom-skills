@@ -72,7 +72,7 @@ the repo root; `campaign.md`, `targeted-fix.md` and `architecture.md` are in `sk
 | # | Rule | Source | Where |
 |---|---|---|---|
 | 38 | Integration branch; engineer branches `<campaign>-<name>` in own worktrees; PRs only into the integration branch | brief | `campaign.md` "Branches"; `templates/ENG_CONTRACT.md` |
-| 39 | PR body: what, why, evidence, loom-scope block, credit line; commit trailer; no model ids | brief | `campaign.md` "Branches"; `templates/ENG_CONTRACT.md` |
+| 39 | PR body: what, why, evidence, loom-scope block, credit line; commit trailer exactly `Co-Authored-By: Claude <noreply@anthropic.com>`; no model names or versions | brief | `campaign.md` "Branches"; `templates/ENG_CONTRACT.md`; `tests/test_campaign_scripts.py` |
 | 40 | Merge in-scope PRs that pass review without waiting; failing ones go back; close superseded PRs | owner rule | `campaign.md` "Branches" |
 | 41 | External repo changes (loom-dev): open the PR, do not merge, tell the PM | brief | `campaign.md` "Branches" |
 | 42 | Tests pass, byte identity proven unless the task says otherwise | brief | `templates/ENG_CONTRACT.md`; `targeted-fix.md` section 3 |
