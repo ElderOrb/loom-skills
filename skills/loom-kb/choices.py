@@ -261,7 +261,7 @@ CHOICE("decode.verify.fuse", "str", None, "VERIFY_FUSE", kernels=["g_pmv_*"], ro
        doc="Drafted verify epochs of 2-4 tokens on the int8 matvec path run fused layers (starter gen_pstep.py; the layer as generated stays "
            "for every other epoch, every value is the launch chain's: kernel tests compare with equality). swq: gate + up + g_silu_mul + "
            "g_quant_q8 of the FFN in one launch (32-row workgroups whose epilogue writes the down projection's int8 input; kbench pstep_r9700 "
-           "43811425655: FFN block 262 -> 251 us). full: every projection takes its producer as a prologue (rmsnorm / f32 / silu + quant) and "
+           "43811425655: FFN block 262 -> 251 us), and every g_post_add_norm + g_quant_q8(h) pair one g_post_add_norm_q8 launch. full: every projection takes its producer as a prologue (rmsnorm / f32 / silu + quant) and "
            "the out / down projections accumulate into the residual (7 launches -> 2 per FFN, but 261 -> 335+ us: the prologue is paid per workgroup).")
 CHOICE("decode.verify.persist", "int", 0, "MV_PERSIST", kernels=["g_pmv_*"], rows=ROWS_DECODE, from_pr="mxfp4st-ostep",
        doc="decode.verify.fuse's matvecs as persistent row loops: min(G, row groups) workgroups each walk row groups id, id + G, ... "
