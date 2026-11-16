@@ -69,7 +69,8 @@ trc=0
 for t in $(q "print(' '.join(s.get('tests', [])))"); do
   step "loom-test $t"
   "$root/.venv/bin/loom-test" "$t" --device=amdgpu > "$out/test_${t%.loom}.json" 2> "$out/test_${t%.loom}.err"
-  python3 - "$out/test_${t%.loom}.json" "$out/test_${t%.loom}.err" <<'PYT' | tee "$out/test_${t%.loom}.txt"
+  ncase=$(grep -c '^check.case' "$t")   # loom-test can silently skip cases (a file through dual_target / template.apply): every case must report a sample
+  python3 - "$out/test_${t%.loom}.json" "$out/test_${t%.loom}.err" "$ncase" <<'PYT' | tee "$out/test_${t%.loom}.txt"
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -81,7 +82,9 @@ for s in d["samples"]:
     issues = [i.get("message", "") for i in s.get("issues", [])]
     bad += not s["passed"]
     print(("PASS " if s["passed"] else "FAIL ") + s["case"], *(x[:300] for x in issues + fails[:2]))
-print(f"{len(d['samples']) - bad}/{len(d['samples'])} passed")
+print(f"{len(d['samples']) - bad}/{len(d['samples'])} passed ({sys.argv[3]} cases in the file)")
+if len(d["samples"]) < int(sys.argv[3]):
+    print(f"FAIL: {int(sys.argv[3]) - len(d['samples'])} case(s) of the file ran no sample (silently skipped)"); bad += 1
 sys.exit(1 if bad else 0)
 PYT
   [ "${PIPESTATUS[0]}" = 0 ] || trc=1
