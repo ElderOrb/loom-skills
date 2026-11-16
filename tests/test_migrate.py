@@ -285,7 +285,7 @@ class Wiring(unittest.TestCase):
         import re
         heads = lambda p: [re.sub(r"^\d+\. ", "", h) for h in re.findall(r"^## (.+)$", p.read_text(), re.M)]
         want = heads(self.SK / "versions/TEMPLATE.md")
-        self.assertEqual(len(want), 11)
+        self.assertEqual(len(want), 12)
         entries = sorted((self.SK / "versions").glob("v*-to-*.md"))
         self.assertTrue(entries)
         for e in entries:
