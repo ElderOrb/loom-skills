@@ -374,7 +374,7 @@ class SdkAbTest(Base):
         cmd = self.calls[0]
         for flag in ("--sdk-ab", "--baselines"):
             self.assertIn(flag, cmd)
-        self.assertEqual(cmd[cmd.index("--old-sdk") + 1], "0.1.0")
+        self.assertEqual(cmd[cmd.index("--old-sdk") + 1], "card")
         self.assertEqual(cmd[cmd.index("--new-sdk") + 1], "0.2.0rc1")
 
     def test_sdk_ab_takes_no_old_org(self):

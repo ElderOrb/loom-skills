@@ -74,7 +74,8 @@ VARIANT = {"ab": ("staging", "stagingnd"), "card": ("card", "nodraft"), "logits"
 # sdk-ab: the metric of each reported delta (card_lib.METRIC_KEYS rows) and the ratchet: slower than this fraction on a metric = a confirming run
 SDK_METRICS = {"decode": "decode", "prefill": "prefill_8k", "longctx": "decode_32k", "4stream": "streams4"}
 SDK_REGRESSION = 0.03
-SDK_OLD, SDK_NEW = "0.1.0", "0.2.0rc1"
+# old side = "card": the pin of the published card (pin-less = 0.1.0; Flash-Next's card is pinned to a 0.2.0 dev build)
+SDK_OLD, SDK_NEW = "card", "0.2.0rc1"
 
 
 def now():
@@ -774,7 +775,7 @@ def ingest_full(st, name, e, W):
     shutil.copy(os.path.join(W, "info_new.json"), os.path.join(out, "info.json"))
     msg = f"{card_lib.GPUS[dev]['runner']} results measured on this package (run {run})"
     if sdk:
-        msg += f"; hrx-loom {SDK_NEW} vs the previous card on {SDK_OLD} (same job, ABBA): " + sdk_line(e)
+        msg += f"; hrx-loom {SDK_NEW} vs the previous card on its own SDK pin (same job, ABBA): " + sdk_line(e)
     return out, hf_head(f"{st.d['opts']['new_org']}/{slug}"), msg
 
 
@@ -928,7 +929,7 @@ def main(argv=None):
     p.add_argument("slugs", nargs="*")
     p.add_argument("--device", action="append", required=True)
     p.add_argument("--mode", choices=("ab", "card", "logits", "sdk-ab"), default="ab",
-                   help="sdk-ab: the SDK migration's A/B per model and device (old = the manifest's staging card on 0.1.0, new = built from --base on 0.2.0rc1; deltas per metric); logits: the final pass's functional job of a staging package (func, ktest, logits:staging), no performance")
+                   help="sdk-ab: the SDK migration's A/B per model and device (old = the manifest's staging card on its own SDK pin, 0.1.0 when pin-less; new = built from --base on 0.2.0rc1; deltas per metric); logits: the final pass's functional job of a staging package (func, ktest, logits:staging), no performance")
     p.add_argument("--bundle", nargs=2, metavar=("URL", "SHA256"), help="logits mode: the Gufo bundle tarball the job fetches (devlab_perf.sh gufo_bundle)")
     p.add_argument("--bundle-run", help="logits mode: reuse the `gufo-bundle` artifact of this devlab-perf run (the run that built it: no build in this one)")
     p.add_argument("--bundle-build", nargs=2, metavar=("EXT_REV", "GUFO_REV"), help="logits mode: the devlab-perf run BUILDS the Gufo bundle "
