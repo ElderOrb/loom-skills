@@ -9,6 +9,9 @@
 #               "suites": [{"suite": name, "dir": "<dir under .github/devlab/kbench>", "files": ["a.loom", ...],
 #                           "config": ["k=v", ...] (--config=), "args": ["--measure=...", ...] (loom-benchmark flags),
 #                           "repeats": N (optional), "runner": "strix" (default) | "r9700" (workflow runs-on),
+#                           "probes": [{"name": N, "args": [...]}] (optional): after the timing runs, the FIRST file once more per probe with these extra
+#                           loom-benchmark flags (JSONL rows, raw profile bundles) -> probe_N.jsonl/.log, probe_N_artifacts/: hardware counters,
+#                           executable traces, compile report details; a probe that fails is recorded, never fails the suite,
 #                           "gen": generator script under .github/devlab/kbench (run as `gen CHECKOUT RUNDIR VARIANT...`), "gen_variants": [...]}]}
 # Variant name = file name without "bench_" prefix / ".loom" ("bench.loom" is "base"). Benchmarks that read .npy
 # weights (check.file.read.npy path("w/x.npy")) that are not in the suite dir get random int8 weights of the
@@ -103,7 +106,18 @@ for i in $(seq 1 "$reps"); do
   done
 done
 
-python3 - "$out" "$suite" "$(for f in $files; do vname "$f"; done | tr '\n' ' ')" <<'PY'
+# probes (profiling evidence, not timings): the first file with extra flags; their failure is data (the counters' state on this GPU)
+nprobe=$(q "print(len(s.get('probes', [])))")
+for pi in $(seq 0 $((nprobe - 1))); do
+  pn=$(q "print(s['probes'][$pi]['name'])"); pa=$(q "print(' '.join(s['probes'][$pi].get('args', [])))"); f0=${files%% *}
+  step "probe $pn: $f0 $pa"; mkdir -p "$out/probe_${pn}_artifacts"
+  "$LB" "$f0" --device=amdgpu $cfgs $args --compile-report=summary $pa --output-format=jsonl --profile-artifacts-dir="$out/probe_${pn}_artifacts" \
+    --file-output-root="$D/run/fo_probe_$pn" --output="$out/probe_$pn.jsonl" > "$out/probe_$pn.log" 2>&1; echo "probe $pn rc=$?" | tee -a "$out/probes.txt"
+  tail -3 "$out/probe_$pn.log" | cut -c1-300; rm -rf "$D/run/fo_probe_$pn"
+  du -sh "$out/probe_${pn}_artifacts" 2>/dev/null | tee -a "$out/probes.txt"
+done
+
+CASE_TIMING=$(q "print(1 if s.get('case_timing') else 0)") python3 - "$out" "$suite" "$(for f in $files; do vname "$f"; done | tr '\n' ' ')" <<'PY'
 import glob, json, os, statistics as S, sys
 out, suite, variants = sys.argv[1], sys.argv[2], sys.argv[3].split()
 fails = {}
@@ -116,6 +130,9 @@ for v in variants:
         for w in d.get("work_items", []):
             if w.get("state") not in (None, "completed", "succeeded", "passed") and not w.get("profile_replay"):
                 fails.setdefault(v, {})[w.get("benchmark")] = (w.get("failure") or {}).get("message", w.get("state"))
+            if os.environ.get("CASE_TIMING") == "1" and w.get("benchmark"):   # suite option "case_timing": the whole case (all its launches) per logical operation, host wall
+                try: by.setdefault("k_case_" + w["benchmark"], []).append(w["measurement"]["operation_timing_ns"]["p50"] / 1e6)
+                except KeyError: pass
             for r in w.get("profile_replay", {}).get("summary", {}).get("rows", []):
                 n = r.get("function_name", "")
                 if n.startswith("k_"): by.setdefault(n, []).append(r["timing"]["mean_ns"] / 1e6)

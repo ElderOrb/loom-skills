@@ -5746,6 +5746,15 @@ if __name__ == "__main__":
     if os.environ.get("POST_ADD_ROW_SCALE", "1") != "0":   # after live_row_scale; =0 A/B it off
         program, _fused = fuse_post_add_row_scale(program)
         COMMON += _fused
+    if os.environ.get("VERIFY_FUSE", "") in ("swq", "swqn", "full") and spec_kernels and USED_MVQ:   # choice decode.verify.fuse (gen_pstep.py): fused layers for 2-4 token epochs
+        import gen_pstep
+        def _pz_src(name):
+            f, k, r = re.match(r"g_mv_(\w+?)_k(\d+)_t4_q8_r(\d+)$", name).groups()
+            return mv(f, int(k), R=int(r), TG=4, suffix=f"_r{r}" if int(r) != 16 else "", iq=True)
+        program, _pk = gen_pstep.fuse_verify(program, _pz_src, EPS, H, G=int(os.environ.get("MV_PERSIST", "0") or 0),
+                                             n_of=lambda vt, k: int(re.search(r"\d+", vt).group(0)) * 2 // k, mode="swq" if os.environ["VERIFY_FUSE"] == "swqn" else os.environ["VERIFY_FUSE"],
+                                             norm_src=_re.search(r'^kernel\.def export\("g_post_add_norm"\)(?:.|\n)*?^\}\n', NORMS, _re.M).group(0) if os.environ["VERIFY_FUSE"] == "swqn" else None)
+        COMMON += "".join(_pk[n] for n in sorted(_pk))
     if any(f == "f32" for f, *_ in USED_MV | USED_MV_R) or "f32" in USED_GEMM:
         COMMON += F32_VALUES
     if any(f == "f16" for f, *_ in USED_MV | USED_MV_R) or "f16" in USED_GEMM:
@@ -5820,6 +5829,10 @@ if __name__ == "__main__":
         text = re.sub(r"^( *)kernel\.launch @(\w+)_attention_flash2(_h\d+)?\[(.*)$",
                       r"\g<0>\n\1kernel.launch @\2_attention_flash2_deep\3[\4",
                       text, flags=re.M)
+    if FUSED_Q and os.environ.get("ROPE_QG") == "1" and "g_qk_rope_store_h" not in text and "g_qk_rope_store_swa" not in text:   # choice prefill.attn.rope_qg (rope_qg.py)
+        from rope_qg import fuse as _rope_qg
+        text, _nqg = _rope_qg(text)
+        print("rope_qg launches:", _nqg)
     if os.environ.get("LIVE_ROW_SKIP", "1") != "0":   # =0 A/B it off
         text = live_row_skip(text)
     from gen_gemm_rdna4 import f16o_swiglu as _f16o_on
