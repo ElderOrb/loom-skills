@@ -102,7 +102,8 @@ def kern(name, it, mode):
     %pfn = vector.reduce<addi> %vn, %zero32 : vector<4xi32>, i32
 ''')
         # grid barrier: all stores of this phase visible to every workgroup before the next phase's loads
-        a(f'''    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+        a(f'''    buffer.fence scope(device) ordering(release)
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
     scf.if %is0 {{
       %old = view.atomic.rmw<addi> %one32, %cnt_v[0] {{ordering = acq_rel, scope = device}} : i32, view<1xi32> -> i32
       %gen = scalar.divui %old, %g32 : i32
@@ -118,6 +119,7 @@ def kern(name, it, mode):
       scf.yield
     }}
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    buffer.fence scope(device) ordering(acquire)
 ''')
         a(f"    scf.yield{' %pfn : i32' if pfc else ''}\n  }}\n  kernel.return\n}}\n")
     return "".join(A)
@@ -125,7 +127,7 @@ def kern(name, it, mode):
 def case(name, mode, it):
     sweep = G * LANES; slab_rows = sweep * it * P
     if mode == "one":
-        launches = "".join(f"  %p{i} = index.constant {i} : index\n  kernel.launch @{name}[%p{i}](%p{i}, %slab, %out, %cnt) : [index](index, tensor<{slab_rows}x4xi32>, tensor<2x{G * LANES}xi32>, tensor<1xi32>)\n" for i in range(P))
+        launches = "".join(f"  %p{i} = check.literal value({i}) : index\n  kernel.launch @{name}[%p{i}](%p{i}, %slab, %out, %cnt) : [index](index, tensor<{slab_rows}x4xi32>, tensor<2x{G * LANES}xi32>, tensor<1xi32>)\n" for i in range(P))
     else:
         launches = f"  kernel.launch @{name}[](%slab, %out, %cnt) : [](tensor<{slab_rows}x4xi32>, tensor<2x{G * LANES}xi32>, tensor<1xi32>)\n"
     return f'''check.case public @{name}_case {{
