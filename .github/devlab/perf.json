@@ -1,5 +1,5 @@
 {
- "_comment": "first-serve probe 3: no cache drop on the first serve (fresh VM), VRAM/GTT/dmesg deltas, then serve 2 and a cache-dropped serve 3",
+ "_comment": "first-load fix check: serve_alone warms the first weight load (text+image) and restarts the server when it fails",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
@@ -24,8 +24,7 @@
    ],
    "steps": [
     "cold:c104:plain1",
-    "cold:c104:plain2",
-    "cold:c104:drop3"
+    "func:c104"
    ]
   }
  ]

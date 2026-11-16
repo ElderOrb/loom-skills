@@ -393,8 +393,19 @@ serve_alone() { # serve_alone VARIANT
     vmem=none
   fi
   [ -n "${PROFILE_SA:-}" ] && sa="$sa $PROFILE_SA"   # the profile step: --print_device_statistics
-  step "serve $1"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
-  grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
+  local try fl=(); [ -n "$safetensors" ] && [ -z "${REFERENCE_CHECKPOINT:-}" ] && grep -q '"vision"' "$D/$1/pkg/llm_config.json" 2>/dev/null && fl=(--vision)
+  for try in 1 2 3; do
+    step "serve $1${try:+ (try $try)}"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
+    grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
+    # safetensors packages: the first weight load of a fresh R9700 VM fails (HAL RESOURCE_EXHAUSTED in libamdf memory_create) and leaves the model
+    # "unavailable"; the next server start loads fine (notes/sdk_blockers.md, run 43822281517). Load once here (text, + image), restart on failure.
+    [ -n "$safetensors" ] && [ -n "$RDEV" ] || break
+    "$T" -I "$here/.github/scripts/warm_first_load.py" "$url" "$cardid" ${fl[@]+"${fl[@]}"} > "$out/warm_$1.try$try.log" 2>&1; wrc=$?; cat "$out/warm_$1.try$try.log"
+    [ $wrc = 0 ] && break
+    echo "first weight load failed (try $try): restarting loom-serve"; cp "$LOOM_SERVE_STATE/perf-$1.log" "$out/serve_$1.try$try.log" 2>/dev/null
+    "$SV/stop.sh" "perf-$1" >/dev/null 2>&1; sleep 3
+    [ $try = 3 ] && { echo "FAIL: the first weight load failed 3 times"; return 1; }
+  done
   curl -sf "$url/v1/models" >/dev/null
 }
 gufo_bundle() {   # gufo_bundle -> exports GUFO_BUNDLE (the experiment's/job's "bundle" tarball, fetched once per runner), or fails
