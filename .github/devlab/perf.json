@@ -1,47 +1,56 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
+ "_comment": "mxfp4st fattn exp5: PR head (key-split flash on the AMD node) vs origin/mxfp4st; ktest, func, dev gates vs vLLM, ABBA prefill. ONE job. Evidence branch: not for merge.",
  "runner": "r9700",
- "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "memory_bytes": 30000000000,
+ "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
+ "kit": null,
+ "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "name": "amd-q38-fattn-e5",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
    "kit": null,
    "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "vllm_spec": "{\"method\": \"mtp\", \"num_speculative_tokens\": 3}",
+   "vllm_max_len": 40960,
    "variants": [
     {
-     "name": "card",
-     "build": {}
+     "name": "prev",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536,
+     "ref": "f4ff200d399eda618b84689e21e90ab75787b120"
     },
     {
-     "name": "nodraft",
+     "name": "head",
      "build": {},
-     "execution": {
-      "draft_depth": 0
-     }
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
+    "ktest:head",
+    "func:head",
+    "gates:head:dev",
+    "perf:prev:1",
+    "perf:prev:1:long",
+    "perf:head:1",
+    "perf:head:1:long",
+    "perf:head:1",
+    "perf:head:1:long",
+    "perf:prev:1",
+    "perf:prev:1:long",
+    "perf:prev:1",
+    "perf:prev:1:long",
+    "perf:head:1",
+    "perf:head:1:long"
    ]
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
