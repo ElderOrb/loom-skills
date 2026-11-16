@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st defold exp4: decode.spec.gdn_fold_defer (default layout, merged with #942) vs mxfp4st 9903c8cd (pinned: the branch's merge base; exp2/exp3 bases had moved) (eager fold), same base: ktest + 3 drafted-decode profiles each (acceptance = correctness probe after exp2's one bad profile session), decode ABBA x4, c4 undrafted ABBA x3. Evidence branch, not for merge.",
+ "_comment": "mxfp4st defold exp5: exp4 profile: deferred fold GDN -0.26 ms/step but the next weight matvecs +0.39 (k5120_r4 +0.35): b_nt writes the folded state non-temporal. base pinned 9903c8cd. Evidence branch, not for merge.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
@@ -7,7 +7,7 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "defold4-kt-prof",
+   "name": "defold5-prof",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
@@ -33,20 +33,29 @@
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
      "context": 110592
+    },
+    {
+     "name": "bnt",
+     "build": {
+      "GDN_FOLD_DEFER": "1",
+      "GDN_PEND_NT": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
     }
    ],
    "steps": [
-    "ktest:b",
-    "func:b",
-    "profile:b:dec",
-    "profile:base:dec",
-    "profile:b:dec",
+    "ktest:bnt",
+    "profile:bnt:dec",
     "profile:base:dec",
     "profile:b:dec"
    ]
   },
   {
-   "name": "defold4-dec",
+   "name": "defold5-dec",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
@@ -63,9 +72,10 @@
      "context": 110592
     },
     {
-     "name": "b",
+     "name": "bnt",
      "build": {
-      "GDN_FOLD_DEFER": "1"
+      "GDN_FOLD_DEFER": "1",
+      "GDN_PEND_NT": "1"
      },
      "build_args": [
       "--slug",
@@ -76,57 +86,13 @@
    ],
    "steps": [
     "perf:base:1",
-    "perf:b:1",
-    "perf:b:1",
+    "perf:bnt:1",
+    "perf:bnt:1",
     "perf:base:1",
     "perf:base:1",
-    "perf:b:1",
-    "perf:b:1",
+    "perf:bnt:1",
+    "perf:bnt:1",
     "perf:base:1"
-   ]
-  },
-  {
-   "name": "defold4-c4",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
-   "kit": null,
-   "llamacpp": "b1375",
-   "repeat_rows": 3,
-   "variants": [
-    {
-     "name": "base_nd",
-     "ref": "9903c8cde29176d24a6bfab4b87533bd50adf04f",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592,
-     "execution": {
-      "draft_depth": 0
-     }
-    },
-    {
-     "name": "b_nd",
-     "build": {
-      "GDN_FOLD_DEFER": "1"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592,
-     "execution": {
-      "draft_depth": 0
-     }
-    }
-   ],
-   "steps": [
-    "c4:base_nd",
-    "c4:b_nd",
-    "c4:b_nd",
-    "c4:base_nd",
-    "c4:base_nd",
-    "c4:b_nd"
    ]
   }
  ]
