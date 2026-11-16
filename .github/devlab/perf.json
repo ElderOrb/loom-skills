@@ -1,47 +1,167 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
+ "_comment": "One R9700 serve command for the R9700 and the 16 GB RX 9070 XT? card = the R9700 Quick start (-r9700 preset, --pool_backing=fixed); elastic34 = elastic, --memory_bytes=34e9, --state_slab_bytes=4mib; unified = elastic, no --memory_bytes (the GPU's own capacity), --state_slab_bytes=4mib. Same job = same runner: compare variants within a job only.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "llama_spec": "matched",
+ "card": "loom-fun/unsloth-Qwen3-8B-loom",
+ "kit": null,
+ "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "name": "unified-unsloth-qwen3-8b",
+   "card": "loom-fun/unsloth-Qwen3-8B-loom",
    "kit": null,
    "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
    "variants": [
     {
-     "name": "card",
-     "build": {}
+     "name": "card"
     },
     {
-     "name": "nodraft",
-     "build": {},
-     "execution": {
-      "draft_depth": 0
-     }
+     "name": "elastic34",
+     "elastic": true,
+     "serve_args": [
+      "--state_slab_bytes=4mib"
+     ]
+    },
+    {
+     "name": "unified",
+     "memory_bytes": "none",
+     "serve_args": [
+      "--state_slab_bytes=4mib"
+     ]
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
+    "perf:card:2",
+    "perf:card:2:long",
+    "c4:card",
+    "fullctx:card",
+    "perf:elastic34:2",
+    "perf:elastic34:2:long",
+    "c4:elastic34",
+    "fullctx:elastic34",
+    "perf:unified:2",
+    "perf:unified:2:long",
+    "c4:unified",
+    "fullctx:unified"
+   ]
+  },
+  {
+   "name": "unified-unsloth-qwen3-4b-2507",
+   "card": "loom-fun/unsloth-Qwen3-4B-Instruct-2507-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "card"
+    },
+    {
+     "name": "elastic34",
+     "elastic": true,
+     "serve_args": [
+      "--state_slab_bytes=4mib"
+     ]
+    },
+    {
+     "name": "unified",
+     "memory_bytes": "none",
+     "serve_args": [
+      "--state_slab_bytes=4mib"
+     ]
+    }
+   ],
+   "steps": [
+    "perf:card:2",
+    "perf:card:2:long",
+    "c4:card",
+    "fullctx:card:196000",
+    "perf:elastic34:2",
+    "perf:elastic34:2:long",
+    "c4:elastic34",
+    "fullctx:elastic34:196000",
+    "perf:unified:2",
+    "perf:unified:2:long",
+    "c4:unified",
+    "fullctx:unified:196000"
+   ]
+  },
+  {
+   "name": "unified-ggml-org-qwen3-6-27b",
+   "card": "loom-fun/ggml-org-Qwen3.6-27B-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "card"
+    },
+    {
+     "name": "elastic34",
+     "elastic": true,
+     "serve_args": [
+      "--state_slab_bytes=4mib"
+     ]
+    },
+    {
+     "name": "unified",
+     "memory_bytes": "none",
+     "serve_args": [
+      "--state_slab_bytes=4mib"
+     ]
+    }
+   ],
+   "steps": [
+    "perf:card:2",
+    "perf:card:2:long",
+    "c4:card",
+    "fullctx:card:69000",
+    "perf:elastic34:2",
+    "perf:elastic34:2:long",
+    "c4:elastic34",
+    "fullctx:elastic34:69000",
+    "perf:unified:2",
+    "perf:unified:2:long",
+    "c4:unified",
+    "fullctx:unified:69000"
+   ]
+  },
+  {
+   "name": "unified-unsloth-gemma-4-12b",
+   "card": "loom-fun/unsloth-gemma-4-12B-it-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "card"
+    },
+    {
+     "name": "elastic34",
+     "elastic": true,
+     "serve_args": [
+      "--state_slab_bytes=4mib"
+     ]
+    },
+    {
+     "name": "unified",
+     "memory_bytes": "none",
+     "serve_args": [
+      "--state_slab_bytes=4mib"
+     ]
+    }
+   ],
+   "steps": [
+    "perf:card:2",
+    "perf:card:2:long",
+    "c4:card",
+    "fullctx:card:50600",
+    "perf:elastic34:2",
+    "perf:elastic34:2:long",
+    "c4:elastic34",
+    "fullctx:elastic34:50600",
+    "perf:unified:2",
+    "perf:unified:2:long",
+    "c4:unified",
+    "fullctx:unified:50600"
    ]
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
