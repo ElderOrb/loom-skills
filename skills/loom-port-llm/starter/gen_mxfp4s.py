@@ -46,7 +46,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, lv=False, lvpf=0, lvs=False, ws=0, lvfb=False):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, lv=False, lvpf=0, lvs=False, ws=0):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -418,15 +418,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
             for q in range(2):
                 A(f"""    %lv_ar{r}_{2 * p + q} = vector.slice %lv_aw{r}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
     %l{r}_{2 * p + q} = vector.fragment<lhs> %lv_ar{r}_{2 * p + q} shape [%c16, %c16] using {{schema = %a_schema : encoding<schema>}} : vector<2xi32>""")
-        if lvfb and "b" in parts:   # the weight operand as plain fragment loads (8 bytes per lane per substep), the activations lane-vector
-            for kk in (2 * p, 2 * p + 1):
-                for wi in range(len(weights)):
-                    for c in range(cfr):
-                        A(f"""    %wr{wi}{c}_{kk}_c = index.constant {wi * TN + c * 16} : index
-    %wr{wi}{c}_{kk} = index.add %wave_col, %wr{wi}{c}_{kk}_c : index
-    %fk{kk} = index.constant {kk * 16} : index
-    %rf{wi}{c}_{kk} = vector.fragment.load<rhs> %w_stage_f8[%fk{kk}, %wr{wi}{c}_{kk}] shape [%c16, %c16] : view<{PX}x{TW}xf8E5M2, %b_storage> -> vector<2xi32>""".replace(f"%fk{kk} = index.constant", f"%fk{kk}_{wi}{c} = index.constant").replace(f"[%fk{kk}, ", f"[%fk{kk}_{wi}{c}, "))
-        for wi in range(len(weights) if ("b" in parts and not lvfb) else 0):
+        for wi in range(len(weights) if "b" in parts else 0):
             for c in range(cfr):
                 A(f"""    %lv_b{wi}{c}_{p} = vector.load {"%w_cur_st" if dbuf else "%w_stage_st"}[%lv_bn{wi}{c}, %lv_bk{p}] : view<{TW}x{PX}xi8> -> vector<16xi8>
     %lv_bw{wi}{c}_{p} = vector.bitcast %lv_b{wi}{c}_{p} : vector<16xi8> to vector<4xi32>""")
