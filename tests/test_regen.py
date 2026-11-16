@@ -371,10 +371,10 @@ class SdkAbTest(Base):
 
     GOOD = {"decode": 1.02, "decode_2k": 1.01, "prefill_8k": 1.05, "decode_32k": 0.99, "streams4": 1.0}
 
-    def test_plan_pins_old_and_new_to_the_manifest_staging_revision(self):
+    def test_plan_pins_old_and_new_to_the_staging_head(self):
         st = self.plan_sdk()
         refs = json.load(open(os.path.join(st.work, "refs_radeon-r9700.json")))
-        rev = json.load(open(os.path.join(ROOT, "fleet", "manifest.json")))["models"][SLUG]["staging"]["revision"]
+        rev = "f" * 40   # hf_head (mocked): the card as published at plan time, not the manifest's (possibly older) staging.revision
         self.assertEqual(refs[SLUG], {"old": f"loom-fun-staging/{SLUG}@{rev}", "new": f"loom-fun-staging/{SLUG}@{rev}"})
         self.assertFalse(st.jobs[JOB]["aa"])   # same revision, but two SDKs: not a noise-only A/A
         cmd = self.calls[0]

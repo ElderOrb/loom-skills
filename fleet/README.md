@@ -41,7 +41,7 @@ Adding a model: `python fleet/add_model.py SLUG PACKAGE_DIR --staging-revision R
     regen.py status S.json --status-json status.json                         # models.<slug>.<gpu> stage / verdict / run
     regen.py plan --base BRANCH --device strix-halo --device radeon-r9700 --mode sdk-ab --all --state S.json   # SDK migration A/B (below)
 
-**SDK A/B (`--mode sdk-ab`)**: per model and device ONE job, ABBA on one runner: `fun` = the published staging card (manifest `staging.revision`) served on
+**SDK A/B (`--mode sdk-ab`)**: per model and device ONE job, ABBA on one runner: `fun` = the published staging card (the staging head at plan time; the manifest revision can lag it) served on
 its own pin (hrx-loom 0.1.0), `staging` = the package BUILT in the job from the job's branch (`--base`) and served on hrx-loom 0.2.0rc1 (variants name
 their `"sdk"`; `devlab_perf.sh` gives each SDK its own root and runs `serve.sh` with that root's VENV; the one-server `ab` step refuses mixed SDKs),
 plus the card job's func / ktest / gates and llama.cpp baselines. `collect` writes `perf` = % delta v0.2 vs v0.1 for decode, prefill (8k), longctx

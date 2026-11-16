@@ -16,7 +16,7 @@
   regen.py adopt   S.json --run RUN                        attach an already running / finished run to the state's jobs (by job name)
 
 Modes. sdk-ab: the SDK migration's A/B (ab_jobs.py --sdk-ab): per model and device ONE job, ABBA on one runner: variant "fun" = the published staging card
-  (fleet/manifest.json staging.revision) on its own SDK pin (hrx-loom 0.1.0), variant "staging" = the package built in the job from the job's branch on
+  (the staging repo's head at plan time) on its own SDK pin (hrx-loom 0.1.0), variant "staging" = the package built in the job from the job's branch on
   hrx-loom 0.2.0rc1 (devlab_perf.sh per-variant SDK roots), plus the card job's gates and llama.cpp baselines. `collect` writes per model and device the
   % delta new vs old per metric (state: perf = {decode, prefill, longctx, 4stream}, positive = v0.2 faster); a metric more than 3 % slower
   triggers ONE confirming -r2 job, confirmed in both runs = needs_decision with the numbers; `ingest` builds the v0.2 card from the job (its own
@@ -268,14 +268,6 @@ def fleet_slugs():
     return sorted(json.load(open(os.path.join(HERE, "manifest.json")))["models"])
 
 
-def staging_ref(slug, org=STAGING_ORG):
-    """ORG/SLUG@REVISION: the published staging card fleet/manifest.json names (the v0.1 side of an SDK A/B)"""
-    m = json.load(open(os.path.join(HERE, "manifest.json")))["models"].get(slug)
-    if not m or not (m.get("staging") or {}).get("revision"):
-        die(f"{slug}: no staging revision in fleet/manifest.json")
-    return f"{org}/{slug}@{m['staging']['revision']}"
-
-
 def cmd_plan(a):
     slugs = fleet_slugs() if a.all else a.slugs
     if not slugs:
@@ -299,10 +291,14 @@ def cmd_plan(a):
     if a.mode == "logits" and a.old is None:
         old_org = a.new_org   # one package, checked: old == new in the pinned refs
     if a.mode == "sdk-ab":
-        # old = new = the published staging revision of the manifest: the job's card, the old variant's package, and the revision the new card is made on
+        # old = new = the staging repo's head at plan time (the card as published now; fleet/manifest.json staging.revision can lag it by
+        # card-only and program commits): the job's card, the old variant's package, and the revision the v0.2 package is published on top of
         if a.old:
-            die("--mode sdk-ab takes its old package from fleet/manifest.json staging.revision (no --old)")
-        refs = {s: {"old": staging_ref(s, a.new_org), "new": staging_ref(s, a.new_org)} for s in slugs}
+            die("--mode sdk-ab takes its old package from the staging repo's head (no --old)")
+        refs = {}
+        for s in slugs:
+            ref = f"{a.new_org}/{s}@{hf_head(f'{a.new_org}/{s}')}"
+            refs[s] = {"old": ref, "new": ref}
     elif a.mode in ("ab", "logits") and not a.no_pin:
         # pin the new package of every slug to the staging revision it is measured at (the card the run measures is the card ingested)
         refs = {s: dict(e) for s, e in (refs or {}).items()}
@@ -900,9 +896,8 @@ def package_one(st, slug, canon, sha, dry, env):
     if not want:
         raise RuntimeError("the canonical build has no programs")
     W = os.path.join(st.work, "package", slug)
-    # the snapshot is the repo's head, not the manifest's staging.revision: that revision is the A/B's old side (the card the job's "fun" variant
-    # served), and the head carries the card commits made since (model.json, Quick start); the package replaces the programs, so the head's own are
-    # of no interest, and --parent-commit = the head makes a concurrent publish fail the upload instead of being overwritten
+    # the snapshot is the repo's head (the plan pinned the A/B's old side to the head at plan time; card commits may have landed since): the
+    # package replaces the programs, and --parent-commit = the head makes a concurrent publish fail the upload instead of being overwritten
     rev = hf_head(repo)
     snap, out = os.path.join(W, "snap"), os.path.join(W, "pkg")
     hf_snapshot_small(repo, rev, snap)
