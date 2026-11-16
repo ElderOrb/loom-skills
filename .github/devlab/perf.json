@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st olayer2 exp1: fused GDN prefill + int8 alpha/beta (fab) with the mixed-epoch fixes (verify capture in the GEMM branch, order-independent workspace slots) vs base: warm-up serve, ktest (gdn_fused_serve), func, ABBA prefill, dev gates vs vLLM. Evidence branch: not for merge.",
+ "_comment": "mxfp4st olayer2 exp2: fused GDN with 64-row epochs on the chain (fab128) and + paired skinny fp8 alpha/beta (fab128f8) vs base: ktest, func, ABBA prefill, gates (base/fab128 fast, fab128f8 dev). Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -7,7 +7,7 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "amd-q38-olayer2-e1",
+   "name": "amd-q38-olayer2-e2",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
    "kit": null,
    "llamacpp": "b1375",
@@ -22,10 +22,25 @@
      "context": 65536
     },
     {
-     "name": "fab",
+     "name": "fab128",
      "build": {
       "GDN_FUSED2": "1",
-      "GDN_AB_Q8": "1"
+      "GDN_AB_Q8": "1",
+      "GDN_FUSED2_MIN": "128"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536
+    },
+    {
+     "name": "fab128f8",
+     "build": {
+      "GDN_FUSED2": "1",
+      "GDN_AB_Q8": "1",
+      "GDN_FUSED2_MIN": "128",
+      "GDN_AB_F8": "1"
      },
      "build_args": [
       "--slug",
@@ -36,17 +51,23 @@
    ],
    "steps": [
     "func:base",
-    "ktest:fab",
-    "func:fab",
+    "ktest:fab128f8",
+    "func:fab128f8",
     "perf:base:1",
     "perf:base:1:long",
-    "perf:fab:1",
-    "perf:fab:1:long",
-    "perf:fab:1",
-    "perf:fab:1:long",
+    "perf:fab128:1",
+    "perf:fab128:1:long",
+    "perf:fab128f8:1",
+    "perf:fab128f8:1:long",
+    "perf:fab128f8:1",
+    "perf:fab128f8:1:long",
+    "perf:fab128:1",
+    "perf:fab128:1:long",
     "perf:base:1",
     "perf:base:1:long",
-    "gates:fab:dev"
+    "gates:base:fast",
+    "gates:fab128:fast",
+    "gates:fab128f8:dev"
    ]
   }
  ]
