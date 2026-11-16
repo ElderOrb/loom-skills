@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st olayer2 exp2: fused GDN with 64-row epochs on the chain (fab128) and + paired skinny fp8 alpha/beta (fab128f8) vs base: ktest, func, ABBA prefill, gates (base/fab128 fast, fab128f8 dev). Evidence branch: not for merge.",
+ "_comment": "mxfp4st olayer2 exp3: the AMD node with prefill.gdn.fused2 + ab_q8 + ab_f8 (node) vs the same build with them off (base): ktest, func, ABBA prefill, profile pf2k/pf8k, dev gates on the node build. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -7,41 +7,27 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "amd-q38-olayer2-e2",
+   "name": "amd-q38-olayer2-e3",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
    "kit": null,
    "llamacpp": "b1375",
    "variants": [
     {
      "name": "base",
+     "build": {
+      "GDN_FUSED2": "0",
+      "GDN_AB_Q8": "0",
+      "GDN_AB_F8": "0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536
+    },
+    {
+     "name": "node",
      "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 65536
-    },
-    {
-     "name": "fab128",
-     "build": {
-      "GDN_FUSED2": "1",
-      "GDN_AB_Q8": "1",
-      "GDN_FUSED2_MIN": "128"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 65536
-    },
-    {
-     "name": "fab128f8",
-     "build": {
-      "GDN_FUSED2": "1",
-      "GDN_AB_Q8": "1",
-      "GDN_FUSED2_MIN": "128",
-      "GDN_AB_F8": "1"
-     },
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
@@ -51,23 +37,18 @@
    ],
    "steps": [
     "func:base",
-    "ktest:fab128f8",
-    "func:fab128f8",
+    "ktest:node",
+    "func:node",
     "perf:base:1",
     "perf:base:1:long",
-    "perf:fab128:1",
-    "perf:fab128:1:long",
-    "perf:fab128f8:1",
-    "perf:fab128f8:1:long",
-    "perf:fab128f8:1",
-    "perf:fab128f8:1:long",
-    "perf:fab128:1",
-    "perf:fab128:1:long",
+    "perf:node:1",
+    "perf:node:1:long",
+    "perf:node:1",
+    "perf:node:1:long",
     "perf:base:1",
     "perf:base:1:long",
-    "gates:base:fast",
-    "gates:fab128:fast",
-    "gates:fab128f8:dev"
+    "profile:node:pf2k,pf8k",
+    "gates:node:dev"
    ]
   }
  ]
