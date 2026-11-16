@@ -83,7 +83,7 @@ class Programs(unittest.TestCase):
             raise unittest.SkipTest("fleet builds need gguf and jinja2")
         cls.tmp = tempfile.TemporaryDirectory()
         cls.dirs = {}
-        for tag, env in (("off", {}),
+        for tag, env in (("off", {"PROPOSE_HEAD_PIECES": "0"}),
                          ("pieces", {"PROPOSE_HEAD_PIECES": "1", "PROPOSE_HEAD_ROWS": "65536"}),
                          ("verify", {"VERIFY_HEAD_PREP": "q8_0"})):
             out = os.path.join(cls.tmp.name, tag)
@@ -141,8 +141,8 @@ class Programs(unittest.TestCase):
         self.assertIn('// source "lm_head.weight"', w)
         self.assertEqual(on.count("config.decl @llm.prep_split"), 1)
         self.assertEqual(on.count('kernel.def export("g_prep_bf16r_q8_0")'), 1)
-        # the proposals keep their own (unpieced) copy
-        self.assertIn('%w_phead, "lm_head.weight" :', self.program(on, "llm_mtp_propose"))
+        # the proposals read their own pieced Q4_0 copy (the model node: draft.propose.head_pieces)
+        self.assertIn('%w_phead, "lm_head.weight#p0" :', self.program(on, "llm_mtp_propose"))
 
 
 if __name__ == "__main__":
