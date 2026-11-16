@@ -393,9 +393,20 @@ serve_alone() { # serve_alone VARIANT
     vmem=none
   fi
   [ -n "${PROFILE_SA:-}" ] && sa="$sa $PROFILE_SA"   # the profile step: --print_device_statistics
-  step "serve $1"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
-  grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
-  curl -sf "$url/v1/models" >/dev/null
+  local attempt
+  for attempt in 1 2; do
+    step "serve $1"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
+    grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
+    curl -sf "$url/v1/models" >/dev/null || return 1
+    # "ready" is the compiled registration; the weights load on the FIRST request, and until then every request is refused. Wait for that
+    # first answer before any step sends its own (a cold runner lost the first server of a job to it: func, gates, consistency failed
+    # for a reason that is not theirs). A model that does not load in 5 minutes gets ONE restart; the restart is recorded, never silent.
+    "$T" "$B/wait_model.py" "$url" --wait 300 && return 0
+    echo "serve $1: the model did not load (attempt $attempt)" | tee -a "$out/serve_retries.txt"
+    cp "$LOOM_SERVE_STATE/perf-$1.log" "$out/serve_failed_${1}_$attempt.log" 2>/dev/null
+    "$SV/stop.sh" "perf-$1" >/dev/null 2>&1; sleep 5
+  done
+  return 1
 }
 gufo_bundle() {   # gufo_bundle -> exports GUFO_BUNDLE (the experiment's/job's "bundle" tarball, fetched once per runner), or fails
   [ -n "${GUFO_BUNDLE:-}" ] && [ -x "$GUFO_BUNDLE/run.sh" ] && return 0
