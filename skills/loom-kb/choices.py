@@ -391,6 +391,25 @@ CHOICE("hybrid.gdn.chunk", "bool", False, "GDN_CHUNK", devices=["rdna4"], rows=R
        from_pr="q38r9700 gdnpf",
        doc="gfx12 chunked (WY) gated delta-net prefill (gen_gdn_chunk.py): spans of 64+ tokens run g_gdn_chunk_rdna4 (f16 WMMA, f32 state), the "
            "sequential kernel's gfx12 twin the shorter ones; the gfx11 kernels do not change (128 x 128 heads only).")
+CHOICE("prefill.gdn.fused2", "bool", False, "GDN_FUSED2", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_fa_rdna4", "g_gdn_fb_rdna4"],
+       from_pr="mxfp4st olayer",
+       doc="gfx12 fused gated delta-net prefill in two launches (gen_gdn_fused.py): g_gdn_fa_rdna4 (conv + SiLU, q/k norms, gates, the WY solve "
+           "and W = T beta e^gc K, U = T beta V, P per (value head, 32-token chunk), fully parallel) and g_gdn_fb_rdna4 (the serial state pass "
+           "d = U - W S, O = e^gc Q S + P d, S update, norm-gate epilogue, conv history commit) replace conv, commit, qk_norm, the chunk kernel and "
+           "norm_gate in GEMM-shape epochs; gfx11 and short epochs keep the chain (128 x 128 heads, conv 4).")
+CHOICE("prefill.gdn.fused2_min", "int", 64, "GDN_FUSED2_MIN", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_fa_rdna4", "g_gdn_fb_rdna4"],
+       from_pr="mxfp4st olayer2",
+       doc="With prefill.gdn.fused2: the smallest epoch (rows) that takes the fused pair: 64 = every GEMM-shape epoch; 128 = 64-row epochs (prompts and "
+           "tails under 64 tokens) keep the chain, whose spans under 64 tokens run the exact sequential recurrence.")
+CHOICE("prefill.gdn.ab_f8", "bool", False, "GDN_AB_F8", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_ab_gemm_mxfp4s_store_pair_f8_m256_rdna4"],
+       from_pr="mxfp4st olayer2",
+       doc="MXFP4 split-plane hybrids with prefill.gdn.ab_q8 and the fp8 GEMMs (gen_mxfp4s.ab_f8): in GEMM-shape epochs whose rows are a multiple of 32 "
+           "the 48-row GDN alpha / beta projections run as ONE paired skinny fp8 WMMA GEMM (32 x 48 tiles, both weights, K step 256) on the fp8 rows the "
+           "producer twin already wrote for the qkv GEMM (%h8), not g_quant_q8 + two int8 16-token matvecs; gfx11 keeps the int8 launches.")
+CHOICE("prefill.gdn.ab_q8", "bool", False, "GDN_AB_Q8", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_quant_q8", "g_mv_mxfp4s_k5120_t16_q8"],
+       from_pr="mxfp4st olayer",
+       doc="MXFP4 split-plane hybrids, GEMM-shape epochs: the 48-row GDN alpha / beta projections run as the 16-token int8 matvec on h quantized "
+           "once to int8, not as the f32 4-token matvec over h (gen_llm.ab_q8).")
 
 # ======================================================================================================================
 # Speculative decoding (gen_llm.py, draft/)
@@ -426,6 +445,7 @@ CHOICE("feature.logits_export", "bool", True, "LLM_LOGITS", kernels=["g_logits_e
 # ======================================================================================================================
 # Not choices: everything else the generators and their tools read from the environment
 # ======================================================================================================================
+NOT("A/B instrument of decode.spec.gdn_fold_defer (pending-fold slot layout; the default is the measured one)", "GDN_PEND_TAIL")
 NOT("input path or file selection (not a model-affecting knob)", "CATALOG", "LOOM_SKILLS", "LOOM_KB_ROOT", "LOOM_ROOT", "VENV", "HF", "HF_HOME",
     "HF_HUB_CACHE", "LD_LIBRARY_PATH", "LOOM_SERVE_STATE", "VISION_TEST_DIR", "FLASH2_OUT", "LLM_OUT")
 NOT("transport between a generator and its subprocesses (set by the caller from cfg / the build)", "LLM_CONFIG", "LLM_DRAFT",
