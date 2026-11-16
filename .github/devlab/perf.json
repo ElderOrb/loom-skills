@@ -1,5 +1,5 @@
 {
- "_comment": "first-load fix check: serve_alone warms the first weight load (text+image) and restarts the server when it fails",
+ "_comment": "job cold: warm-up fix check; job coldoff: same with the #911 proposal copies off (rebuilt package), first serve outcome in warm_c104.try1.log",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
@@ -26,6 +26,35 @@
     "cold:c104:plain1",
     "func:c104"
    ]
+  },
+  {
+   "name": "coldoff",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "require_preset_r9700": true,
+   "kit": null,
+   "memory_bytes_r9700": 34000000000,
+   "runner": "r9700",
+   "variants": [
+    {
+     "name": "c104",
+     "context": 106496,
+     "execution": {
+      "context_capacity": 106496,
+      "pool_capacity": 106496
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ]
+    }
+   ],
+   "steps": [
+    "cold:c104:plain1"
+   ],
+   "env": {
+    "MTP_BLOCK_PREP": "",
+    "PROPOSE_HEAD_ROWS": "0"
+   }
   }
  ]
 }
