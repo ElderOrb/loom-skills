@@ -69,3 +69,18 @@ The gfx12 twins' kbench findings (what bounds them, what was tried, why int8 WMM
   - LDS pitch of both stages (`pad` bytes after each 128-value row): 16 (default) and 32 / 80 / 112 tie; 0 is 2.3-4x slower, 8 +25 %, 48 +7 %, 64 +36 %: the pitch sets the bank mapping of the fragment reads, 144 B is already on the good side.
   - Occupancy and wave quantization: at 1024 rows the 17408 x 5120 store has 160 tiles (1.7 x 96 resident workgroups) and still runs at the same TFLOP/s as at 2048 rows (234 vs 238), so the tail is not a loss. Remaining gap to the 312 TFLOP/s random-data peak (76 %): WMMA issue overlaps the staging and fragment traffic only partly (ablations above); every restructuring tried moves the time by under 3 %.
 
+## Qwen3.8-27B on the R9700 (q38r9700 campaign, suite `gemm_q38`, e2e `devlab-perf`)
+Prefill GEMM shapes of the 27B (hidden 5120, ffn 17408, gdn qkv 10240, attention q 12288, gate 6144, ssm_out/attn_out 6144 -> 5120), kernels as the model builds them:
+- m256 (1024 rows): q4_k store 123-126 TFLOP/s (17408x5120 126, 5120x10240 124, 5120x6144 124), q4_k swiglu 115, q6_k store 115-118, q8_0 store 129. At 2048 rows the same
+  kernels run 115-129 TFLOP/s (down 119, qkv 129): no tile-quantization tail at 1024 rows (4 x 40 = 160 workgroups on 64 slots), so a bigger chunk cannot gain GEMM time. m128 is 14-30 % slower than m256 everywhere.
+- Dequant bound (`nodq`, zero weights, an upper bound): -13..-24 % (q4_k -14..-24, q6_k -21..-22, q8_0 -13). The generated ISA of the q4_k m256 loop already uses the f16 magic-number
+  conversion (and 0x0f0f0f0f, `v_perm` with 0x6400 -> f16 1024+q, `v_pk_add` -1024, `v_pk_fma` scale/minimum): folding the -1024 into the fma bias is not exact in f16
+  (1024*s + m needs more than 11 bits; the rounding error is about half a quantization step), so the 3 ops per 2 values stay. Removing the pk_add would be ~2 % of the kernel at best.
+- Prefill chunk (`prefill_capacity`, execution override, context 65536 so the bigger chunk fits; 124928 context + chunk 2048 exhausts device memory): 1k/2k/8k/16k/32k tok/s
+  card (1024) 1547/1634 (ABBA 1521/1609), 1708, 1645, 1521; 1536: 1462/1628 (1457/1624), 1691, 1634, 1512; 2048: 1454/1627 (1445/1616), 1715, 1651, 1529. 1k loses 5-6 %, 2k ties, 8k-32k +-0.5 %: keep 1024.
+
+### Qwen3.8-27B on the R9700: prefill outside the GEMMs (gdnpf)
+Doubling each kernel family in prefill (2k, ms/token of 0.608; single runs, noise +-0.01): GEMMs 0.485 (q4_k store 0.211, swiglu 0.167, q6_k 0.077, q8_0 0.030),
+GDN recurrence 0.046, post-add norm 0.013, row scale 0.013, f32 mv (ssm alpha/beta) 0.012, conv 0.011, silu_mul 0.020 (one outlier), gated norm 0.007,
+q/k norm 0.004, quant 0.003. Only the recurrence is above the noise: the chunked gfx12 kernel (facet hybrid-gdn prefill) takes it from 0.042 to 0.016
+(+4.4 % prefill). The small kernels (together ~0.06) are individually below what a doubling resolves and below what one fusion could save (<= 1 % each).
