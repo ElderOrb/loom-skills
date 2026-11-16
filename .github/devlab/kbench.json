@@ -78,6 +78,64 @@
         "--profile-final-batch=true"
       ],
       "repeats": 3
+    },
+    {
+      "suite": "prof_counters_r9700",
+      "runner": "r9700",
+      "dir": "gemm_mxfp4s",
+      "gen": "gemm_mxfp4s/gen_bench.py",
+      "gen_variants": [
+        "base"
+      ],
+      "files": [
+        "bench.loom"
+      ],
+      "config": [],
+      "args": [
+        "--measure=dispatch_complete",
+        "--batch-size=8",
+        "--profile-final-batch=true"
+      ],
+      "repeats": 1,
+      "probes": [
+        {
+          "name": "compile_details",
+          "args": [
+            "--compile-report=details"
+          ]
+        },
+        {
+          "name": "counter_ranges_default",
+          "args": [
+            "--profile-data=counter-ranges"
+          ]
+        },
+        {
+          "name": "counters_default",
+          "args": [
+            "--profile-data=counters"
+          ]
+        },
+        {
+          "name": "counters_named",
+          "args": [
+            "--profile-data=counters",
+            "--profile-counter=SQ_WAVES"
+          ]
+        },
+        {
+          "name": "device_metrics",
+          "args": [
+            "--profile-data=device-metrics"
+          ]
+        },
+        {
+          "name": "executable_traces",
+          "args": [
+            "--profile-data=executable-traces"
+          ]
+        }
+      ]
     }
   ]
 }

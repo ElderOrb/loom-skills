@@ -4,6 +4,7 @@
 
 - Fast iteration (the budget is short)
 - Steps 2 and 3: ablation and one change
+- Profiling: per-kernel device time of a whole model, counters
 - Step 4: kernel A/B test
 - Step 5: end-to-end gates
 - Step 6: measure again and record
@@ -25,8 +26,9 @@
 
 ## Steps 2 and 3: ablation and one change
 
-- **Ablation.** Hardware counters are unavailable (`loom-benchmark`
-   counters are UNIMPLEMENTED on gfx1151). Instead, launch a kernel twice (or skip it)
+- **Per-kernel time first, ablation to confirm.** The HAL's dispatch statistics give every kernel's device time in one
+   session (next section); hardware counters, executable traces and device metrics are UNIMPLEMENTED on gfx1151 and gfx1201.
+   For a counter-like question (what does this kernel wait for?) launch a kernel twice (or skip it)
    and measure end to end: `"${LOOM_SKILL_DIR}/../loom-optimize/ablate.py" PKG pkg_abl '@attn_decode'`
    writes the copy with its own model id; serve both in one loom-serve and run
    `ab_perf.py URL <id> <id>-abl-<name>`. The delta is that kernel's cost. Wrong outputs
@@ -34,6 +36,30 @@
 - **Change one thing** in the generator: kernel shape, fusion, tiling or dispatch.
    Keep the old variant behind an env switch (like `GEMM_SKIP_PADDING`, `GEMM_N_FASTEST`,
    `FLASH2_KT`; both GEMM switches are on by default, `=0` turns one off).
+
+## Profiling: per-kernel device time of a whole model (devlab-perf step `profile:V`)
+
+`loom-serve --device_profiling_mode=dispatch-events,executable-metadata --device_profiling_flush_interval_ms=5 --print_device_statistics`
+makes the HAL time every dispatch on the device and print, at a graceful shutdown (`stop.sh`, SIGTERM), one row per kernel:
+`dispatch NAME count=N total=T avg=A` (stderr, the serve log). Without `--device_profiling_mode` the flag prints queue-level rows only
+(`dispatch_function_total=0`). **The flush interval matters**: each queue keeps 4096 records between flushes, a prefill dispatches
+thousands of kernels per second and the rest is dropped (`dropped_records=N` in the output; a first run lost 80 % of a 2k prefill).
+`devlab_perf.sh` step `profile:V[:probe,pf2k,pf8k,dec]` serves V once per scenario (so each table holds only that scenario's
+requests), drives it with `profile_requests.py` and writes `out/profile_V_<scenario>.{md,json,serve.log}` through `profile_stats.py`
+(families: `profile_families.json`, first regex that matches a kernel name wins; ms/token = total over the tokens the scenario
+processed; decode adds ms per verify step from the draft counters). Compare the table's `busy` with the request `wall` for launch/idle overhead (2 % on the MXFP4 card).
+Two sessions with the same number of requests but different prompt lengths separate per-token cost from per-request fixed cost
+(a request that asks for 2 tokens also runs a decode step). One-time kernels
+(`g_prep*`, first-use) are in the totals of the first request: they have their own family. A standalone `rocprofv3` does not apply:
+the `amdgpu` device is the native libamdf driver, not ROCr.
+
+Per-kernel timing of one kernel in isolation: `loom-benchmark --profile-final-batch=true` (`profile_replay` rows; devlab-kbench).
+Compile-side facts without a GPU: `--compile-report=details` (spills, register pressure, instruction mix, `target_capability_rows`:
+gfx1201 `matrix_fp8_native_kind` / `matrix_bf8_native_kind` = `unscaled`, `matrix_fp4_native_kind` = `none`).
+`--profile-data=counters|counter-ranges|device-metrics|executable-traces` on gfx1201 (kbench suite `prof_counters_r9700`, run
+43803638485): every one returns `UNIMPLEMENTED; unsupported GPU profiling data families 0x10 / 0x400 / 0x100 / 0x40`
+(`runtime/src/iree/hal/drivers/amd/gpu/profile.c:636`); the run does not fail, the decoded rows are `state: unavailable`. A named
+counter (`--profile-counter=SQ_WAVES`) with `counters` exits non-zero with the same error. Not a flag problem: the HAL (hrx-loom 0.1.0) lacks these families.
 
 ## Step 4: kernel A/B test
 
