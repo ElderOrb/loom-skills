@@ -11,8 +11,13 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/loom-benchmark/scripts"
 sys.path.insert(0, str(SCRIPTS))
-import bench_common as bc  # noqa: E402
 import vllm_shim as vs  # noqa: E402
+
+try:   # bench_common needs requests (+ tokenizers through chat_probe): not on every CI image
+    import bench_common as bc  # noqa: E402
+except ImportError:
+    bc = None
+need_bc = unittest.skipIf(bc is None, "bench_common needs requests")
 
 
 class Pkg:
@@ -54,6 +59,7 @@ class Mapping(unittest.TestCase):
             vs.parse_request({"prompt": [1], "temperature": 0.7})
 
 
+@need_bc
 class Server(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -92,6 +98,7 @@ class Server(unittest.TestCase):
         self.assertEqual(len(r["tokens"]), 2)
 
 
+@need_bc
 class Identity(unittest.TestCase):
     def test_identity(self):
         self.assertEqual(bc.reference_identity(ST), "safetensors:amd/X@abc")
