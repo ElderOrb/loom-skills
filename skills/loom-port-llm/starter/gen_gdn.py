@@ -596,7 +596,18 @@ kernel.def export("g_gdn_norm_gate") @g_gdn_norm_gate(%tokens: index) {{
                 twin += "\n" + rt.replace('kernel.def export("g_gdn_recurrence_rec") @g_gdn_recurrence_rec(', 'kernel.def target(@rdna4) export("g_gdn_recurrence_rec_rdna4") @g_gdn_recurrence_rec_rdna4(', 1)
             ck = twin + "\n" + ck
         text = text + "\n" + ck
+    if fused_mode(G):   # gfx12 fused prefill (gen_gdn_fused.py): g_gdn_fa_rdna4 + g_gdn_fb_rdna4 replace conv .. norm_gate in GEMM-shape epochs
+        from gen_gdn_fused import fused_kernels
+        text = text + "\n" + fused_kernels(G, NG, LB, eps, _V_GROUPED[0], _V_GROUPED[1], guard_open, guard_close)
     return text
+
+
+def fused_mode(G):
+    """The two-launch fused gfx12 GDN prefill (choice prefill.gdn.fused2, env GDN_FUSED2): off unless the env says so, LOOM_RDNA4 is on and the
+    heads are 128 x 128 with a 4-tap conv."""
+    if os.environ.get("GDN_FUSED2", "") in ("", "0", "off", "no", "false") or os.environ.get("LOOM_RDNA4", "1") in ("", "0", "false", "no"):
+        return False
+    return G["DK"] == 128 and G["DV"] == 128 and G["K"] == 4 and G["HV"] % G["HK"] == 0
 
 
 FOLD_W = 8   # bank rows per speculative span of the fold factors: the verify width's bound (config @llm.width <= 8; g_spec_accept: span length 1..8)
