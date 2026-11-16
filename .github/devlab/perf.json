@@ -1,14 +1,14 @@
 {
- "_comment": "mxfp4st ogemm e2e round 1: fp8 GEMM design lvs (store GEMMs lane-vector pipelined loads) vs the node (v1): ktest, ABBA prefill 1k-32k + decode. Evidence branch: not for merge.",
+ "_comment": "mxfp4st ogemm final: node with prefill.gemm.mxfp4s_f8_kernel=lvs (head) vs origin/mxfp4st 2defa325 (base): ktest, func, ABBA prefill/decode, dev gates vs vLLM on head only (cached vLLM references from integ exp3). Evidence branch: not for merge.",
  "runner": "r9700",
- "memory_bytes": 30000000000,
- "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+ "memory_bytes": 34000000000,
+ "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
  "kit": null,
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "amd-q38-ogemm-e1",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "name": "amd-q38-ogemm-final",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
    "variants": [
@@ -19,13 +19,12 @@
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 110592
+     "context": 110592,
+     "ref": "2defa325"
     },
     {
-     "name": "lvs",
-     "build": {
-      "GEMM_MXFP4S_F8_KERNEL": "lvs"
-     },
+     "name": "head",
+     "build": {},
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
@@ -34,16 +33,19 @@
     }
    ],
    "steps": [
-    "ktest:lvs",
+    "ktest:head",
+    "func:head",
     "perf:base:1",
     "perf:base:1:long",
-    "perf:lvs:1",
-    "perf:lvs:1:long",
-    "perf:lvs:1",
-    "perf:lvs:1:long",
+    "perf:head:1",
+    "perf:head:1:long",
+    "perf:head:1",
+    "perf:head:1:long",
     "perf:base:1",
-    "perf:base:1:long"
-   ]
+    "perf:base:1:long",
+    "gates:head:dev"
+   ],
+   "reference_cache": ".github/devlab/ogemm_vllm_refs.tgz"
   }
  ]
 }
