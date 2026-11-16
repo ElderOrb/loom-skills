@@ -5,7 +5,7 @@ description: Entry point for AMD Loom work (hrx-loom SDK, loom-serve, loom-fetch
 
 # Loom (umbrella)
 
-**Bundled paths ? first shell action.** Before running commands, set `LOOM_SKILL_DIR` in the shell to the
+**Bundled paths: first shell action.** Before running commands, set `LOOM_SKILL_DIR` in the shell to the
 absolute directory containing **this** `SKILL.md`, using its path from the skill listing or read tool.
 In Claude Code, run `export LOOM_SKILL_DIR="${CLAUDE_SKILL_DIR}"` (the host substitutes the path).
 In Codex, Pi or another host, export `LOOM_SKILL_DIR` to the loaded file's directory. Use a
