@@ -102,7 +102,7 @@ def rewrite_b2(text, kvh, d, partial):
   %pg_live = index.assume %pg_live_v [range(%pg_live_v, 0, %kh_last), lt(%pg_live_v, %blocks)] : index
   %c64 = index.constant 64 : index
   %c63 = index.constant 63 : index
-  %zv8 = vector.constant 0.0 : vector<8xf16>
+  %zv8 = vector.splatf 0.0 : vector<8xf16>
   %nblk_round = index.add %key_count, %c63 : index
   %nblk = index.div %nblk_round, %c64 : index
   %dh16 = index.mul %dim_half, %c16 : index
@@ -134,9 +134,9 @@ def rewrite_b2(text, kvh, d, partial):
     %ph{j}_b = scalar.assume %ph{j}_s [range(%ph{j}_s, 0, 65535)] : i32
     %ph{j}_i = index.cast %ph{j}_b : i32 to index
     %rw{j}_v = index.mul %ph{j}_i, %c16 : index
-    %rw{j} = index.assume %rw{j}_v [range(%rw{j}_v, 0, 1048560), lt(%rw{j}_v, %pl_rows_m)] : index""")
-    A("    %rk_a = scf.select %fb_is2, %rw2, %rw3 : index\n    %rk_b = scf.select %fb_is1, %rw1, %rk_a : index\n    %rk_c = scf.select %fb_is0, %rw0, %rk_b : index\n    %rk = index.assume %rk_c [range(%rk_c, 0, 1048560), lt(%rk_c, %pl_rows_m)] : index")
-    A("    %kw_lr_v = index.add %rk, %lane_col : index\n    %kw_lr = index.assume %kw_lr_v [range(%kw_lr_v, 0, 1048575), lt(%kw_lr_v, %pool)] : index\n"
+    %rw{j} = index.assume %rw{j}_v [range(%rw{j}_v, 0, 2147483568), lt(%rw{j}_v, %pl_rows_m)] : index""")
+    A("    %rk_a = scf.select %fb_is2, %rw2, %rw3 : index\n    %rk_b = scf.select %fb_is1, %rw1, %rk_a : index\n    %rk_c = scf.select %fb_is0, %rw0, %rk_b : index\n    %rk = index.assume %rk_c [range(%rk_c, 0, 2147483568), lt(%rk_c, %pl_rows_m)] : index")
+    A("    %kw_lr_v = index.add %rk, %lane_col : index\n    %kw_lr = index.assume %kw_lr_v [range(%kw_lr_v, 0, 2147483583), lt(%kw_lr_v, %pool)] : index\n"
       "    %kw_c256 = index.constant 256 : index\n    %kw_h = index.mul %lane_half, %kw_c256 : index\n    %c64k = index.constant 64 : index\n    %fq8c = index.constant 8 : index")
     A(f"    %sA_f, %sB_f = scf.for %kw = [%c0 to %c4 step %c1](%sA = %init : vector<8xf32>, %sB = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>){{")
     A(f"""      %kw_a = index.assume %kw [range(%kw, 0, 3)] : index
@@ -216,7 +216,7 @@ def rewrite_b2(text, kvh, d, partial):
     VJ = """      %rj_a = scf.select %jj_c2, %rw2, %rw3 : index
       %rj_b = scf.select %jj_c1, %rw1, %rj_a : index
       %rj_c = scf.select %jj_c0, %rw0, %rj_b : index
-      %rj = index.assume %rj_c [range(%rj_c, 0, 1048560), lt(%rj_c, %pl_rows_m)] : index
+      %rj = index.assume %rj_c [range(%rj_c, 0, 2147483568), lt(%rj_c, %pl_rows_m)] : index
       %vj_ro = index.scale %rj, %pos_bytes : index, offset -> offset
       %vj_o = index.add %vb_o, %vj_ro : offset
 """

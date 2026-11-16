@@ -328,8 +328,8 @@ kernel.def {tgt}export("g_gdn_chunk_rdna4") @g_gdn_chunk_rdna4(%spans: index) {{
   %a_value = view.load %a_view_g[%vh] : view<{HV}xf32> -> f32
   %dt_bias_value = view.load %bias_view[%vh] : view<{HV}xf32> -> f32
   %qscale_c = scalar.constant {DK ** -0.5!r} : f32
-  %zero8 = vector.constant 0.0 : vector<8xf32>
-  %zero16 = vector.constant 0 : vector<16xi32>
+  %zero8 = vector.splatf 0.0 : vector<8xf32>
+  %zero16 = vector.splati 0 : vector<16xi32>
   %init = vector.fragment<init> %zero8 {SH} : vector<8xf32>
   %chk = index.constant {HK} : index
   %kh = index.rem %vh, %chk : index
