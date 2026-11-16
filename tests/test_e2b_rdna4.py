@@ -189,6 +189,24 @@ class FlashKeySplitD256(unittest.TestCase):
         self.assertIn("view<3x32x136xf16>", t3)
         self.assertIn("%head2 = index.assume", t3)
 
+    def test_fixed_reference_whole_tile_only(self):
+        """FLASH2_B2_FM=1: the whole-tile kernel gets the fixed-reference loops (unmasked + masked tail) and the running-max fallback;
+        the partial-tile kernel is unchanged."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            t2 = self.gen(tmp, FLASH2_B="2")
+            fm = self.gen(tmp, FLASH2_B="2", FLASH2_B2_FM="1")
+        cut = 'export("g_attention_flash2_partial_rdna4")'
+        self.assertEqual(t2[t2.index(cut):], fm[fm.index(cut):])
+        self.assertEqual(t2[:t2.index('export("g_attention_flash2_rdna4")')], fm[:fm.index('export("g_attention_flash2_rdna4")')])   # gfx11 kernel
+        w = fm[fm.index('export("g_attention_flash2_rdna4")'):fm.index(cut)]
+        self.assertIn("%sinitA = vector.fragment<init> %fm_nmv", w)                 # S^T accumulated onto -m0
+        self.assertIn("[%c0 to %fm_nfull step %c1]", w)                              # unmasked loop below the diagonal
+        self.assertIn("[%fm_nfull to %nblk step %c1]", w)
+        self.assertIn("scf.if %fm_any", w)                                           # running-max fallback
+        self.assertIn("vector.exp2f<afn>", w)
+        self.assertNotIn("vector.expf<afn>", w)
+
 
 class RopeQg(unittest.TestCase):
     """rope_qg.fuse: g_qk_rope_store_qg reads q|gate rows and copies the gate; trunk launches lose g_split_qgate, the MTP launch keeps both."""
