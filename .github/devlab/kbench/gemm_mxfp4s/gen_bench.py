@@ -74,12 +74,15 @@ GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf
        "t128x256": {"bm": 128, "tn": 256, "sw": {"bm": 128, "tn": 128}}, "t256x256": {"bm": 256, "tn": 256, "sw": {"bm": 256, "tn": 128}},
        "swp": {"swp": True}, "swz": {"swz": True}, "pfa2": {"pfa": 2}, "pfa1": {"pfa": 1},
        "a2swp": {"rf": 2, "swp": True}, "yf16": {"yf16": True},
-       "a2pfa": {"rf": 2, "swp": True, "pfa": 2}, "p0": {"pad": 0}, "p32": {"pad": 32}, "p64": {"pad": 64}, "p80": {"pad": 80}, "p112": {"pad": 112}}   # variants that are generator parameters (the levers), not text ablations
+       "a2pfa": {"rf": 2, "swp": True, "pfa": 2}, "p0": {"pad": 0}, "p32": {"pad": 32}, "p64": {"pad": 64}, "p80": {"pad": 80}, "p112": {"pad": 112},
+       # ogemm round 1: lane-vector operand loads (one 16-byte load per lane = two K substeps, A from global with immediate offsets, B ds_load_b128), swiglu at rf 4
+       "lv": {"lv": True, "sw": {"rf": 4}}, "lvpf1": {"lv": True, "lvpf": 1, "sw": {"rf": 4}}, "lvpf2": {"lv": True, "lvpf": 2, "sw": {"rf": 4}},
+       "lvk2": {"lv": True, "kmult": 2, "sw": {"rf": 4}}, "lvsw2": {"lv": True, "lvpf": 1, "sw": {"rf": 4, "lvpf": 2}}}   # variants that are generator parameters (the levers), not text ablations
 
 
 # the variants whose results are checked against float64 (the others are timing-only levers that lost or tied; hrx-loom 0.1.0 fails to verify a module of ~65k lines
 # ("view type references encoding value ... not defined at this point", notes/sdk_blockers.md), so the checked set stays at ~60 cases)
-TESTED = ["staged", "adirect", "adbuf", "adk2", "adr2", "adn128", "t128x256", "t256x256", "swp", "a2swp", "pfa2", "yf16", "pfa1"]
+TESTED = ["staged", "adirect", "adr2", "adn128", "t128x256", "swp", "pfa2", "yf16", "lv", "lvpf1", "lvpf2", "lvk2"]
 
 
 def ytype(variant):

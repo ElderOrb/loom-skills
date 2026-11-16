@@ -34,7 +34,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, lv=False, lvpf=0):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -278,6 +278,32 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
             if r == 0:
                 A("  %c15 = index.constant 15 : index\n  %rows_m15 = index.sub %rows, %c15 : index")
             A(f"  %xrow{r}_v = index.add %row_origin, {'%wave_row' if r == 0 else f'%wave_row{r}'} : index\n  %xrow{r} = index.assume %xrow{r}_v [lt(%xrow{r}_v, %rows_m15)] : index")
+    if lv:   # lane-vector operand loads: one 16-byte load per lane covers two K substeps (A from global, B from LDS); both operands take K in the same
+        # permuted order (substep 2p: bytes [32p + 16h, +8) of lane half h; substep 2p + 1: the next 8), so the products are those of the plain layout
+        assert a_direct and not (a_pf or swp or pfa) and lvpf <= KS // 32
+        A("""  %lv_c32 = index.constant 32 : index
+  %lv_lane = index.rem %workitem, %lv_c32 : index
+  %lv_l16 = index.rem %lv_lane, %c16 : index
+  %lv_h = index.div %lv_lane, %c16 : index
+  %lv_h16 = index.mul %lv_h, %c16 : index""")
+        for r in range(RF):
+            A(f"""  %lv_xr{r} = index.add %xrow{r}, %lv_l16 : index
+  %lv_xm{r} = index.mul %lv_xr{r}, %k : index
+  %lv_xo{r}_i = index.add %lv_xm{r}, %lv_h16 : index
+  %lv_xo{r} = index.scale %lv_xo{r}_i, %one_off : index, offset -> offset""")
+        for p in range(KS // 32):
+            A(f"  %lv_kc{p} = index.constant {32 * p} : index\n  %lv_bk{p} = index.add %lv_h16, %lv_kc{p} : index")
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                A(f"  %lv_bn{wi}{c}_c = index.constant {wi * TN + c * 16} : index\n  %lv_bn{wi}{c}_a = index.add %wave_col, %lv_bn{wi}{c}_c : index\n  %lv_bn{wi}{c} = index.add %lv_bn{wi}{c}_a, %lv_l16 : index")
+    def lv_aload(dst, r, p, base):
+        """the 16-byte activation load of row fragment r, K pair p, at the step whose byte offset is `base` (an offset value)"""
+        return (f"    %{dst}_xp = index.add %lv_xo{r}, {base} : offset\n    %{dst}_xv = buffer.view %x[%{dst}_xp] : buffer -> view<{KS}xi8>\n"
+                f"    %{dst} = vector.load %{dst}_xv[%lv_kc{p}] : view<{KS}xi8> -> vector<16xi8>")
+    if lvpf:
+        for r in range(RF):
+            for p in range(lvpf):
+                A(lv_aload(f"lv_pa{r}_{p}", r, p, "%o0"))
     A(loads("p", "%c0"))
     if a_pf:
         assert a_direct and not dbuf
@@ -295,6 +321,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     for j in range(NB):
         carried.append((f"%cr_e{j}", f"%we{j}{'q' if dbuf else 'p'}", f"%we{j}n", "i32"))
         carried.append((f"%cr_q{j}", f"%wq{j}{'q' if dbuf else 'p'}", f"%wq{j}n", "vector<4xi32>"))
+    carried += [(f"%lv_ca{r}_{p}", f"%lv_pa{r}_{p}", f"%lv_na{r}_{p}", "vector<16xi8>") for r in range(RF) for p in range(lvpf)]
     if a_pf:
         carried += [(f"%ca{r}_{kk}", f"%lp{r}_{kk}", f"%ln{r}_{kk}", "vector<2xi32>") for kk in range(KS // 16) for r in range(RF)]
     A("  " + ", ".join(f"%o{a}" for a in accs) + ", " + ", ".join(f"%unused_{i}" for i in range(len(carried))) +
@@ -363,10 +390,44 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
                     A(f"    %m{a}_{kk} = vector.mma %l{r}_{kk}, %rf{wi}{c}_{kk}, {cur[a]} : vector<2xi32>, vector<2xi32>, vector<8xf32>")
                     cur[a] = f"%m{a}_{kk}"
 
+    def lv_loads(p):
+        if p == 0:
+            A("    %lv_kb = index.scale %kbase, %one_off : index, offset -> offset")
+        for r in range(RF):
+            if p == 0:
+                A(f"    %lv_xp{r} = index.add %lv_xo{r}, %lv_kb : offset\n    %lv_xv{r} = buffer.view %x[%lv_xp{r}] : buffer -> view<{KS}xi8>")
+            if p < lvpf:
+                A(f"    %lv_a{r}_{p} = vector.bitcast %lv_ca{r}_{p} : vector<16xi8> to vector<16xi8>")
+            else:
+                A(f"    %lv_a{r}_{p} = vector.load %lv_xv{r}[%lv_kc{p}] : view<{KS}xi8> -> vector<16xi8>")
+            A(f"""    %lv_aw{r}_{p} = vector.bitcast %lv_a{r}_{p} : vector<16xi8> to vector<4xi32>""")
+            for q in range(2):
+                A(f"""    %lv_ar{r}_{2 * p + q} = vector.slice %lv_aw{r}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
+    %l{r}_{2 * p + q} = vector.fragment<lhs> %lv_ar{r}_{2 * p + q} shape [%c16, %c16] using {{schema = %a_schema : encoding<schema>}} : vector<2xi32>""")
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                A(f"""    %lv_b{wi}{c}_{p} = vector.load {"%w_cur_st" if dbuf else "%w_stage_st"}[%lv_bn{wi}{c}, %lv_bk{p}] : view<{TW}x{PX}xi8> -> vector<16xi8>
+    %lv_bw{wi}{c}_{p} = vector.bitcast %lv_b{wi}{c}_{p} : vector<16xi8> to vector<4xi32>""")
+                for q in range(2):
+                    A(f"""    %lv_br{wi}{c}_{2 * p + q} = vector.slice %lv_bw{wi}{c}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
+    %rf{wi}{c}_{2 * p + q} = vector.fragment<rhs> %lv_br{wi}{c}_{2 * p + q} shape [%c16, %c16] using {{schema = %b_schema : encoding<schema>}} : vector<2xi32>""")
+
     NKK = KS // 16
-    if swp:
+    if lv:
+        if dbuf:
+            A(f"    %w_cur_st = buffer.view %w_stage[%cur_off] : buffer -> view<{TW}x{PX}xi8>")
+        for p in range(KS // 32):
+            lv_loads(p)
+            frag_mma(2 * p)
+            frag_mma(2 * p + 1)
+        if lvpf:   # the next step's first activation pairs, before the barrier (carried)
+            A("    %lv_kn = index.mul %k_next, %c128 : index\n    %lv_kno = index.scale %lv_kn, %one_off : index, offset -> offset")
+            for r in range(RF):
+                for p in range(lvpf):
+                    A(lv_aload(f"lv_na{r}_{p}", r, p, "%lv_kno"))
+    elif swp:
         frag_loads(0)
-    for kk in range(NKK):
+    for kk in range(0 if lv else NKK):
         if swp:
             if kk + 1 < NKK:
                 frag_loads(kk + 1)
