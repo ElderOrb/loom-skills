@@ -26,6 +26,11 @@
     `gdn_fold_vs_replay`, kbench `gdn_fold`). Drafted step 33.94 -> 33.45 ms, GDN 2.00 -> 1.48 ms/step, decode +2 %.
   - Size per-span scratch with a cap: the runtime prepares @llm_verify at every packing shape up to (1024, 1024) (schedule.c), so
     `spans x 8` rows were 29 GB there (RESOURCE_EXHAUSTED at serve); `min(spans, 32) x 8` keeps the largest verify scratch below the capture's.
+  - With a fused prefill GDN (`prefill.gdn.fused2`), @llm_verify keeps only the chain branch (`gen_draft.drop_fused_gdn`): a verify epoch
+    can pack another request's prompt rows with the speculative spans (GEMM-shape, t >= 64), and the fused pair records no fold factors
+    and runs a 4-token span in the 32-token chunk form. The chain records them with decode's sequential kernel and chunks the prompt
+    spans; @llm_advance (every prompt-only epoch) keeps the fused pair. ktest `gdn_fold_serve`: fold == replay bit-exact on a 210-row
+    mixed epoch (prompt 150 + 40, anchor, three speculative spans, rows out of packet order, gaps, stale packets).
   - What is left: the fold reads + writes 288 MiB at the bandwidth roof (0.48 ms) and the verify recurrence still reads the state once
     (0.58 ms, latency-bound). A deferred fold (applied by the next verification's recurrence, ninfer / Lucebox SpecLA) would merge
     the two reads, but every other reader of the state (advance epochs, prefix captures, forks) would then need the pending factors.

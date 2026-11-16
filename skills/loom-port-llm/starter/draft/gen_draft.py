@@ -862,6 +862,37 @@ def gdn_capture(body):
     return "\n".join(out)
 
 
+def drop_fused_gdn(body):
+    """decode.spec.gdn_fold, @llm_verify: drop gen_llm's fused GDN GEMM branch (prefill.gdn.fused2) and keep its chain branch for every epoch.
+    A verify epoch can pack another request's prompt rows with the speculative spans (t >= 64, the GEMM branch); the fused pair records no
+    fold factors and runs a 4-token span in the 32-token chunk form, so the speculative spans' fold would be wrong there. The chain records
+    them (g_gdn_conv_bank, g_gdn_recurrence_rec: the sequential kernel of decode) and chunks the prompt spans of 64+ tokens. @llm_advance
+    (every prompt-only epoch) keeps the fused pair. %gs is sized for the chain (the fused workspace slots are not needed here)."""
+    out, skip, close, n = [], False, None, 0
+    for line in body.split("\n"):
+        m = re.match(r"^  // gdn-(fused|chain|fused-end): %layer_(\w+)$", line)
+        if m and m.group(1) == "fused":
+            skip, n = True, n + 1
+            continue
+        if m and m.group(1) == "chain":
+            assert skip, line
+            skip = False
+            continue
+        if m:   # fused-end: the else branch's closing brace is the previous line
+            assert out and out[-1] == "  }", out[-1:]
+            out.pop()
+            continue
+        if not skip:
+            out.append(line)
+    assert not skip
+    body = "\n".join(out)
+    if n:
+        own = "  %gs = buffer.alloca<global> align(256) %gs_size : buffer"
+        assert body.count(own) == 1 and "%gs_size_own = " in body
+        body = body.replace(own, "  %gs = buffer.alloca<global> align(256) %gs_size_own : buffer")
+    return body
+
+
 def verify_program(program, g):
     body, _ = _split_head(advance_program(program, g))
     body = body[body.index("command.program.def public @llm_advance()"):]   # config decls are emitted once (advance)
@@ -892,6 +923,7 @@ def verify_program(program, g):
         anchor = "  kernel.launch @g_token_info[%t]"
         body = body.replace(anchor, f"  %gbank_w = index.constant {FOLD_W} : index\n  %gbank_cap = index.constant {FOLD_SPANS} : index\n"
                             "  %gbank_s = index.min %spans, %gbank_cap : index\n  %gbank_rows = index.mul %gbank_s, %gbank_w : index\n" + banks + anchor, 1)
+        body = drop_fused_gdn(body)
         out, nconv, nrec = [], 0, 0
         for line in body.split("\n"):
             if line.startswith("  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_"):
@@ -905,6 +937,9 @@ def verify_program(program, g):
             out.append(line)
         assert nconv == nrec == len(g["gdn_layers"]), (nconv, nrec)
         body = "\n".join(out)
+        # every GDN state update left in the verification records fold factors (or takes only 64+-token spans: chunk / pf kernels)
+        for k in ("@g_gdn_conv[", "@g_gdn_recurrence[", "@g_gdn_fa_rdna4[", "@g_gdn_fb_rdna4["):
+            assert k not in body, k
     elif GDN:
         W = GDN["C"] + 2 * GDN["HV"]
         cap = (f"  %cap_token_bytes = index.constant {W * 4 * g['NG']} : offset\n"

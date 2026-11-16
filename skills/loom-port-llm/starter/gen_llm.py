@@ -4851,9 +4851,12 @@ def gdn_layer(i, b, nm, sz, par):
         # %big: a 64-row epoch, i.e. a prompt or tail under 64 tokens, keeps the chain, whose spans under 64 run the exact sequential kernel)
         fmin = int(os.environ.get("GDN_FUSED2_MIN", "64"))
         assert fmin in (64, 128), "GDN_FUSED2_MIN: 64 or 128"
-        cond, rest = ("%gemm", f"{FRONT}\n{REC0}\n{GATE}") if fmin == 64 else ("%big", f"{FRONT}\n{REC}\n{GATE}")
-        MIX = (f"  scf.if {cond} {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
-               f"  }} else {{\n{rest}\n  }}")
+        # decode.spec.gdn_fold: draft/gen_draft.verify_program drops the fused branch from @llm_verify (`// gdn-fused:` .. `// gdn-chain:` and
+        # the closing brace before `// gdn-fused-end:`), so the chain must also cover the GEMM epochs' long spans there (the full REC).
+        from gen_gdn import fold_enabled
+        cond, rest = ("%gemm", f"{FRONT}\n{REC if fold_enabled(g) else REC0}\n{GATE}") if fmin == 64 else ("%big", f"{FRONT}\n{REC}\n{GATE}")
+        MIX = (f"  // gdn-fused: %layer_{i}\n  scf.if {cond} {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
+               f"  }} else {{\n  // gdn-chain: %layer_{i}\n{rest}\n  }}\n  // gdn-fused-end: %layer_{i}")
     else:
         MIX = f"{FRONT}\n{REC}\n{GATE}"
     T = P + [

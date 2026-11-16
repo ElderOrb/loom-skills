@@ -60,6 +60,29 @@ class FusedGdn(unittest.TestCase):
         self.assertEqual(lines[1], "    scf.if %not_gated {")   # before the dual group, not inside it
         self.assertEqual(gen_draft.gdn_capture("  " + conv).count("@g_gdn_capture["), 1)
 
+    def test_fold_verify_drops_fused_branch(self):
+        """decode.spec.gdn_fold: @llm_verify keeps only the chain branch of each fused GDN layer (gen_llm's `// gdn-fused:` markers), whose
+        2-space conv / recurrence launches the fold rewrites into the recording kernels; the fused pair records no fold factors, so it must
+        never run in a verify epoch (a GEMM-shape epoch packs prompt rows with speculative spans). %gs drops the fused workspace slots."""
+        conv = "kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_{0}, %metadata, %info, %origins, %arena, %gq, %conv_{0}, %gs) : [index](index)"
+        rec = "kernel.launch @g_gdn_recurrence[%spans](%t, %spans, %layer_{0}, %metadata, %origins, %arena, %gs) : [index](index)"
+        def layer(i):
+            c, r = conv.format(i), rec.format(i)
+            return (f"  // gdn-fused: %layer_{i}\n  scf.if %gemm {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 kernel.launch @g_gdn_fa_rdna4[%t, %spans](x)\n"
+                    f"    {c}\n    // dual-group: end\n    // dual-group: rdna4 kernel.launch @g_gdn_fb_rdna4[%spans](x)\n    {r}\n    // dual-group: end\n"
+                    f"  }} else {{\n  // gdn-chain: %layer_{i}\n  {c}\n  {r}\n  scf.if %gemm {{\n  // dual-group: rdna4 kernel.launch @g_gdn_chunk_rdna4[%spans](x)\n  }}\n  }}\n"
+                    f"  // gdn-fused-end: %layer_{i}\n  kernel.launch @g_row_scale_f16[%t](x)")
+        body = ("  %gs_size_own = index.scale %t, %gs_bytes : index, offset -> offset\n  %gs_size = index.scale %gs_umax, %gs_unit : index, offset -> offset\n"
+                "  %gs = buffer.alloca<global> align(256) %gs_size : buffer\n" + "\n".join(layer(i) for i in (0, 1)))
+        out = gen_draft.drop_fused_gdn(body)
+        for k in ("g_gdn_fa_rdna4", "g_gdn_fb_rdna4", "gdn-capture", "gdn-fused", "gdn-chain", "} else {"):
+            self.assertNotIn(k, out)
+        for i in (0, 1):
+            self.assertIn(f"  {conv.format(i)}\n  {rec.format(i)}\n  scf.if %gemm {{\n  // dual-group: rdna4 kernel.launch @g_gdn_chunk_rdna4[%spans](x)\n  }}\n  kernel.launch @g_row_scale_f16", out)
+        self.assertEqual(out.count("{"), out.count("}"))
+        self.assertIn("%gs = buffer.alloca<global> align(256) %gs_size_own : buffer", out)
+        self.assertEqual(gen_draft.drop_fused_gdn("  " + conv.format(3)), "  " + conv.format(3))   # no fused layers: unchanged
+
     def test_ab_f8_pass(self):
         """gen_mxfp4s.ab_f8 turns a layer's GEMM-epoch alpha block + beta matvec into one dual group (gfx12: the paired skinny fp8 GEMM on
         %h8), only in @llm_advance and only when the fp8 operand %h8 exists; the default fp8 GEMM kernel text does not change."""

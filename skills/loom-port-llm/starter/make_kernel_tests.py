@@ -1279,6 +1279,130 @@ if cfg.get("recurrent_layers") and _fm(gdn_geometry(cfg)):
     # packets: decode 1, prompt 150, verify 3, continuing prompt 64, decode 1, prompt 33; rows: 33 | gap 2 | 1 | 64 | gap 1 | 150 | 1 | 3 | pad 7
     _sp = [(1, 37, True), (150, 0, False), (3, 12, True), (64, 50, True), (1, 9, True), (33, 0, False)]
     _gdn_fused_case("gdn_fused_serve", _sp, [35, 101, 252, 36, 251, 0], 262, 8, [(40, 5, 0), (17, 0, 100)], np.random.default_rng(42))
+# 4e. decode.spec.gdn_fold in a GEMM-shape verify epoch (gdn_fold_serve): the runtime packs other requests' prompt rows with the speculative
+# spans (t >= 64), and under the fold @llm_verify runs the chain there (draft/gen_draft.drop_fused_gdn: the fused pair records no fold factors).
+# Served gfx12 kernels: g_gdn_conv_bank, g_gdn_conv_commit, g_gdn_qk_norm, g_gdn_recurrence_rec (its gfx12 twin: spans under 64) + g_gdn_chunk_rdna4 (64+),
+# then g_gdn_fold + g_gdn_fold_hist on the committed packet; against the replay path (verification with the plain kernels, then g_token_info on
+# the replay packet: the speculative spans only, compacted, + conv / commit / q/k norm / recurrence over their accepted inputs). 8 packets, 6 live:
+# speculative 4 at a fork (accepted 2), fresh prompt 150 (chunked), speculative 3 (accepted 3), continuing prompt 40, decode anchor 1,
+# speculative 4 (accepted 1); rows in another order than the packets, gaps and padding, two stale packets. Verification outputs and the
+# arena (every span's state and conv history, prompt spans included) must be EQUAL; the replay's arena is also checked against numpy.
+if cfg.get("recurrent_layers") and cfg.get("draft") and _fold_on(gdn_geometry(cfg)) and _chunk:
+    from gen_gdn import FOLD_W as _FW2
+    r = np.random.default_rng(49)
+    # (length, start, speculative, accepted, fork, fresh) per live packet, first row of each
+    _sv = [(4, 37, True, 2, True, False), (150, 0, False, 150, False, True), (3, 12, True, 3, False, False), (40, 50, False, 40, False, False),
+           (1, 9, False, 1, False, False), (4, 20, True, 1, False, False)]
+    _fr = [42, 46, 197, 0, 200, 201]; t = 210; ncfg = 8; ns = len(_sv); stale = [(40, 5, 0), (17, 0, 100)]
+    x = (1.5 * r.standard_normal((t, C))).astype(np.float32)
+    alpha = r.standard_normal((t, HV)).astype(np.float32); beta = r.standard_normal((t, HV)).astype(np.float32)
+    arena = (0.1 * r.standard_normal(2 * ncfg * LB // 4)).astype(np.float32)
+    meta = np.zeros(4 + 9 * ncfg, np.int32); meta[0] = ns; comm = np.zeros(4 + 9 * ncfg, np.int32); comm[0] = ns
+    repl = np.zeros(4 + 9 * ncfg, np.int32); origins = np.zeros((ncfg, 5), np.int64); raw_o = np.zeros((t, HV, DV)); finals = []; k_r = 0
+    for si in range(ncfg):
+        origins[si] = [2 * si * LB, 2 * si * LB, 0, 0, 0]
+    for k, (L, p0, f0) in enumerate(stale):
+        si = ns + k; meta[4 + 9 * si:4 + 9 * si + 5] = [L, p0, 0, si, f0]; comm[4 + 9 * si:4 + 9 * si + 5] = [L, p0, 0, si, f0]
+    for si, ((L, p0, spec, acc, fork, fresh), first) in enumerate(zip(_sv, _fr)):
+        rd, wr = 2 * si * LB, (2 * si + 1) * LB
+        origins[si] = [rd, wr, 0, p0, 0] if (fork or fresh) else [rd, rd, 0, 0, 0]
+        meta[4 + 9 * si:4 + 9 * si + 9] = [L, p0, 0, si, first, 0, 4 if spec else 0, 0, 0]
+        comm[4 + 9 * si:4 + 9 * si + 9] = [acc, p0, 0, si, first, 0, 0, 0, 0]
+        if spec:
+            repl[4 + 9 * k_r:4 + 9 * k_r + 9] = [acc, p0, 0, si, first, 0, 0, 0, 0]; k_r += 1
+        S = np.zeros((HV, DV, DK)); hist = np.zeros((K - 1, C))
+        if not fresh:
+            S = arena[rd // 4:rd // 4 + SB // 4].reshape(HV, DV, DK).astype(np.float64)
+            hist = arena[rd // 4 + SB // 4:rd // 4 + SB // 4 + (K - 1) * C].reshape(K - 1, C).astype(np.float64)
+        full = np.concatenate([hist, x[first:first + L].astype(np.float64)], 0)
+        cv = np.stack([(full[i:i + K] * conv_w.T).sum(0) for i in range(L)]); sv = cv / (1 + np.exp(-cv))
+        qs, ks, vs = sv[:, :HK * DK].reshape(L, HK, DK), sv[:, HK * DK:2 * HK * DK].reshape(L, HK, DK), sv[:, 2 * HK * DK:].reshape(L, HV, DV)
+        qs = qs / np.sqrt((qs ** 2).sum(-1, keepdims=True) + eps) / np.sqrt(DK); ks = ks / np.sqrt((ks ** 2).sum(-1, keepdims=True) + eps)
+        Sa = None
+        for i in range(L):
+            for h in range(HV):
+                kh = (h // (HV // HK) if G_GROUPED else h % HK)
+                St = S[h] * np.exp(np.log1p(np.exp(float(alpha[first + i, h]) + dt[h])) * a_log[h])
+                d = (vs[i, h] - St @ ks[i, kh]) / (1 + np.exp(-float(beta[first + i, h])))
+                S[h] = St + np.outer(d, ks[i, kh]); raw_o[first + i, h] = S[h] @ qs[i, kh]
+            if i + 1 == acc:
+                Sa = S.copy()
+        finals.append((wr if (fork or fresh) else rd, Sa, full[acc:acc + K - 1]))
+    repl[0] = k_r
+    expect = arena.copy()
+    for w_, S, h1 in finals:
+        expect[w_ // 4:w_ // 4 + SB // 4] = S.astype(np.float32).reshape(-1)
+        expect[w_ // 4 + SB // 4:w_ // 4 + SB // 4 + (K - 1) * C] = h1.astype(np.float32).reshape(-1)
+    for n, a in [("meta", meta), ("comm", comm), ("repl", repl), ("orig", origins.reshape(-1).view(np.int32)), ("arena", arena),
+                 ("expect", expect), ("x", x), ("alpha", alpha), ("beta", beta), ("raw", raw_o.reshape(t, VD).astype(np.float32)),
+                 ("info0", np.zeros((t, 4), np.int32))]:
+        save(f"gv_{n}", a)
+    AT = f"tensor<{2 * ncfg * LB // 4}xf32>"; MT = f"tensor<{4 + 9 * ncfg}xi32>"; OT = f"tensor<{10 * ncfg}xi32>"; IT = f"tensor<{t}x4xi32>"
+    XT, ST, VT = f"tensor<{t}x{C}xf32>", f"tensor<{t}x{2 * HK}xf32>", f"tensor<{t}x{VD}xf32>"
+    BX, BK, BD = (f"tensor<{min(ncfg, 32) * _FW2}x{w}xf32>" for w in (C, HK * DK, VD + HV))
+    REC = f"[index](index, index, index, {MT}, {OT}, {AT}, {XT}, {ST}, tensor<{t}x{HV}xf32>, tensor<{t}x{HV}xf32>, tensor<{HV}xf32>, tensor<{HV}xf32>, {VT}"
+    CONV = f"[index](index, index, index, {MT}, {IT}, {OT}, {AT}, {XT}, tensor<{C * K}xf32>, {XT}"
+    COMMIT = f"[index](index, index, index, {MT}, {OT}, {AT}, {XT})"
+    _scale = float(np.abs(raw_o).max()); _sscale = float(max(np.abs(S).max() for _, S, _ in finals))
+    cases.append(f"""check.case public @gdn_fold_serve {{
+  %t = check.literal value({t}) : index
+  %spans = check.literal value({ncfg}) : index
+  %layer = check.literal value(0) : index
+  %layers = check.literal value(1) : index
+  %meta = check.file.read.npy path("gv_meta.npy") : {MT}
+  %comm = check.file.read.npy path("gv_comm.npy") : {MT}
+  %repl = check.file.read.npy path("gv_repl.npy") : {MT}
+  %orig = check.file.read.npy path("gv_orig.npy") : {OT}
+  %arena1 = check.file.read.npy path("gv_arena.npy") : {AT}
+  %arena2 = check.file.read.npy path("gv_arena.npy") : {AT}
+  %expect = check.file.read.npy path("gv_expect.npy") : {AT}
+  %eraw = check.file.read.npy path("gv_raw.npy") : {VT}
+  %x = check.file.read.npy path("gv_x.npy") : {XT}
+  %w = check.file.read.npy path("g_conv_w.npy") : tensor<{C * K}xf32>
+  %alpha = check.file.read.npy path("gv_alpha.npy") : tensor<{t}x{HV}xf32>
+  %beta = check.file.read.npy path("gv_beta.npy") : tensor<{t}x{HV}xf32>
+  %a = check.file.read.npy path("g_a.npy") : tensor<{HV}xf32>
+  %dt = check.file.read.npy path("g_dt.npy") : tensor<{HV}xf32>
+  %info = check.file.read.npy path("gv_info0.npy") : {IT}
+  %info2 = check.file.read.npy path("gv_info0.npy") : {IT}
+  %s1 = check.generate.fill value(0.0) : {XT}
+  %i1 = check.generate.fill value(0.0) : {ST}
+  %r1 = check.generate.fill value(0.0) : {VT}
+  %bx = check.generate.fill value(0.0) : {BX}
+  %bk = check.generate.fill value(0.0) : {BK}
+  %bd = check.generate.fill value(0.0) : {BD}
+  %s2 = check.generate.fill value(0.0) : {XT}
+  %i2 = check.generate.fill value(0.0) : {ST}
+  %r2 = check.generate.fill value(0.0) : {VT}
+  %s3 = check.generate.fill value(0.0) : {XT}
+  %i3 = check.generate.fill value(0.0) : {ST}
+  %r3 = check.generate.fill value(0.0) : {VT}
+  kernel.launch @g_token_info[%t](%t, %spans, %meta, %info) : [index](index, index, {MT}, {IT})
+  kernel.launch @g_gdn_conv_bank[%t](%t, %spans, %layer, %meta, %info, %orig, %arena1, %x, %w, %s1, %bx, %bk) : {CONV}, {BX}, {BK})
+  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer, %meta, %orig, %arena1, %x) : {COMMIT}
+  kernel.launch @g_gdn_qk_norm[%t](%t, %s1, %i1) : [index](index, {XT}, {ST})
+  kernel.launch @g_gdn_recurrence_rec[%spans](%t, %spans, %layer, %meta, %orig, %arena1, %s1, %i1, %alpha, %beta, %a, %dt, %r1, %bd) : {REC}, {BD})
+  kernel.launch @g_gdn_chunk_rdna4[%spans](%t, %spans, %layer, %meta, %orig, %arena1, %s1, %i1, %alpha, %beta, %a, %dt, %r1) : {REC})
+  kernel.launch @g_gdn_fold[%spans, %layers](%t, %spans, %meta, %comm, %orig, %arena1, %bk, %bd) : [index, index](index, index, {MT}, {MT}, {OT}, {AT}, {BK}, {BD})
+  kernel.launch @g_gdn_fold_hist[%spans, %layers](%t, %spans, %meta, %comm, %orig, %arena1, %bx) : [index, index](index, index, {MT}, {MT}, {OT}, {AT}, {BX})
+  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer, %meta, %info, %orig, %arena2, %x, %w, %s2) : {CONV})
+  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer, %meta, %orig, %arena2, %x) : {COMMIT}
+  kernel.launch @g_gdn_qk_norm[%t](%t, %s2, %i2) : [index](index, {XT}, {ST})
+  kernel.launch @g_gdn_recurrence[%spans](%t, %spans, %layer, %meta, %orig, %arena2, %s2, %i2, %alpha, %beta, %a, %dt, %r2) : {REC})
+  kernel.launch @g_gdn_chunk_rdna4[%spans](%t, %spans, %layer, %meta, %orig, %arena2, %s2, %i2, %alpha, %beta, %a, %dt, %r2) : {REC})
+  kernel.launch @g_token_info[%t](%t, %spans, %repl, %info2) : [index](index, index, {MT}, {IT})
+  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer, %repl, %info2, %orig, %arena2, %x, %w, %s3) : {CONV})
+  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer, %repl, %orig, %arena2, %x) : {COMMIT}
+  kernel.launch @g_gdn_qk_norm[%t](%t, %s3, %i3) : [index](index, {XT}, {ST})
+  kernel.launch @g_gdn_recurrence[%spans](%t, %spans, %layer, %repl, %orig, %arena2, %s3, %i3, %alpha, %beta, %a, %dt, %r3) : {REC})
+  check.expect.equal actual(%s1) expected(%s2) : {XT}
+  check.expect.equal actual(%r1) expected(%r2) : {VT}
+  check.expect.equal actual(%arena1) expected(%arena2) : {AT}
+  check.expect.close actual(%r1) expected(%eraw) atol({3e-3 * _scale:.3e}) rtol(1.0e-2) nan(different) : {VT}
+  check.expect.close actual(%arena2) expected(%expect) atol({3e-3 * _sscale:.3e}) rtol(1.0e-2) nan(different) : {AT}
+  check.return
+}}
+""")
 # g_row_scale_f16 (the GEMM A operand): per-row power-of-two scale 2^-e, e = clamp(floor(log2 max|x|) - 13, 0, 100),
 # x16 = f16(x * scale); rows of very different magnitude, width = the FFN width (the widest the model uses).
 if os.environ.get("GEMM_TESTS", "1") == "1":
