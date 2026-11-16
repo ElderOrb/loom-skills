@@ -80,7 +80,7 @@
 #          gufo:V               Gufo conformance on V's package served with --loom-logits=on (validation/devlab/run_conformance.sh: conformance.py
 #                               --logits + gufo's logits_check.py); conformance_V.json (gate `gufo`), the raw files in out/gufo_V/
 #          vllmdet:V            (safetensors card, or env REFERENCE_CHECKPOINT=ORG/REPO on a GGUF card) vLLM's run-to-run determinism: the dev golden set recorded twice
-#          gates:V:LEVEL        with a safetensors card (llm_config source.kind) or REFERENCE_CHECKPOINT the reference is vLLM (vllm-reference.md), not llama.cpp
+#          gates:V:LEVEL        with a safetensors card (llm_config source.kind) or REFERENCE_CHECKPOINT the reference is vLLM (scripts/vllm_reference.md), not llama.cpp
 #          ktest:V              make_kernel_tests.py + run_kernel_tests.sh with V's kit
 #          vtest:V[:HxW]        the image tower (a package with image input): starter/vision/tests (encoder kernels vs NumPy), then the whole encoder
 #                               at HxW pixels (default 320x224) on the package's weights (a safetensors package: the checkpoint's own tensors) vs
