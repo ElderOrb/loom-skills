@@ -331,6 +331,12 @@ CHOICE("prefill.attn.flash2_trim", "bool", False, "FLASH2_TRIM", derive=_trim, f
 CHOICE("prefill.attn.flash2_b2", "str", None, "FLASH2_B", derive=_flash_b, from_pr="#656", generator_defaults=("2", None),
        doc="2: key-split two-heads-per-wave global-layer flash twin on gfx12 (flash2_b2.py): head_dim 512 / 8 query heads per KV head (gemma4 E2B) or head_dim 256 / 6 "
            "(Qwen3.5-class 27B, three head pairs per KV head). 3: three heads per wave at head_dim 256 / 6 (256 VGPRs: measured slower than 2).", **_FLR4)
+CHOICE("prefill.attn.flash2_b2_fm", "bool", None, "FLASH2_B2_FM", from_pr="mxfp4st-oattn2",
+       doc="With prefill.attn.flash2_b2 = 2 at head_dim 256 / 6 query heads per KV head: the whole-tile key-split loop uses a fixed softmax reference "
+           "(the max of the first and the diagonal page; no running max, no per-block max exchange or O rescale, one barrier per 64 keys; when a "
+           "lane has a later score above its reference + 15 in log2 units the workgroup reruns the loops with that lane's true max and every other "
+           "lane's reference unchanged, so a token's bits depend on that token only), V^T prefetch, exp2 and an unmasked loop below the diagonal; "
+           "whole- and partial-tile kernels alike (flash2_b2.py fmax).", **_FLR4)
 CHOICE("prefill.attn.rope_qg", "bool", False, "ROPE_QG", kernels=["g_qk_rope_store*", "g_split_qgate"], rows=ROWS_ALL,
        doc="Gated attention with a fused q|gate projection (qwen35 family): the norm + RoPE kernel reads the query heads from the projection's rows and copies the gate half "
            "(g_qk_rope_store_qg), so g_split_qgate and a pass over q disappear. Full-attention layers only; no projection biases, no sliding layers.")
@@ -460,6 +466,7 @@ CHOICE("feature.logits_export", "bool", True, "LLM_LOGITS", kernels=["g_logits_e
 # ======================================================================================================================
 # Not choices: everything else the generators and their tools read from the environment
 # ======================================================================================================================
+NOT("kbench experiment options of the gfx12 flash kernels (flash_r9700 suite; the shipped variants are choices)", "FLASH2_B2_OPTS", "FLASH2_G6_OPTS")
 NOT("input path or file selection (not a model-affecting knob)", "CATALOG", "LOOM_SKILLS", "LOOM_KB_ROOT", "LOOM_ROOT", "VENV", "HF", "HF_HOME",
     "HF_HUB_CACHE", "LD_LIBRARY_PATH", "LOOM_SERVE_STATE", "VISION_TEST_DIR", "FLASH2_OUT", "LLM_OUT")
 NOT("transport between a generator and its subprocesses (set by the caller from cfg / the build)", "LLM_CONFIG", "LLM_DRAFT",
