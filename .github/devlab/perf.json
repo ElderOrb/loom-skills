@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st draft exp7: func of the final package as the first step after a clean start (exp6 ran it right after ktest and the first request lost the connection), 4 streams undrafted base vs final. Evidence branch: not for merge.",
+ "_comment": "mxfp4st draft exp8: serving-context ladder of the final package (and the base) with func, repeated; exp6/exp7 func failed at 106496 on two runners, exp5 passed once. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -13,7 +13,7 @@
    "llamacpp": "b1375",
    "variants": [
     {
-     "name": "basend",
+     "name": "b106",
      "build": {
       "MTP_BLOCK_PREP": "",
       "PROPOSE_HEAD_ROWS": "0"
@@ -22,13 +22,22 @@
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 106496,
-     "execution": {
-      "draft_depth": 0
-     }
+     "context": 106496
     },
     {
-     "name": "card",
+     "name": "b98",
+     "build": {
+      "MTP_BLOCK_PREP": "",
+      "PROPOSE_HEAD_ROWS": "0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "k106",
      "build": {},
      "build_args": [
       "--slug",
@@ -37,26 +46,45 @@
      "context": 106496
     },
     {
-     "name": "nodraft",
+     "name": "k102",
      "build": {},
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 106496,
-     "execution": {
-      "draft_depth": 0
-     }
+     "context": 102400
+    },
+    {
+     "name": "k98",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "k90",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 90112
     }
    ],
    "steps": [
-    "func:card",
-    "func:nodraft",
-    "c4:basend",
-    "c4:nodraft",
-    "c4:basend",
-    "c4:nodraft",
-    "func:card"
+    "func:b106",
+    "func:k106",
+    "func:k102",
+    "func:k98",
+    "func:k90",
+    "func:b106",
+    "func:k106",
+    "func:k102",
+    "func:k98",
+    "func:b98",
+    "func:k98"
    ],
    "repeat_rows": 3,
    "env": {
