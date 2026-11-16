@@ -5,32 +5,7 @@
  "llama_spec": "matched",
  "jobs": [
   {
-   "name": "v27-r9700",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "variants": [
-    {
-     "name": "card",
-     "build": {},
-     "context": 65536
-    }
-   ],
-   "steps": [
-    "gates:card:dev"
-   ],
-   "runner": "r9700",
-   "env": {
-    "VLLM_VERSION": "0.18.0",
-    "VLLM_ROCM_VARIANT": "rocm700",
-    "VLLM_EXTRA_ENV": "VLLM_QUARK_EMU_MEM_OPT=1",
-    "VLLM_GPU_UTIL": "0.92"
-   },
-   "memory_bytes": 30000000000
-  },
-  {
-   "name": "v27-strix",
+   "name": "v27-strix-cached",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
    "kit": null,
    "llamacpp": "b1375",
@@ -50,6 +25,32 @@
     "VLLM_VERSION": "0.18.0",
     "VLLM_ROCM_VARIANT": "rocm700",
     "VLLM_GPU_UTIL": "0.6"
+   },
+   "memory_bytes": 30000000000,
+   "reference_cache": ".github/devlab/refcache/v27-r9700.tgz"
+  },
+  {
+   "name": "v27-strix-vllm",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "llamacpp_vulkan": "b12211",
+   "variants": [
+    {
+     "name": "card",
+     "build": {},
+     "context": 65536
+    }
+   ],
+   "steps": [
+    "gates:card:dev"
+   ],
+   "runner": "strix",
+   "env": {
+    "VLLM_VERSION": "0.18.0",
+    "VLLM_ROCM_VARIANT": "rocm700",
+    "VLLM_GPU_UTIL": "0.6",
+    "VLLM_MAX_BATCHED_TOKENS": "4096"
    },
    "memory_bytes": 30000000000
   }
