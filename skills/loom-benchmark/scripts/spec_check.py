@@ -47,12 +47,12 @@ def post(url, body):
 
 def image_requests(model):
     """Packages with image input: drafting must not change image answers either (M-RoPE positions in verify/draft)."""
-    from vision_golden import builtin_images, data_url
+    from vision_golden import OPEN_QUESTIONS, builtin_images, data_url
     ims = builtin_images()
     out = []
     for name, samp in (("shapes", {"temperature": 0}), ("wide", {"temperature": 0}),
                        ("shapes", {"temperature": 0.7, "top_p": 0.9, "top_k": 20, "seed": 7})):
-        im, q = ims[name]
+        im, q = ims[name]; q = OPEN_QUESTIONS.get(name, q)
         out.append({"model": model, "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": data_url(im)}},
                                                                              {"type": "text", "text": q + " Answer in detail."}]}],
                     "max_tokens": 200, "chat_template_kwargs": {"enable_thinking": False}, **samp})

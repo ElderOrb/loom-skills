@@ -30,6 +30,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 
+# The original open questions of "shapes" and "chart" (spec_check.py: drafted vs undrafted on ONE engine, where an open answer is fine).
+# As the golden gate's questions against another engine they were format coin flips: the reply's first token is one of "Based" /
+# "Here" / "There" / "The" / "```" at one to two nats apart in vLLM's own distribution, which moves by about a nat between two recordings
+# of the same prompt and by build in Loom (DevLab run 43832215712: 'Based' vs 'Here' by build, both stable across requests), so
+# the verdict tracked luck, not the image path. The gate's questions now have one decisive answer (the "wide" precedent below).
+OPEN_QUESTIONS = {"shapes": "Describe every shape in this image with its color and position, and transcribe any text exactly.",
+                  "chart": "What is the title of this chart, and which day has the tallest bar?"}
+
+
 def builtin_images():
     from PIL import Image, ImageDraw, ImageFont
     def font(size):
@@ -42,13 +51,13 @@ def builtin_images():
     im = Image.new("RGB", (640, 480), "white"); d = ImageDraw.Draw(im)
     d.ellipse((40, 60, 240, 260), fill="red"); d.rectangle((380, 60, 600, 260), fill="blue")
     d.polygon([(320, 300), (240, 440), (400, 440)], fill="green"); d.text((430, 380), "LOOM 42", fill="black", font=font(48), anchor="mm")
-    out["shapes"] = (im, "Describe every shape in this image with its color and position, and transcribe any text exactly.")
+    out["shapes"] = (im, "Answer with only three words separated by commas: the color of the circle, the color of the rectangle, the color of the triangle.")
     im = Image.new("RGB", (800, 500), (250, 250, 245)); d = ImageDraw.Draw(im)
     vals = [3, 7, 4, 9, 6]; names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
     for i, (v, n) in enumerate(zip(vals, names)):
         x = 100 + i * 130; d.rectangle((x, 420 - v * 40, x + 80, 420), fill=(40, 90, 200)); d.text((x + 40, 445), n, fill="black", font=font(24), anchor="mm")
     d.text((400, 30), "Tickets closed per day", fill="black", font=font(30), anchor="mm")
-    out["chart"] = (im, "What is the title of this chart, and which day has the tallest bar?")
+    out["chart"] = (im, "Answer with only the chart's title, then a slash, then the day with the tallest bar.")
     im = Image.new("RGB", (900, 600), "white"); d = ImageDraw.Draw(im)
     lines = ["INVOICE #20931", "Date: 2026-11-03", "2 x Widget A      $14.00", "1 x Gadget B      $27.50", "Shipping           $5.25", "TOTAL             $46.75"]
     for i, t in enumerate(lines):
@@ -72,6 +81,8 @@ def builtin_images():
     # tests the numerics' luck, not the 50x8 patch grid this case exists to cover. The digits are one decisive answer.
     out["wide"] = (im, "What number is written in this image? Answer with the digits only.")
     if os.environ.get("VISION_EXTRA"):   # diagnostics for a failing "wide": is it the resize, the grid, or the prompt?
+        out["shapes_open"] = (out["shapes"][0], OPEN_QUESTIONS["shapes"])   # the open questions that used to be the gate's
+        out["chart_open"] = (out["chart"][0], OPEN_QUESTIONS["chart"])
         out["wide_open"] = (im, "What text is written in this image?")   # the open question this case used to ask
         out["wide_pre"] = (im.resize((1600, 256), Image.BICUBIC), "What text is written in this image?")   # same grid, resized by us: no resize left to differ
         im2 = Image.new("RGB", (1600, 320), "white"); ImageDraw.Draw(im2).text((800, 160), "THE QUICK BROWN FOX 1234", fill=(120, 0, 0), font=font(90), anchor="mm")
