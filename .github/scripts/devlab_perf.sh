@@ -55,6 +55,8 @@
 # Steps S: ab:R[:on|off]        every variant in ONE loom-serve (small context), ab_decode.py R interleaved rounds
 #          perf:V:N[:long]      V served alone with its own settings: perf.py N times (+ --long); N runs = one session (its value: the median of
 #                               its samples); one run per session = perf:V:1 repeated (a round each). Job "repeat_rows": R (fast models: 3) adds --repeat-rows R
+#          profile:V[:LIST]     per-kernel device time of one prefill (pf2k, pf8k) and one drafted decode (dec): V served per scenario with --print_device_statistics
+#                               (the HAL's per-function dispatch statistics at shutdown), profile_requests.py + profile_stats.py: out/profile_V_<scenario>.{md,json,serve.log}
 #          c4:V[:N]             c4_steady.py N (default 4) streams on V
 #          llama:N[:long|-][:M] llama.cpp (card build + llama_spec, n-max M) perf.py N times, llama_decode.py tokens/step
 #          llamac4[:M]          c4_steady.py on llama.cpp
@@ -390,6 +392,7 @@ serve_alone() { # serve_alone VARIANT
     sa="$gsa $sa"
     vmem=none
   fi
+  [ -n "${PROFILE_SA:-}" ] && sa="$sa $PROFILE_SA"   # the profile step: --print_device_statistics
   step "serve $1"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
   grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
   curl -sf "$url/v1/models" >/dev/null
@@ -516,6 +519,21 @@ while [ "$qi" -lt "${#queue[@]}" ]; do
 import json,statistics as st; r=[json.loads(l) for l in open('$out/perf_$p1.jsonl')]
 k='decode_tps_32k' if '${p3:-}' else 'decode_tps'
 print('$p1', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v), 2) if (v := [x[k] for x in r if x.get(k)]) else 'n/a (no row served: beyond the served context)')");;
+    profile)   # profile:V[:SCENARIOS] (comma list of probe,pf2k,pf8k,dec; default all but probe): V served alone per scenario with --print_device_statistics (the HAL's
+               # per-function dispatch statistics, printed at shutdown); one session per scenario, so each table holds only that scenario's requests
+      for sc in $(echo "${p2:-pf2k,pf8k,dec}" | tr ',' ' '); do
+        PROFILE_SA="--device_profiling_mode=dispatch-events,executable-metadata --device_profiling_flush_interval_ms=5 --print_device_statistics" serve_alone "$p1" || { res[$s]=ERROR; break; }
+        step "profile $p1 $sc"
+        ( cd "$B" && "$T" profile_requests.py "$url" "$cardid" "$sc" ) > "$out/profile_${p1}_$sc.req.json" 2> "$out/profile_${p1}_$sc.req.err"; tail -c 600 "$out/profile_${p1}_$sc.req.json"; tail -3 "$out/profile_${p1}_$sc.req.err"
+        "$SV/stop.sh" "perf-$p1" | tail -1; sleep 2   # a graceful stop: the statistics are printed at shutdown
+        cp "$LOOM_SERVE_STATE/perf-$p1.log" "$out/profile_${p1}_$sc.serve.log" 2>/dev/null
+        grep -c "dispatch " "$out/profile_${p1}_$sc.serve.log" | sed "s/^/dispatch rows: /"; grep -A6 "IREE HAL device statistics" "$out/profile_${p1}_$sc.serve.log" | head -8
+        [ "$sc" = probe ] || { steps_n=0; [ "$sc" = dec ] && steps_n=$(python3 -c "
+import json; r=json.loads(open('$out/profile_${p1}_$sc.req.json').read().splitlines()[-1]); d=r.get('draft') or {}; print(round(d.get('draft_proposed_tokens', 0) / ${depth:-3}))" 2>/dev/null || echo 0)
+          "$T" "$B/profile_stats.py" "$out/profile_${p1}_$sc.serve.log" "$out/profile_${p1}_$sc.req.json" --steps "$steps_n" --families "$B/profile_families.json" \
+            --md "$out/profile_${p1}_$sc.md" --json "$out/profile_${p1}_$sc.json" > "$out/profile_${p1}_$sc.table.txt" 2>&1; head -14 "$out/profile_${p1}_$sc.table.txt" | cut -c1-200; }
+      done
+      res[$s]="$(ls "$out"/profile_${p1}_*.md 2>/dev/null | wc -l) tables";;
     probe)   # probe:V: stall_probe.py (when does a prefill stall? TTFT + GPU clocks per request)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "stall probe $p1"

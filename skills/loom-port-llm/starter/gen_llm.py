@@ -15,7 +15,7 @@
 import json, math, os, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate, chunk_mode  # noqa: E402
+from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate, chunk_mode, fused_mode  # noqa: E402
 from formats import SPLIT, SCALE_DIV  # noqa: E402
 
 CFG = json.load(open(os.environ.get("LLM_CONFIG") or sys.argv[1]))
@@ -4833,16 +4833,27 @@ def gdn_layer(i, b, nm, sz, par):
         REC = REC + "\n  scf.if %gemm {\n  " + REC.replace("@g_gdn_recurrence[", "@g_gdn_recurrence_pf[") + "\n  }"
     elif chunk_mode(g) == "group":   # gfx12: spans of 64+ tokens run the chunked kernel (a gfx11 build launches nothing here: its kernel takes every span)
         REC = REC + "\n  scf.if %gemm {\n  // dual-group: rdna4 " + REC.strip().replace("@g_gdn_recurrence[", "@g_gdn_chunk_rdna4[") + "\n  // dual-group: end\n  }"
+    FRONT = f"""  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_{i}, %metadata, %info, %origins, %arena, %gq, %conv_{i}, %gs) : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer)
+  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq) : [index](index, index, index, buffer, buffer, buffer, buffer)
+  kernel.launch @g_gdn_qk_norm[%t](%t, %gs, %ginv) : [index](index, buffer, buffer)"""
+    GATE = f"""  kernel.launch @g_gdn_norm_gate[%t](%t, %info, %graw, %ssm_norm_{i}, %gz, %o) : [index](index, buffer, buffer, view<{DV}xf32>, buffer, buffer)"""
+    if fused_mode(g):   # gfx12, GEMM-shape epochs: two launches (gen_gdn_fused.py) in place of conv .. norm_gate; gfx11 and short epochs keep the chain
+        REC0 = REC.split("\n")[0]
+        FA = (f"kernel.launch @g_gdn_fa_rdna4[%t, %spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %conv_{i}, %galpha, %gbeta, %ssm_a_{i}, %dt_bias_{i}, %gwork)"
+              f" : [index, index](index, index, index, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer, buffer, view<{HV}xf32>, view<{HV}xf32>, buffer)")
+        FB = (f"kernel.launch @g_gdn_fb_rdna4[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %gwork, %ssm_norm_{i}, %gz, %o)"
+              f" : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{DV}xf32>, buffer, buffer)")
+        ind = lambda t: "\n".join("  " + l for l in t.split("\n"))   # the GEMM branch indented: draft/gen_draft.py captures before the 2-space conv launch (verify: else branch)
+        MIX = (f"  scf.if %gemm {{\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
+               f"  }} else {{\n{FRONT}\n{REC0}\n{GATE}\n  }}")
+    else:
+        MIX = f"{FRONT}\n{REC}\n{GATE}"
     T = P + [
         "  " + lin(fmt_of(nm("attn_qkv")), "%h", "%s_h", f"%wqkv_{i}", sz("attn_qkv"), "%gq", "%nH", "%nC", H) + "\n",
         "  " + lin(fmt_of(nm("attn_gate")), "%h", "%s_h", f"%wz_{i}", sz("attn_gate"), "%gz", "%nH", "%nVD", H) + "\n",
         "  " + lin_mv(fmt_of(nm("ssm_alpha")), "%h", f"%walpha_{i}", sz("ssm_alpha"), "%galpha", "%nHV", H) + "\n",
         "  " + lin_mv(fmt_of(nm("ssm_beta")), "%h", f"%wbeta_{i}", sz("ssm_beta"), "%gbeta", "%nHV", H) + "\n",
-        f"""  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_{i}, %metadata, %info, %origins, %arena, %gq, %conv_{i}, %gs) : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer)
-  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq) : [index](index, index, index, buffer, buffer, buffer, buffer)
-  kernel.launch @g_gdn_qk_norm[%t](%t, %gs, %ginv) : [index](index, buffer, buffer)
-{REC}
-  kernel.launch @g_gdn_norm_gate[%t](%t, %info, %graw, %ssm_norm_{i}, %gz, %o) : [index](index, buffer, buffer, view<{DV}xf32>, buffer, buffer)
+        f"""{MIX}
   scf.if %gemm {{
     kernel.launch @g_row_scale_f16[%t](%t, %nVD, %o, %s_o, %o16) : [index](index, index, buffer, buffer, buffer)
   }}
@@ -5438,6 +5449,12 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
             L_.append(f"  %{name}_bytes = index.constant {width * 4} : offset\n  %{name}_size = index.scale %t, %{name}_bytes : index, offset -> offset\n"
                       f"  %{name} = buffer.alloca<global> align(256) %{name}_size : buffer\n")
         L_.append(f"  %nC = index.constant {g['C']} : index\n  %nVD = index.constant {g['VD']} : index\n  %nHV = index.constant {g['HV']} : index\n")
+        if fused_mode(g):   # gfx12 fused GDN prefill (gen_gdn_fused.py): the chunk workspace, ceil(t / 32) + spans + 1 slots
+            from gen_gdn_fused import nslots_bytes
+            L_.append(f"  %gw_c31 = index.constant 31 : index\n  %gw_c32 = index.constant 32 : index\n  %gw_a = index.add %t, %gw_c31 : index\n"
+                      f"  %gw_b = index.div %gw_a, %gw_c32 : index\n  %gw_c = index.add %gw_b, %spans : index\n  %gw_one = index.constant 1 : index\n"
+                      f"  %gw_n = index.add %gw_c, %gw_one : index\n  %gw_slot = index.constant {nslots_bytes(g)} : offset\n"
+                      f"  %gw_size = index.scale %gw_n, %gw_slot : index, offset -> offset\n  %gwork = buffer.alloca<global> align(256) %gw_size : buffer\n")
     if not QK_NORM:
         L_.append("  %no_norm = buffer.alloca<global> align(256) %row_bytes : buffer\n")
     if MOE:   # its own part: the MTP drafter programs reuse the prologue (all parts but the last), MoE layer included

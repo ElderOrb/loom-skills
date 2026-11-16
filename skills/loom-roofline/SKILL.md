@@ -18,7 +18,7 @@ The point is to decide **once, up front, with numbers**, what the port should re
 so the optimization loop (`loom-optimize`) has a finish line, and so a stopping
 decision is a measurement rather than a debate.
 
-## 0. Effort: what the user asked for
+## 0. Target and budget: what the user asked for
 
 Read the request for two optional inputs: a **performance target** and a **time
 budget**. A budget the user states covers what they asked for; by default it is the
@@ -98,7 +98,7 @@ Per metric it then prints a row:
 | TARGET | ceiling × the **best efficiency a Loom port has actually reached** on this hardware (`EFF` in the script; sources in the loom-kb `roofline` topic (`kb.py route --topic roofline`)). Realistic by construction. |
 | margin | TARGET ÷ llama.cpp − 1. Reported as is, with no cap and no label. |
 | stretch | ceiling × `STRETCH`: what the known but not yet built levers should give (GEMM efficiency already seen in isolation, small-op fusion, batched expert gather). |
-| at-ceiling | Under 3 % headroom: llama.cpp is near the roofline. Target parity and spend the effort elsewhere. |
+| at-ceiling | Under 3 % headroom: llama.cpp is near the roofline. Target parity and spend runner time elsewhere. |
 
 **Sanity-check the model before trusting it.** If llama.cpp's `eff` is above about
 0.95 on any metric, the roofline undercounts. Check for a missed sliding window, KV

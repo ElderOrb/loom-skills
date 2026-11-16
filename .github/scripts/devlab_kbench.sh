@@ -9,6 +9,9 @@
 #               "suites": [{"suite": name, "dir": "<dir under .github/devlab/kbench>", "files": ["a.loom", ...],
 #                           "config": ["k=v", ...] (--config=), "args": ["--measure=...", ...] (loom-benchmark flags),
 #                           "repeats": N (optional), "runner": "strix" (default) | "r9700" (workflow runs-on),
+#                           "probes": [{"name": N, "args": [...]}] (optional): after the timing runs, the FIRST file once more per probe with these extra
+#                           loom-benchmark flags (JSONL rows, raw profile bundles) -> probe_N.jsonl/.log, probe_N_artifacts/: hardware counters,
+#                           executable traces, compile report details; a probe that fails is recorded, never fails the suite,
 #                           "gen": generator script under .github/devlab/kbench (run as `gen CHECKOUT RUNDIR VARIANT...`), "gen_variants": [...]}]}
 # Variant name = file name without "bench_" prefix / ".loom" ("bench.loom" is "base"). Benchmarks that read .npy
 # weights (check.file.read.npy path("w/x.npy")) that are not in the suite dir get random int8 weights of the
@@ -101,6 +104,17 @@ for i in $(seq 1 "$reps"); do
       --output="$out/r_${v}_$i.json" > "$out/r_${v}_$i.json.log" 2>&1 || { echo "FAIL $v $i"; tail -5 "$out/r_${v}_$i.json.log"; rc=1; }
     rm -rf "$D/run/fo_${v}_$i"
   done
+done
+
+# probes (profiling evidence, not timings): the first file with extra flags; their failure is data (the counters' state on this GPU)
+nprobe=$(q "print(len(s.get('probes', [])))")
+for pi in $(seq 0 $((nprobe - 1))); do
+  pn=$(q "print(s['probes'][$pi]['name'])"); pa=$(q "print(' '.join(s['probes'][$pi].get('args', [])))"); f0=${files%% *}
+  step "probe $pn: $f0 $pa"; mkdir -p "$out/probe_${pn}_artifacts"
+  "$LB" "$f0" --device=amdgpu $cfgs $args --compile-report=summary $pa --output-format=jsonl --profile-artifacts-dir="$out/probe_${pn}_artifacts" \
+    --file-output-root="$D/run/fo_probe_$pn" --output="$out/probe_$pn.jsonl" > "$out/probe_$pn.log" 2>&1; echo "probe $pn rc=$?" | tee -a "$out/probes.txt"
+  tail -3 "$out/probe_$pn.log" | cut -c1-300; rm -rf "$D/run/fo_probe_$pn"
+  du -sh "$out/probe_${pn}_artifacts" 2>/dev/null | tee -a "$out/probes.txt"
 done
 
 python3 - "$out" "$suite" "$(for f in $files; do vname "$f"; done | tr '\n' ' ')" <<'PY'

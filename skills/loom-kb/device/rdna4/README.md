@@ -6,3 +6,8 @@ rewrites of the RDNA3 kernels (`gen_gemm_rdna4.twin()`, `flash2_rdna4.to_rdna4()
 exists here: `flash2_b2`, `trim`, `vpack`, `prefetch`, `f16o_fuse`. Devices: `radeon-r9700` (gfx1201).
 
 Data: `family.json`.
+
+Profiling on gfx1201 (kbench run 43803638485, hrx-loom 0.1.0): per-dispatch device timestamps work (`profile_replay`, `--print_device_statistics`
+with `dispatch-events`); hardware counters, counter-ranges, device metrics and executable traces are UNIMPLEMENTED (`profile.c:636`);
+`--compile-report=details` works (`matrix_fp8/bf8_native_kind` unscaled, `matrix_fp4_native_kind` none: no native MXFP4 matrix op on gfx12).
+Recipe: topic `optimize-loop`, "Profiling".
