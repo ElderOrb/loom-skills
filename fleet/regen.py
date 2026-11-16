@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One command per campaign step: regenerate the cards of many models on one or more devices, resumable, state in one JSON file.
 
-  regen.py plan    --base BRANCH --device D [--device D2] [--mode ab|card] [--slugs S... | --all] [--old ORG|refs.json] [--batch N] --state S.json
+  regen.py plan    --base BRANCH --device D [--device D2] [--mode ab|card|sdk-ab] [--slugs S... | --all] [--old ORG|refs.json] [--batch N] --state S.json
                    [--replicas 2] [--sequential] [--no-baselines] [--priority]   a narrow change: confirming run as a parallel replica, 2+2 -> 6+6, no llama.cpp
   regen.py submit  S.json [--dry-run] [--max-batches N] [--max-inflight N|auto]   experiment branch + perf.json + PR + label per batch (REST), priority
                    batches and R9700-class devices first; --max-inflight sends a sweep in waves (default: all at once)
@@ -14,7 +14,13 @@
   regen.py accept  S.json SLUG... --note TEXT              a person's call: greedy text differs only at a near-tie, decide again with that accepted
   regen.py adopt   S.json --run RUN                        attach an already running / finished run to the state's jobs (by job name)
 
-Modes. ab: regeneration of a device that already has a package to compare with (ab_jobs.py: old vs new in ABBA sessions, text match, func, ktest, gates,
+Modes. sdk-ab: the SDK migration's A/B (ab_jobs.py --sdk-ab): per model and device ONE job, ABBA on one runner: variant "fun" = the published staging card
+  (fleet/manifest.json staging.revision) on its own SDK pin (hrx-loom 0.1.0), variant "staging" = the package built in the job from the job's branch on
+  hrx-loom 0.2.0rc1 (devlab_perf.sh per-variant SDK roots), plus the card job's gates and llama.cpp baselines. `collect` writes per model and device the
+  % delta new vs old per metric (state: perf = {decode, prefill, longctx, 4stream}, positive = v0.2 faster); a metric more than 3 % slower
+  triggers ONE confirming -r2 job, confirmed in both runs = needs_decision with the numbers; `ingest` builds the v0.2 card from the job (its own
+  measurement; the delta goes into the publish message); `status --status-json` also writes models.<slug>.perf.<gpu>.
+  ab: regeneration of a device that already has a package to compare with (ab_jobs.py: old vs new in ABBA sessions, text match, func, ktest, gates,
   llama.cpp baselines where the card's table comes from the job). card: a NEW device, no old package: one card measurement per model (device_jobs.py: card +
   nodraft variants, func, ktest, gates, llama.cpp ROCm + Vulkan baselines), no A/B: about half the runner time of ab.
 A job per (model, device), one runner. A model's state (state["jobs"][NAME]["stage"]):
@@ -64,7 +70,12 @@ STATUS_STAGE = {"planned": "queued", "submitted": "queued", "queued": "queued", 
                 "skipped": "unsupported", "unsupported": "unsupported"}
 GPU_KEY = {"strix-halo": "strix", "radeon-r9700": "r9700"}   # status.json's per-GPU keys
 # the files a variant leaves in a job's output: ab = old "fun" and new "staging"; card = the single "card" (+ "nodraft")
-VARIANT = {"ab": ("staging", "stagingnd"), "card": ("card", "nodraft"), "logits": ("staging", "stagingnd")}
+VARIANT = {"ab": ("staging", "stagingnd"), "card": ("card", "nodraft"), "logits": ("staging", "stagingnd"), "sdk-ab": ("staging", "stagingnd")}
+# sdk-ab: the metric of each reported delta (card_lib.METRIC_KEYS rows) and the ratchet: slower than this fraction on a metric = a confirming run
+SDK_METRICS = {"decode": "decode", "prefill": "prefill_8k", "longctx": "decode_32k", "4stream": "streams4"}
+SDK_REGRESSION = 0.03
+# old side = "card": the pin of the published card (pin-less = 0.1.0; Flash-Next's card is pinned to a 0.2.0 dev build)
+SDK_OLD, SDK_NEW = "card", "0.2.0rc1"
 
 
 def now():
@@ -168,8 +179,10 @@ def slug_of(job):
 
 def generator_cmd(st, device, slugs, suffix=""):
     d = st["opts"]
-    if st["mode"] in ("ab", "logits"):   # logits: ab_jobs.py's job of the pinned staging package, steps cut down in gen_jobs
+    if st["mode"] in ("ab", "logits", "sdk-ab"):   # logits: ab_jobs.py's job of the pinned staging package, steps cut down in gen_jobs
         cmd = [PY, os.path.join(SCRIPTS, "ab_jobs.py"), "--device", device, "--gates", d["gates"], "--new-org", d["new_org"], "--old-org", d["old_org"]]
+        if st["mode"] == "sdk-ab":
+            cmd += ["--sdk-ab", "--old-sdk", SDK_OLD, "--new-sdk", SDK_NEW, "--baselines"]   # the v0.2 card's own table needs the llama.cpp rows of the same job
         if d.get("refs"):
             cmd += ["--refs", d["refs"]]
         if device != "strix-halo" and not d.get("no_baselines") and st["mode"] == "ab":
@@ -245,6 +258,14 @@ def fleet_slugs():
     return sorted(json.load(open(os.path.join(HERE, "manifest.json")))["models"])
 
 
+def staging_ref(slug, org=STAGING_ORG):
+    """ORG/SLUG@REVISION: the published staging card fleet/manifest.json names (the v0.1 side of an SDK A/B)"""
+    m = json.load(open(os.path.join(HERE, "manifest.json")))["models"].get(slug)
+    if not m or not (m.get("staging") or {}).get("revision"):
+        die(f"{slug}: no staging revision in fleet/manifest.json")
+    return f"{org}/{slug}@{m['staging']['revision']}"
+
+
 def cmd_plan(a):
     slugs = fleet_slugs() if a.all else a.slugs
     if not slugs:
@@ -267,7 +288,12 @@ def cmd_plan(a):
         die(f"--new-org {a.new_org}: cards are measured and published on {STAGING_ORG} only")
     if a.mode == "logits" and a.old is None:
         old_org = a.new_org   # one package, checked: old == new in the pinned refs
-    if a.mode in ("ab", "logits") and not a.no_pin:
+    if a.mode == "sdk-ab":
+        # old = new = the published staging revision of the manifest: the job's card, the old variant's package, and the revision the new card is made on
+        if a.old:
+            die("--mode sdk-ab takes its old package from fleet/manifest.json staging.revision (no --old)")
+        refs = {s: {"old": staging_ref(s, a.new_org), "new": staging_ref(s, a.new_org)} for s in slugs}
+    elif a.mode in ("ab", "logits") and not a.no_pin:
         # pin the new package of every slug to the staging revision it is measured at (the card the run measures is the card ingested)
         refs = {s: dict(e) for s, e in (refs or {}).items()}
         for s in slugs:
@@ -289,7 +315,7 @@ def cmd_plan(a):
         # per-device refs file. Where the device has no published table to compare with (anything but Strix Halo, whose old package is the
         # published loom-fun card) and no old package was named, the old package is the new revision itself: an A/A, the runner's own noise.
         dref = {s: dict(e) for s, e in refs.items()} if refs else None
-        if dref and (dev != "strix-halo" or a.mode == "logits") and a.old is None:
+        if dref and (dev != "strix-halo" or a.mode == "logits") and a.old is None and a.mode != "sdk-ab":
             for e in dref.values():
                 e.setdefault("old", e["new"])
         if dref:
@@ -314,7 +340,7 @@ def cmd_plan(a):
                 rep_no = j.get("replica", 1)
                 st["jobs"][j["name"]] = {"slug": slug_of(j), "device": dev, "batch": bid, "round": rep_no, "stage": "planned",
                                          "card": j["card"], "steps": len(j["steps"]),
-                                         "aa": bool(e.get("old") and e.get("old") == e.get("new"))}   # old == new: the A/B shows noise only
+                                         "aa": a.mode != "sdk-ab" and bool(e.get("old") and e.get("old") == e.get("new"))}   # old == new: the A/B shows noise only
                 if rep_no == 1:
                     first[slug_of(j)] = j["name"]
             for j in jobs:   # a replica is a confirming run submitted with the first: the same links `rerun` makes (prev, rerun_of_me)
@@ -487,7 +513,10 @@ def compare(st, name, e, d):
     cmp = os.path.join(st.work, "cmp", f"{name}.json")
     os.makedirs(os.path.dirname(cmp), exist_ok=True)
     cmd = [PY, os.path.join(SCRIPTS, "strix_ab_compare.py"), d, "--json", cmp]
-    if e["device"] == "strix-halo" and st.d["opts"]["old_org"] == "loom-fun":
+    if st.d["mode"] == "sdk-ab":   # the old side IS the staging card at the manifest revision: the runner guard compares it with that card's value on this device
+        rev = e["card"].split("@")[-1] if "@" in e["card"] else None
+        cmd += ["--fun-info", hf_file(e["card"].split("@")[0], "info.json", rev), "--gpu", e["device"]]
+    elif e["device"] == "strix-halo" and st.d["opts"]["old_org"] == "loom-fun":
         cmd += ["--fun-info", hf_file(f"{st.d['opts']['old_org']}/{e['slug']}", "info.json")]   # new vs the published card value too
     elif e["device"] != "strix-halo":   # R9700: the old side IS the staging card; the runner guard compares it with that card's value
         cmd += ["--fun-info", hf_file(f"{st.d['opts']['old_org']}/{e['slug']}", "info.json"), "--gpu", e["device"]]
@@ -530,6 +559,45 @@ def decide(st, name, e, cmp_paths):
     return decision, reasons, res
 
 
+def sdk_deltas(cmp):
+    """{decode, prefill, longctx, 4stream: % new vs old (positive = v0.2 faster)} of a compare, None where a row is missing; plus every row's %"""
+    m = cmp.get("metrics") or {}
+    pct = lambda r: round((r - 1) * 100, 1) if r else None
+    return ({k: pct((m.get(row) or {}).get("ratio")) for k, row in SDK_METRICS.items()},
+            {row: pct(x.get("ratio")) for row, x in m.items()})
+
+
+def sdk_decide(st, name, e, cmp_path):
+    """The SDK A/B ratchet. Round 1: a gate failure holds; a metric more than 3 % slower (or missing) or a degraded runner asks for ONE confirming -r2 job;
+    else promote. Round 2 (e["prev"]): a metric slower than 3 % in BOTH runs is a confirmed regression = hold with the numbers (needs_decision);
+    otherwise promote. The reported perf of a confirmed pair is the mean of the two runs. Greedy text differences are reported, not held (v0.2 is another SDK).
+    Returns (decision, reasons, perf, rows)."""
+    cmp = json.load(open(cmp_path))
+    perf, rows = sdk_deltas(cmp)
+    reasons = []
+    if cmp.get("gate_failures"):
+        return "hold", ["gate failed: " + ", ".join(cmp["gate_failures"])], perf, rows
+    if (cmp.get("text") or {}).get("status") == "DIFF":
+        t = cmp["text"]
+        reasons.append(f"greedy text differs from v0.1 on {t['prompts'] - t['identical']}/{t['prompts']} prompts (reported)")
+    if cmp.get("degraded_runner"):
+        return ("hold" if e["round"] > 1 else "rerun"), [f"degraded runner (old side off the card value): {cmp['degraded_runner']}"] + reasons, perf, rows
+    prev = st.jobs[e["prev"]] if e.get("prev") else None
+    if prev and prev.get("perf"):
+        p1 = prev["perf"]
+        both = {k: (p1[k], perf[k]) for k in perf if p1.get(k) is not None and perf[k] is not None and p1[k] < -SDK_REGRESSION * 100 and perf[k] < -SDK_REGRESSION * 100}
+        perf = {k: (round((p1[k] + perf[k]) / 2, 1) if p1.get(k) is not None and perf[k] is not None else perf[k]) for k in perf}
+        if both:
+            return "hold", [f"confirmed regression > {SDK_REGRESSION:.0%} in both runs: " + ", ".join(f"{k} {a:+.1f} % / {b:+.1f} %" for k, (a, b) in both.items())] + reasons, perf, rows
+        return "promote", reasons, perf, rows
+    slow = {k: v for k, v in perf.items() if v is not None and v < -SDK_REGRESSION * 100}
+    gone = [k for k, v in perf.items() if v is None]
+    if slow or gone:
+        return "rerun", ([f"slower than -{SDK_REGRESSION:.0%}: " + ", ".join(f"{k} {v:+.1f} %" for k, v in slow.items())] if slow else []) + \
+            ([f"missing: {', '.join(gone)}"] if gone else []) + reasons, perf, rows
+    return "promote", reasons, perf, rows
+
+
 def card_mode_verdict(d, e):
     """Card mode (a new device): no old package; every step must have run and the gates / kernel tests pass."""
     s = json.load(open(os.path.join(d, "summary.json"))).get("results", {})
@@ -550,7 +618,10 @@ def collect_one(st, name, e):
         e.update(stage="needs_decision" if e["round"] > 1 else "collected", decision="rerun" if e["round"] == 1 else "hold",
                  reason=f"the job {e.get('conclusion')} before writing summary.json (see {e.get('job_url')})")
         return
-    if mode == "ab":
+    if mode == "sdk-ab":
+        e["cmp"] = compare(st, name, e, d)
+        decision, reasons, e["perf"], e["rows_pct"] = sdk_decide(st, name, e, e["cmp"])
+    elif mode == "ab":
         e["cmp"] = compare(st, name, e, d)
         paths = ([st.jobs[e["prev"]]["cmp"]] if prev_cmp(st, e) else []) + [e["cmp"]]
         decision, reasons, res = decide(st, name, e, paths)
@@ -561,6 +632,8 @@ def collect_one(st, name, e):
     else:
         decision, reasons = card_mode_verdict(d, e)
     e["decision"], e["reason"] = decision, "; ".join(reasons)
+    if mode == "sdk-ab":
+        e["reason"] = e["reason"] or "perf " + " ".join(f"{k} {v:+.1f}%" for k, v in e["perf"].items() if v is not None)
     e["card_revision"] = read(os.path.join(d, "card_revision.txt"), "").split("\n")[0]
     if decision == "promote":
         e["stage"] = "collected"
@@ -640,12 +713,20 @@ def job_facts(st, e):
     return e["run"], e["job_url"], (e.get("completed") or now())[:19]
 
 
+def sdk_line(e):
+    """the delta line of a sdk-ab job: 'decode +1.2 %, prefill -0.4 %, ...' (positive = v0.2 faster)"""
+    return ", ".join(f"{k} {v:+.1f} %" if v is not None else f"{k} n/a" for k, v in (e.get("perf") or {}).items())
+
+
 def ingest_full(st, name, e, W):
     """The card's performance, gates and roofline of this device from the job (REGEN_RECIPE: ingest the NEW package)."""
     d, dev, slug = e["dir"], e["device"], e["slug"]
     V, ND = VARIANT[st.d["mode"]]
     S = CARD
-    rev = e["card_revision"].split("@")[-1]
+    sdk = st.d["mode"] == "sdk-ab"
+    # sdk-ab: the job measured a package BUILT from the branch; the card is made on the staging head, which must hold exactly those programs (the
+    # v0.2 package published before this card-only step): make_info.py refuses a different programs hash
+    rev = hf_head(f"{st.d['opts']['new_org']}/{slug}") if sdk else e["card_revision"].split("@")[-1]
     out = os.path.join(W, "out")
     hf_snapshot(f"{st.d['opts']['new_org']}/{slug}", rev, out)
     shutil.copy(os.path.join(out, "info.json"), os.path.join(W, "info_prev.json"))
@@ -664,12 +745,12 @@ def ingest_full(st, name, e, W):
     run_tool([f"{S}/make_info.py", "perf", "--gpu", dev, "--loom-jsonl", f"{d}/perf_{V}.jsonl", "--llama-jsonl", *llm, "--c4-loom", f"{d}/c4_{ND}.txt",
               "--c4-llama", c4l[0], "--package", out, *src, "--device", "dev.json", "--hrx-loom", "hrx.json",
               "--baseline-version", "llamacpp-rocm/" + baseline["rocm"]["build"], "--baseline-args", rd("llamacpp_args-rocm.np1.txt"),
-              "--fetched-programs", rd("programs_sha256.txt"), "-o", "ev_perf.json"], W)
+              "--fetched-programs", rd("programs_sha256_staging.txt" if sdk else "programs_sha256.txt"), "-o", "ev_perf.json"], W)
     ev = ["ev_perf.json"]
     if vk and c4v:
         run_tool([f"{S}/make_info.py", "perf", "--gpu", dev, "--backend", "vulkan", "--llama-jsonl", *vk, "--c4-llama", c4v[0],
                   "--baseline-version", baseline["vulkan"]["build"], "--baseline-args", rd("llamacpp_args-vulkan.np1.txt"),
-                  "--baseline-sha256", rd("llamacpp_release-vulkan.np1.sha256"), "--fetched-programs", rd("programs_sha256.txt"), "--package", out,
+                  "--baseline-sha256", rd("llamacpp_release-vulkan.np1.sha256"), "--fetched-programs", rd("programs_sha256_staging.txt" if sdk else "programs_sha256.txt"), "--package", out,
                   *src, "--device", "none", "--hrx-loom", "none", "-o", "ev_vulkan.json"], W)
         ev.append("ev_vulkan.json")
     gfiles = [f for f in (f"{d}/gates_{V}/gates.json", f"{d}/ktest_{V}.log") if os.path.exists(f)]
@@ -692,7 +773,10 @@ def ingest_full(st, name, e, W):
         build += ["--perf-from", spec]
     run_tool(build + ["--memory-bytes", str(mem), "--from-info", "info_prev.json", "--evidence", *ev, "-o", "info_new.json"], W)
     shutil.copy(os.path.join(W, "info_new.json"), os.path.join(out, "info.json"))
-    return out, hf_head(f"{st.d['opts']['new_org']}/{slug}"), (f"{card_lib.GPUS[dev]['runner']} results measured on this package (run {run})")
+    msg = f"{card_lib.GPUS[dev]['runner']} results measured on this package (run {run})"
+    if sdk:
+        msg += f"; hrx-loom {SDK_NEW} vs the previous card on its own SDK pin (same job, ABBA): " + sdk_line(e)
+    return out, hf_head(f"{st.d['opts']['new_org']}/{slug}"), msg
 
 
 def ingest_strix(st, name, e, W):
@@ -724,7 +808,7 @@ def cmd_ingest(a):
         shutil.rmtree(W, ignore_errors=True)
         os.makedirs(W)
         try:
-            full = st.d["mode"] == "card" or bool(glob.glob(os.path.join(e["dir"], "perf_llamacpp-rocm.np1_n*.jsonl")))
+            full = st.d["mode"] in ("card", "sdk-ab") or bool(glob.glob(os.path.join(e["dir"], "perf_llamacpp-rocm.np1_n*.jsonl")))
             out, parent, msg = (ingest_full if full else ingest_strix)(st, name, e, W)
             run_tool([f"{CARD}/render_card.py", out], W) if full else None
             for f in (".loom-fetch.lock",):
@@ -778,12 +862,15 @@ def cmd_status(a):
     print_table(st)
     for n, e in sorted(st.jobs.items(), key=lambda kv: (kv[1]["device"], kv[1]["slug"])):
         print(f"  {e['slug'][:46]:46s} {e['device']:13s} r{e['round']} {e['stage']:14s} {e.get('decision') or '':16s} {(e.get('reason') or '')[:70]}")
+        if e.get("perf"):
+            print(f"  {'':46s} {'':13s} {'':2s} perf v0.2 vs v0.1: {sdk_line(e)}")
     if a.status_json:
         write_status(st, a.status_json)
 
 
 def write_status(st, path):
-    """models.<slug>.<gpu> = {stage, verdict, run}: what the dashboard reads (a round-2 job's entry wins over its first run's)."""
+    """models.<slug>.<gpu> = {stage, verdict, run}: what the dashboard reads (a round-2 job's entry wins over its first run's); sdk-ab also
+    models.<slug>.perf.<gpu> = {decode, prefill, longctx, 4stream} in percent, positive = v0.2 faster."""
     with locked(path):
         d = json.load(open(path))
         for n, e in sorted(st.jobs.items(), key=lambda kv: kv[1]["round"]):
@@ -792,6 +879,8 @@ def write_status(st, path):
             if e["stage"] == "skipped":
                 verdict = "unsupported"
             m[GPU_KEY.get(e["device"], e["device"])] = {"stage": STATUS_STAGE.get(e["stage"], "queued"), "verdict": verdict, "run": e.get("run")}
+            if e.get("perf"):   # sdk-ab: % delta v0.2 vs v0.1 per metric (positive = v0.2 faster), mean of the two runs of a confirmed pair
+                m.setdefault("perf", {})[GPU_KEY.get(e["device"], e["device"])] = dict(e["perf"])
             if e["stage"] == "needs_decision":
                 m["note"] = f"{e['device']}: needs decision: {e.get('reason', '')[:200]}"
         json.dump(d, open(path, "w"), indent=1)
@@ -839,8 +928,8 @@ def main(argv=None):
     p = sub.add_parser("plan")
     p.add_argument("slugs", nargs="*")
     p.add_argument("--device", action="append", required=True)
-    p.add_argument("--mode", choices=("ab", "card", "logits"), default="ab",
-                   help="logits: the final pass's functional job of a staging package (func, ktest, logits:staging), no performance")
+    p.add_argument("--mode", choices=("ab", "card", "logits", "sdk-ab"), default="ab",
+                   help="sdk-ab: the SDK migration's A/B per model and device (old = the manifest's staging card on its own SDK pin, 0.1.0 when pin-less; new = built from --base on 0.2.0rc1; deltas per metric); logits: the final pass's functional job of a staging package (func, ktest, logits:staging), no performance")
     p.add_argument("--bundle", nargs=2, metavar=("URL", "SHA256"), help="logits mode: the Gufo bundle tarball the job fetches (devlab_perf.sh gufo_bundle)")
     p.add_argument("--bundle-run", help="logits mode: reuse the `gufo-bundle` artifact of this devlab-perf run (the run that built it: no build in this one)")
     p.add_argument("--bundle-build", nargs=2, metavar=("EXT_REV", "GUFO_REV"), help="logits mode: the devlab-perf run BUILDS the Gufo bundle "

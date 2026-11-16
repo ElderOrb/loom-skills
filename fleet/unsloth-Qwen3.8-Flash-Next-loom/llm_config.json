@@ -169,11 +169,8 @@
   }
  },
  "sdk": {
-  "hrx_loom": "0.2.0.dev0",
-  "source": "ci",
-  "artifact_id": 13628412621,
-  "hrx_system_sha": "314238a81c0fadb123e0256e756f852f448c1d40",
-  "wheel_sha256": "9dc1e352f51e8020ecbd97a543e9561671835e5cd2382a22f85da069025e5142",
-  "expires": "2026-11-22"
+  "hrx_loom": "0.2.0rc1",
+  "source": "release",
+  "wheel_sha256": "869ba98dea2fef8355aa190f962241cf62b067b7f5788b5d59b55cebd30658cd"
  }
 }

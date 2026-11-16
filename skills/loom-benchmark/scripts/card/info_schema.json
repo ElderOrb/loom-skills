@@ -192,8 +192,8 @@
    "type": "object", "required": ["hrx_loom"],
    "description": "A Loom SDK identity: install_loom.sh's loom-install.json, or version + dist-info RECORD fingerprint",
    "properties": {
-    "hrx_loom": {"type": ["string", "null"], "description": "The package version (every build says 0.1.0 today)"},
-    "source": {"type": ["string", "null"], "description": "pypi or ci"},
+    "hrx_loom": {"type": ["string", "null"], "description": "The package version (a release reports its own version, e.g. 0.2.0rc1; 0.1.0 and earlier CI builds all said 0.1.0)"},
+    "source": {"type": ["string", "null"], "description": "release (a GitHub release: 0.2.0rc1), pypi or ci"},
     "hrx_system_sha": {"type": ["string", "null"], "description": "Full ROCm/hrx-system commit"},
     "artifact_id": {"type": ["integer", "null"]},
     "branch": {"type": ["string", "null"]},

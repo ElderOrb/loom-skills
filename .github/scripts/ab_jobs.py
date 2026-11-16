@@ -25,6 +25,13 @@ both sides read from one table. --build also rebuilds each variant's programs fr
 its skills/loom-kb), for a change that moves programs as well. Without --build neither side needs the card to carry a device preset
 (require_preset_* is dropped: both variants carry their execution explicitly).
 
+--sdk-ab [--old-sdk 0.1.0 --new-sdk 0.2.0rc1]: the SDK A/B of the v0.1 -> v0.2 migration (fleet/regen.py plan --mode sdk-ab). Same jobs, steps and
+ABBA order, but the variants differ in the SDK too: `fun` / `funnd` = the published card (--refs "old"; the staging revision of fleet/manifest.json)
+served on --old-sdk (variant "sdk"); `staging` / `stagingnd` = the package BUILT in the job from this checkout (variant "build": {}, the job's
+branch) and served on --new-sdk, which is also the job's tools SDK (job "sdk"). The new variants take the old ones' device settings (served
+context, preset execution, cap_pool) because a rebuilt package carries no device preset. Needs devlab_perf.sh's per-variant SDK roots; the
+variant names stay fun / staging so strix_ab_compare.py and make_info.py read the job unchanged.
+
 An A/A run (a package against itself, e.g. old = staging@REV, new = staging at main) measures the runner's own noise.
 
 --device strix-halo: the Strix Halo runner (strix_ab_jobs.py is a wrapper with these defaults), the old card's --memory_bytes.
@@ -142,7 +149,7 @@ def build_refs(a, dev, models, refs, steps_of):
             n, rr = card_lib.sampling_plan(dec, a.fast_tps)
             n = a.reps or n
             nc = 4 if rr > 1 else 2
-            lr = a.llama_reps or (n if pool is not None else 2)
+            lr = a.llama_reps or (n if pool is not None or a.sdk_ab else 2)
             seq = a.sequential and rr == 1 and not a.reps   # as in build(): a normal-speed model starts at 2+2 sessions and extends itself
             if seq:
                 n = card_lib.registry.methodology()["sequential"]["start_sessions_per_side"]
@@ -227,7 +234,7 @@ def build(a):
         n, rr = card_lib.sampling_plan(dec, a.fast_tps)   # the sampling rule (methodology rule 5): fast: 6 sessions, 3 samples per session
         n = a.reps or n
         nc = 4 if rr > 1 else 2
-        lr = a.llama_reps or (n if r9700 else 2)   # llama.cpp runs follow the full session count, not the sequential start
+        lr = a.llama_reps or (n if r9700 or a.sdk_ab else 2)   # llama.cpp runs follow the full session count, not the sequential start
         # --sequential (methodology.json "sequential"): a normal-speed model starts at 2+2 sessions and the job extends itself to 6+6 where a
         # row's ratio lands within 2 points of its reject threshold (the "extend" step below); a fast model keeps its fixed 6 sessions
         seq = a.sequential and rr == 1 and not a.reps
@@ -304,6 +311,9 @@ def parser(device=None):
     ap.add_argument("--fit", default=None, help="a device with a memory pool (radeon-r9700): its fit table (default: device.json fit_table)")
     ap.add_argument("--baselines", action="store_true", help="also run the llama.cpp ROCm + Vulkan rows (off: the A/B compares Loom with Loom; no llama.cpp re-measure)")
     ap.add_argument("--llama-reps", type=int, default=None, help="llama.cpp runs per 1-stream row (default: 2 on Strix Halo; on the R9700 the Loom session count, as r9700_jobs.py)")
+    ap.add_argument("--sdk-ab", action="store_true", help="the SDK A/B of a migration: old = the published card on --old-sdk, new = the package built in the job on --new-sdk (see above)")
+    ap.add_argument("--old-sdk", default="0.1.0")
+    ap.add_argument("--new-sdk", default="0.2.0rc1")
     ap.add_argument("--suffix", default="", help="appended to the job name (a confirming re-run: -r2)")
     ap.add_argument("--replicas", type=int, default=1, help="independent runs of the A/B per model, all in this one perf.json: replica 1 is the job as before, "
                     "replica R>1 the same job named ...-rR with its ABBA order rotated; a workflow run takes the jobs in parallel on different runners, "
@@ -311,6 +321,28 @@ def parser(device=None):
     ap.add_argument("--sequential", action="store_true", help="methodology.json 'sequential': start at 2+2 sessions, the job extends itself to 6+6 where a "
                     "row's ratio is within 2 points of its reject threshold (a step 'extend:TO:HAVE:ROT', devlab_perf.sh + ab_extend.py); a fast model keeps its 6")
     return ap
+
+
+def sdk_ab(doc, old_sdk, new_sdk, key):
+    """The SDK A/B of a job document (see --sdk-ab): old variants on old_sdk serving the published card, new variants built from the checkout on new_sdk."""
+    for j in doc["jobs"]:
+        j["sdk"] = new_sdk
+        by = {v["name"]: v for v in j["variants"]}
+        for old, new in (("fun", "staging"), ("funnd", "stagingnd")):
+            o, n = by[old], by[new]
+            n.update({k: v for k, v in o.items() if k not in ("name", "card", "execution")})   # context, cap_pool, ...: the same serving
+            n["execution"] = dict(o.get("execution") or {})
+            if not n["execution"]:
+                del n["execution"]
+            n.pop("card", None)
+            n["build"] = {}
+            n["sdk"] = new_sdk
+            o["sdk"] = old_sdk
+            if j.get(f"require_preset_{key}"):
+                n[f"require_preset_{key}"] = False   # the rebuilt package has no <first>-device preset: its execution carries the preset's settings
+    if doc.get("_comment"):
+        doc["_comment"] += f" SDK A/B (--sdk-ab): fun = the published card on hrx-loom {old_sdk}, staging = the package built in the job on {new_sdk}."
+    return doc
 
 
 def build_replicas(a):
@@ -321,6 +353,8 @@ def build_replicas(a):
     for r in range(2, a.replicas + 1):
         a.replica = r
         doc["jobs"] += build(a)["jobs"]
+    if a.sdk_ab:
+        sdk_ab(doc, a.old_sdk, a.new_sdk, card_lib.registry.device(a.device)["runner"]["key"])
     if a.replicas > 1:
         doc["_comment"] += f" {a.replicas} replicas per model (jobs ...-r2 ...): independent runs on different runners (the ratchet's confirming run)."
     return doc

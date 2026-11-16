@@ -759,7 +759,7 @@ def fixed_pool_capacity(row, memory_bytes=None, gpu="radeon-r9700"):
 
 # --- the execution settings of a device's preset: scope.json rules (skills/loom-kb exec.* choices), not the fit table --------------
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
-EXEC_KEYS = ("prefill_capacity", "context_capacity", "pool_capacity", "rows", "draft_depth")   # model.json execution fields, in this order
+EXEC_KEYS = ("prefill_capacity", "context_capacity", "rows", "draft_depth")   # model.json execution fields, in this order (SDK 0.2 has no pool_capacity: context_capacity and memory_bytes size the pool)
 _RESOLVERS = {}
 
 
@@ -793,7 +793,7 @@ def scope_execution(slug, gpu, root=None, cfg=None):
 
 def fit_rows(path, gpu, root=None):
     """{slug: row} of a device's fit table (fit.py: sizing and verdict data) with the serving settings of the scope rules put back as the
-    row keys the readers know: "ctx_cap" (exec.context_cap) and "<runner key>_execution" (prefill_capacity, context_capacity, pool_capacity,
+    row keys the readers know: "ctx_cap" (exec.context_cap) and "<runner key>_execution" (prefill_capacity, context_capacity,
     rows, draft_depth). A row that still carries such a block of its own (a table of a device without rules) keeps it unless a rule sets one.
     ROOT: the checkout whose rules apply; default: this one when PATH is one of its own tables (.github/devlab/), else none (a table elsewhere,
     e.g. a test fixture, is standalone data: pass root= to read this checkout's rules for it)."""
@@ -821,14 +821,14 @@ def gpu_preset_name(model_or_presets, gpu="radeon-r9700"):
 
 def gpu_preset_execution(row, served_ctx=None, gpu="radeon-r9700"):
     """The execution overrides a fit-table row's "<runner>_execution" ("r9700_execution": registry.fit_execution_key) gives the GPU's preset (prefill_capacity, rows, draft_depth,
-    context_capacity/pool_capacity ...), plus the served context (context_capacity = pool_capacity = served_ctx) when the R9700
+    context_capacity ...), plus the served context (context_capacity = served_ctx) when the R9700
     serves a shorter context and the row does not say otherwise. None: the row has no block, so the preset is not touched."""
     ex = (row or {}).get(registry.fit_execution_key(gpu))
     if not ex:
         return None
     out = {}
     if served_ctx:
-        out.update(context_capacity=served_ctx, pool_capacity=served_ctx)
+        out.update(context_capacity=served_ctx)
     out.update(ex)
     return out
 
@@ -842,6 +842,9 @@ def with_gpu_preset(model, execution, gpu="radeon-r9700"):
     first = next(iter(doc["presets"]))
     alt = doc["presets"].get(name) or json.loads(json.dumps(doc["presets"][first]))
     alt["execution"].update(execution)
+    ex = alt["execution"]
+    if "pool_capacity" in ex and ex.get("context_capacity"):   # a v0.1 preset still has one: it never exceeds the context this preset serves
+        ex["pool_capacity"] = min(ex["pool_capacity"], ex["context_capacity"])
     doc["presets"][name] = alt
     return doc
 
