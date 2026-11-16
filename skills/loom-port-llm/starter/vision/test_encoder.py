@@ -1,9 +1,12 @@
 """Whole-encoder test: plan -> check.case with real mmproj weights; compares to ref_vit. usage: test_encoder.py MMPROJ H W [atol]
-A safetensors checkpoint instead of an mmproj: test_encoder.py LLM_CONFIG.json CHECKPOINT.safetensors H W [atol] (the config's vision block,
+A safetensors checkpoint instead of an mmproj: test_encoder.py [--nowrite] LLM_CONFIG.json CHECKPOINT.safetensors H W [atol] (the config's vision block,
 inspect_safetensors.py): the weights are the checkpoint's own bytes (bf16 matrices, the f32 prepared copies of the small tensors)."""
 import sys, os, json, numpy as np, gguf, re
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 import encoder as EN, vk_common as V, ref_vit as R
+NOWRITE_ARG = "--nowrite" in sys.argv
+if NOWRITE_ARG:
+    sys.argv.remove("--nowrite")
 ST = sys.argv[1].endswith(".json")   # a safetensors checkpoint (see above)
 if ST:
     import st_load
@@ -43,7 +46,7 @@ print("kernels:", len(p.kernels), "launches:", len(p.ops), "T", T, "M", M, "ref 
 # expectation over the full padded buffer: rows >= M are never written (buffers start at 0), so expect zeros there
 full = np.zeros(EN.buffers(c, T, M)["out"], np.float32); full[: M * c["out_row"]] = ref.reshape(-1)
 ea = cs.arr(full)
-NOWRITE = bool(os.environ.get("VISION_TEST_NOWRITE"))   # loom-test of some SDKs cannot execute check.file.write.npy: judge by tolerance levels only
+NOWRITE = NOWRITE_ARG   # --nowrite: judge by tolerance levels only (no output file: the SDK's loom-test may not execute check.file.write.npy)
 if not NOWRITE:
     cs.lines.append(f'  check.file.write.npy value({bufs["out"][0]}) path("got.npy") mode(always) : {bufs["out"][1]}')
     cs.lines.append(f"  check.expect.approximate actual({bufs['out'][0]}) expected({ea[0]}) atol({atol:e}) rtol({RTOL}) nan(different) : {bufs['out'][1]}, {ea[1]}")

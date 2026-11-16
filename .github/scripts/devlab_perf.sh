@@ -542,7 +542,7 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       ( cd "${KIT[$p1]}/vision/tests" && bash run_tests.sh ) > "$out/vtest_$p1.log" 2>&1; rc=$?
       # the whole encoder: a safetensors package reads the checkpoint's tensors (CFG.json CHECKPOINT), a GGUF package its mmproj
       eargs=$("$T" -c "import json,sys; c=json.load(open(sys.argv[1])); v=c['vision']; print(sys.argv[1] + ' ' + c['weights']['files'][0] if v.get('source') == 'safetensors' else v['mmproj'])" "$D/$p1/pkg/llm_config.json")
-      ( cd "${KIT[$p1]}/vision" && VISION_TEST_NOWRITE=1 "$T" test_encoder.py $eargs "${vh%x*}" "${vh#*x}" ) > "$out/vtest_encoder_$p1.log" 2>&1
+      ( cd "${KIT[$p1]}/vision" && "$T" test_encoder.py --nowrite $eargs "${vh%x*}" "${vh#*x}" ) > "$out/vtest_encoder_$p1.log" 2>&1
       tail -3 "$out/vtest_encoder_$p1.log"
       grep -q "^ENCODER PASS" "$out/vtest_encoder_$p1.log" || rc=1
       res[$s]="$([ $rc = 0 ] && echo PASS || echo FAIL) ($(grep -c '^PASS' "$out/vtest_$p1.log") kernel cases passed, $(grep -c '^FAIL\|^COMPILE' "$out/vtest_$p1.log") failed; encoder $vh: $(grep -o '^ENCODER [A-Z]*' "$out/vtest_encoder_$p1.log" | tail -1))";;
