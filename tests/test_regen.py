@@ -16,6 +16,7 @@ from unittest import mock
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "fleet"))
 import regen  # noqa: E402
+import sdk_package  # noqa: E402
 
 DATA = os.path.join(ROOT, "tests", "data", "regen")
 JOB = "rab-unsloth-gemma-4-e2b-it-loom"
@@ -363,6 +364,11 @@ class SdkAbTest(Base):
             regen.main(["collect", self.state])
         return regen.State(self.state)
 
+    def package_recorded(self, e, h, rev="h" * 40):
+        st = regen.State(self.state)
+        st.jobs[e["name"] if "name" in e else JOB]["package"] = {"revision": rev, "programs_sha256": h, "base": "c" * 40}
+        st.save()
+
     GOOD = {"decode": 1.02, "decode_2k": 1.01, "prefill_8k": 1.05, "decode_32k": 0.99, "streams4": 1.0}
 
     def test_plan_pins_old_and_new_to_the_manifest_staging_revision(self):
@@ -458,11 +464,13 @@ class SdkAbTest(Base):
         self.e(self.plan_sdk())
         e = self.collect_with(self.GOOD).jobs[JOB]
         open(os.path.join(e["dir"], "programs_sha256_staging.txt"), "w").write("b" * 64 + "\n")   # the programs the job BUILT (devlab_perf.sh)
+        self.package_recorded(e, "b" * 64)
         calls = []
 
         def hf_snapshot(repo, rev, out):
             calls.append(("snapshot", repo, rev))
-            os.makedirs(out, exist_ok=True)
+            os.makedirs(os.path.join(out, "program"), exist_ok=True)
+            open(os.path.join(out, "program", "llm.loom"), "w").write("x")
             json.dump({"card": {"memory_bytes": 1}, "devices": {}}, open(os.path.join(out, "info.json"), "w"))
             open(os.path.join(out, "README.md"), "w").write("x")
 
@@ -472,6 +480,7 @@ class SdkAbTest(Base):
                 shutil.copy(os.path.join(cwd, "info_prev.json"), os.path.join(cwd, "info_new.json"))
             return ""
         with mock.patch.object(regen, "hf_snapshot", hf_snapshot), mock.patch.object(regen, "hf_head", lambda r: "h" * 40), \
+                mock.patch.object(regen.card_lib, "programs_sha256", lambda d: "b" * 64), \
                 mock.patch.object(regen, "run_tool", run_tool), contextlib.redirect_stdout(io.StringIO()):
             regen.main(["ingest", self.state])
         self.assertEqual(calls[0], ("snapshot", "loom-fun-staging/" + SLUG, "h" * 40))   # the head (v0.2 package), not the v0.1 revision the A/B started from
@@ -481,6 +490,199 @@ class SdkAbTest(Base):
         self.assertEqual(e["stage"], "ingested")
         self.assertIn("decode +2.0 %", e["message"])
         self.assertIn("prefill +5.0 %", e["message"])
+
+    def ingest_stopped(self, h_package, h_job, head=None):
+        self.e(self.plan_sdk())
+        e = self.collect_with(self.GOOD).jobs[JOB]
+        open(os.path.join(e["dir"], "programs_sha256_staging.txt"), "w").write(h_job + "\n")
+        if h_package:
+            self.package_recorded(e, h_package)
+        with mock.patch.object(regen, "hf_snapshot", side_effect=AssertionError("no snapshot of a model that stops")), \
+                mock.patch.object(regen, "hf_head", lambda r: "h" * 40), contextlib.redirect_stdout(io.StringIO()):
+            regen.main(["ingest", self.state])
+        return regen.State(self.state).jobs[JOB]
+
+    def test_ingest_stops_on_a_programs_hash_other_than_the_jobs(self):
+        e = self.ingest_stopped("a" * 64, "b" * 64)
+        self.assertEqual(e["stage"], "needs_decision")
+        self.assertIn("not the ones the job built", e["reason"])
+
+    def test_ingest_stops_when_no_package_was_published(self):
+        e = self.ingest_stopped(None, "b" * 64)
+        self.assertEqual(e["stage"], "needs_decision")
+        self.assertIn("regen.py package", e["reason"])
+
+    def test_ingest_stops_when_the_head_lost_the_package_programs(self):
+        self.e(self.plan_sdk())
+        e = self.collect_with(self.GOOD).jobs[JOB]
+        open(os.path.join(e["dir"], "programs_sha256_staging.txt"), "w").write("b" * 64 + "\n")
+        self.package_recorded(e, "b" * 64)
+
+        def snap(repo, rev, out):
+            os.makedirs(os.path.join(out, "program"))
+            open(os.path.join(out, "program", "llm.loom"), "w").write("someone else's")
+        with mock.patch.object(regen, "hf_snapshot", snap), mock.patch.object(regen, "hf_head", lambda r: "h" * 40), \
+                contextlib.redirect_stdout(io.StringIO()):
+            regen.main(["ingest", self.state])
+        e = regen.State(self.state).jobs[JOB]
+        self.assertEqual(e["stage"], "needs_decision")
+        self.assertIn("package", e["reason"])
+
+
+def v01_model():
+    """a published (v0.1.0 era) model.json: pool_capacity, origins, a parameter file origin, a per-GPU preset"""
+    return {"schema_version": 1, "model": {"id": "a/b"}, "programs": {"source": {"inputs": ["program/control.loom"]}},
+            "variants": {"gguf": {"services": {"chat": {"config": {"llm.card": True}, "parameters": {"model": {"files": [
+                {"path": "parameter/m.gguf", "format": "gguf", "origin": "@checkpoint/m.gguf"}]}}}}}},
+            "origins": {"checkpoint": {"kind": "hf", "repository": "a/b-GGUF", "revision": "r" * 40}},
+            "presets": {"chat": {"execution": {"context_capacity": 4096, "pool_capacity": 8192, "draft_depth": 3}},
+                        "chat-r9700": {"execution": {"context_capacity": 4096, "pool_capacity": 8192, "draft_depth": 2}}}}
+
+
+def v02_model():
+    """what the canonical build writes for it: no pool_capacity, no origins, a new config key"""
+    m = v01_model()
+    m.pop("origins")
+    m["presets"].pop("chat-r9700")
+    m["presets"]["chat"]["execution"].pop("pool_capacity")
+    m["variants"]["gguf"]["services"]["chat"]["config"]["llm.logits"] = False
+    m["variants"]["gguf"]["services"]["chat"]["parameters"]["model"]["files"][0].pop("origin")
+    m["programs"]["source"]["inputs"].append("llm_config.json")
+    return m
+
+
+class PackageTest(Base):
+    """regen.py package: the v0.2 programs onto the staging repo (offline: a fake snapshot, a fake canonical build, the upload as a dry run)"""
+    PUBLISHED_CARD = ("README.md", "info.json", "REPORT.md", "tokenizer.json", "model.json.lock")
+
+    def write_tree(self, d, programs, model, gen=None, extra=()):
+        os.makedirs(os.path.join(d, "program"), exist_ok=True)
+        for n, t in programs.items():
+            open(os.path.join(d, "program", n), "w").write(t)
+        for n, t in (gen or {}).items():
+            os.makedirs(os.path.join(d, "gen"), exist_ok=True)
+            open(os.path.join(d, "gen", n), "w").write(t)
+        open(os.path.join(d, "weights.loom"), "w").write("w")
+        json.dump(model, open(os.path.join(d, "model.json"), "w"))
+        json.dump({"gguf": "m.gguf"}, open(os.path.join(d, "llm_config.json"), "w"))
+        for f in extra:
+            open(os.path.join(d, f), "w").write(f)
+
+    def setUp(self):
+        super().setUp()
+        self.snap = os.path.join(self.tmp, "snap")
+        self.write_tree(self.snap, {"control.loom": "v01", "stale.loom": "gone"}, v01_model(), {"flash2.loom": "old gen"}, self.PUBLISHED_CARD)
+        self.canon = os.path.join(self.tmp, "canon")
+        self.write_tree(os.path.join(self.canon, SLUG), {"control.loom": "v02"}, v02_model(), {"flash2.loom": "new gen"})
+        open(os.path.join(self.canon, SLUG, ".ref"), "w").write("c" * 40)
+        self.want = regen.card_lib.programs_sha256(os.path.join(self.canon, SLUG))
+        self.st = self.plan("--mode", "sdk-ab")
+
+    def run_package(self, *args, head="h" * 40, new_head="n" * 40, snap_programs=None):
+        uploads = []
+        heads = iter([head, new_head])
+
+        def sh(cmd, **kw):
+            if cmd[0] == "git":   # the default --ref lookup
+                return subprocess.CompletedProcess(cmd, 1, "", "")
+            uploads.append([str(c) for c in cmd])
+            return subprocess.CompletedProcess(cmd, 0, "dry run: would upload 12 files to https://huggingface.co/x", "")
+
+        def snapshot(repo, rev, out):
+            uploads.append(["snapshot", repo, rev])
+            shutil.copytree(self.snap, out)
+        out = io.StringIO()
+        with mock.patch.object(regen, "sh", sh), mock.patch.object(regen, "hf_head", lambda r: next(heads)), \
+                mock.patch.object(regen, "hf_snapshot_small", snapshot), \
+                mock.patch.object(regen, "canonical_build", lambda st, slugs, ref: (self.canon, "c" * 40)), contextlib.redirect_stdout(out):
+            regen.main(["package", self.state, *args])
+        return regen.State(self.state), uploads, out.getvalue()
+
+    def test_dry_run_lists_the_upload_and_the_programs_hash_and_changes_nothing(self):
+        st, calls, out = self.run_package("--dry-run", "--slugs", SLUG)
+        up = next(c for c in calls if "upload" in c)
+        self.assertIn("--dry-run", up)
+        self.assertEqual(up[up.index("--org") + 1], "loom-fun-staging")
+        self.assertEqual(up[up.index("--parent-commit") + 1], "h" * 40)   # the snapshot's revision
+        self.assertNotIn("--card-only", up)
+        self.assertIn("hrx-loom 0.2.0rc1", up[up.index("--message") + 1])
+        self.assertIn(self.want, out)
+        self.assertNotIn("package", st.jobs[JOB])
+
+    def test_package_dir_has_the_canonical_programs_and_keeps_the_card(self):
+        self.run_package("--dry-run", "--slugs", SLUG)
+        pkg = os.path.join(regen.State(self.state).work, "package", SLUG, "pkg")
+        self.assertEqual(open(os.path.join(pkg, "program", "control.loom")).read(), "v02")
+        self.assertFalse(os.path.exists(os.path.join(pkg, "program", "stale.loom")))
+        self.assertEqual(open(os.path.join(pkg, "gen", "flash2.loom")).read(), "new gen")
+        for f in self.PUBLISHED_CARD:
+            self.assertTrue(os.path.isfile(os.path.join(pkg, f)), f)
+        self.assertEqual(regen.card_lib.programs_sha256(pkg), self.want)
+        m = json.load(open(os.path.join(pkg, "model.json")))
+        self.assertEqual(m["origins"], v01_model()["origins"])   # what publish_package.py prepare wrote stays
+        self.assertEqual(m["variants"]["gguf"]["services"]["chat"]["parameters"]["model"]["files"][0]["origin"], "@checkpoint/m.gguf")
+        self.assertNotIn("pool_capacity", json.dumps(m))
+        self.assertFalse(m["variants"]["gguf"]["services"]["chat"]["config"]["llm.logits"])   # the v0.2 field the canonical build adds
+
+    def test_real_run_records_the_new_revision_and_hash_and_is_idempotent(self):
+        st, calls, _ = self.run_package("--slugs", SLUG)
+        up = next(c for c in calls if "upload" in c)
+        self.assertNotIn("--dry-run", up)
+        pk = st.jobs[JOB]["package"]
+        self.assertEqual((pk["revision"], pk["programs_sha256"], pk["base"]), ("n" * 40, self.want, "c" * 40))
+        st, calls, out = self.run_package("--slugs", SLUG)   # nothing left to do: no snapshot, no upload
+        self.assertFalse(calls)
+        self.assertIn("already published", out)
+
+    def test_a_head_that_already_holds_the_programs_is_recorded_not_uploaded(self):
+        shutil.rmtree(os.path.join(self.snap, "program"))
+        shutil.copytree(os.path.join(self.canon, SLUG, "program"), os.path.join(self.snap, "program"))
+        st, calls, _ = self.run_package("--slugs", SLUG)
+        self.assertFalse([c for c in calls if "upload" in c])
+        self.assertEqual(st.jobs[JOB]["package"]["revision"], "h" * 40)
+
+    def test_default_selection_is_the_promoted_collected_jobs(self):
+        st, calls, out = self.run_package("--dry-run")
+        self.assertIn("nothing to package", out)   # the planned job is neither collected nor promoted
+        self.assertFalse(calls)
+
+    def test_model_json_with_an_unexpected_difference_stops_the_model(self):
+        m = v02_model()
+        m["presets"]["chat"]["execution"]["draft_depth"] = 5   # a serving setting that changed: not the migration
+        json.dump(m, open(os.path.join(self.canon, SLUG, "model.json"), "w"))
+        st, calls, out = self.run_package("--slugs", SLUG)
+        self.assertIn("changed presets.chat.execution.draft_depth", out)
+        self.assertFalse([c for c in calls if "upload" in c])
+        self.assertEqual(st.jobs[JOB]["stage"], "needs_decision")
+        self.assertIn("package", st.jobs[JOB]["reason"])
+        self.assertFalse(st.jobs[JOB].get("package"))
+
+    def test_a_job_that_built_other_programs_stops_the_model(self):
+        st = regen.State(self.state)
+        d = os.path.join(self.tmp, "jobdir")
+        os.makedirs(d)
+        open(os.path.join(d, "programs_sha256_staging.txt"), "w").write("e" * 64 + "\n")
+        st.jobs[JOB]["dir"] = d
+        st.save()
+        st, calls, out = self.run_package("--slugs", SLUG)
+        self.assertIn("built programs eeeeeeeeeeee", out)
+        self.assertEqual(st.jobs[JOB]["stage"], "needs_decision")
+        self.assertFalse(st.jobs[JOB].get("package"))
+
+    def test_a_weight_file_without_an_origin_is_refused(self):
+        m = v01_model()
+        m["variants"]["gguf"]["services"]["chat"]["parameters"]["model"]["files"].append({"path": "parameter/new.gguf", "format": "gguf"})
+        with self.assertRaises(ValueError):
+            from_new = v02_model()
+            from_new["variants"]["gguf"]["services"]["chat"]["parameters"]["model"]["files"].append({"path": "parameter/new.gguf", "format": "gguf"})
+            sdk_package.carry_over(m, from_new)
+
+    def test_only_sdk_ab_states_package(self):
+        st = regen.State(self.state)
+        st.d["mode"] = "ab"
+        st.save()
+        with self.assertRaises(SystemExit):
+            regen.main(["package", self.state])
 
 
 if __name__ == "__main__":

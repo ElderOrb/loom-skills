@@ -8,6 +8,7 @@
   regen.py poll    S.json                                  ONE poll of the runs (exit 0: nothing pending, 10: jobs pending); loop it every >= 120 s
   regen.py collect S.json                                  download each finished job into a fresh dir, compare, per-row verdicts
   regen.py rerun   S.json [--dry-run]                      confirming -r2 jobs for models whose verdict needs one, new batch (then: submit)
+  regen.py package S.json [--dry-run] [--slugs S...] [--ref REF]   sdk-ab: publish the v0.2 package (programs) to loom-fun-staging before `ingest`
   regen.py ingest  S.json                                  card from the job (perf / gates / roofline / build + render --check), per model
   regen.py publish S.json [--dry-run]                      card-only upload to loom-fun-staging (never loom-fun/*)
   regen.py status  S.json [--status-json status.json]      table; with --status-json: models.<slug>.<gpu> = stage / verdict / run for the dashboard
@@ -54,6 +55,7 @@ for p in (HERE, CARD, os.path.join(ROOT, "skills", "loom-kb")):
 import card_lib  # noqa: E402
 import promote_check  # noqa: E402
 import sample_lib  # noqa: E402
+import sdk_package  # noqa: E402
 
 try:
     import fcntl
@@ -113,6 +115,14 @@ def hf_head(repo):
 def hf_snapshot(repo, rev, out):
     from huggingface_hub import snapshot_download
     snapshot_download(repo, revision=rev, local_dir=out)
+    shutil.rmtree(os.path.join(out, ".cache"), ignore_errors=True)
+
+
+def hf_snapshot_small(repo, rev, out):
+    """the repo at REV without weights (the package step's snapshot: programs, tokenizer, card; never *.gguf, parameter/)"""
+    from huggingface_hub import snapshot_download
+    shutil.rmtree(out, ignore_errors=True)
+    snapshot_download(repo, revision=rev, local_dir=out, ignore_patterns=["*.gguf", "*.safetensors", "*.bin", "*.mmproj", "parameter/*"])
     shutil.rmtree(os.path.join(out, ".cache"), ignore_errors=True)
 
 
@@ -729,6 +739,11 @@ def ingest_full(st, name, e, W):
     rev = hf_head(f"{st.d['opts']['new_org']}/{slug}") if sdk else e["card_revision"].split("@")[-1]
     out = os.path.join(W, "out")
     hf_snapshot(f"{st.d['opts']['new_org']}/{slug}", rev, out)
+    if sdk:   # the package step's programs, whatever the head's revision is now (another device's card may have been published since)
+        got = card_lib.programs_sha256(out)
+        if got != e["package"]["programs_sha256"]:
+            raise RuntimeError(f"the staging head {rev[:10]} holds programs {str(got)[:12]}, not the published v0.2 package's {e['package']['programs_sha256'][:12]}: "
+                               f"another publish replaced them; run `regen.py package` again")
     shutil.copy(os.path.join(out, "info.json"), os.path.join(W, "info_prev.json"))
     prev = json.load(open(os.path.join(W, "info_prev.json")))
     mem = prev["card"]["memory_bytes"]
@@ -794,6 +809,28 @@ def ingest_strix(st, name, e, W):
     return out, hf_head(f"{st.d['opts']['new_org']}/{e['slug']}"), f"Strix re-measured on this package (run {run}): within the band; published Strix table kept"
 
 
+def job_programs(e):
+    """the programs_sha256 the job BUILT (devlab_perf.sh programs_sha256_staging.txt), or None when the job directory has none"""
+    p = os.path.join(e.get("dir") or "", "programs_sha256_staging.txt")
+    words = open(p).read().split() if os.path.isfile(p) else []
+    return words[0] if words else None
+
+
+def sdk_ingest_ready(st, name, e):
+    """sdk-ab: the v0.2 package must be published (`package`) with the programs the job measured; else this model stops with the reason"""
+    pkg, built = e.get("package"), job_programs(e)
+    why = None
+    if not pkg:
+        why = "the v0.2 package is not published yet: run `regen.py package` first"
+    elif built and built != pkg["programs_sha256"]:
+        why = f"the published v0.2 package's programs ({pkg['programs_sha256'][:12]}) are not the ones the job built and measured ({built[:12]})"
+    if why:
+        e.update(stage="needs_decision", reason=f"ingest: {why}")
+        st.log(f"{e['slug']} {e['device']}: ingest stopped: {why}")
+        st.save()
+    return why is None
+
+
 def cmd_ingest(a):
     st = State(a.state)
     if st.d["mode"] == "logits":
@@ -803,6 +840,8 @@ def cmd_ingest(a):
     todo = [(n, e) for n, e in todo if not e.get("rerun_of_me")]
     if a.slug:
         todo = [(n, e) for n, e in todo if e["slug"] in a.slug]
+    if st.d["mode"] == "sdk-ab":
+        todo = [(n, e) for n, e in todo if sdk_ingest_ready(st, n, e)]
     for name, e in todo:
         W = os.path.join(st.work, "cards", f"{e['slug']}.{e['device']}")
         shutil.rmtree(W, ignore_errors=True)
@@ -827,6 +866,110 @@ def cmd_ingest(a):
         st.save()
     if not todo:
         print("nothing to ingest")
+
+
+# ---------------------------------------------------------------- package (sdk-ab: the v0.2 programs to staging, before the card)
+
+def resolve_ref(ref):
+    r = sh(["git", "rev-parse", "--verify", "-q", ref], check=False, cwd=ROOT)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def canonical_build(st, slugs, ref):
+    """programs-only build of REF for the slugs (CPU, once for all of them; reused while the ref's commit is the same). -> (dir, commit)"""
+    sha = resolve_ref(ref)
+    if not sha:
+        die(f"--ref {ref}: not a git ref here (git fetch origin first)")
+    canon = os.path.join(st.work, "canon")
+    todo = [s for s in slugs if not (os.path.isfile(os.path.join(canon, s, ".ref")) and open(os.path.join(canon, s, ".ref")).read() == sha
+                                      and os.path.isfile(os.path.join(canon, s, "model.json")))]
+    if todo:
+        r = sh([PY, os.path.join(HERE, "build_fleet.py"), "--ref", sha, "--out", canon, "--with-gen", "--slugs", ",".join(todo)], check=False)
+        print(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "")
+        for s in todo:
+            if os.path.isfile(os.path.join(canon, s, "model.json")) and any(f.endswith(".loom") for f in os.listdir(os.path.join(canon, s, "program"))):
+                open(os.path.join(canon, s, ".ref"), "w").write(sha)
+    return canon, sha
+
+
+def package_one(st, slug, canon, sha, dry, env):
+    """One model: snapshot the staging repo, assemble the v0.2 package, upload it. -> {revision, programs_sha256, base} (revision None in a dry run)"""
+    org = st.d["opts"]["new_org"]
+    repo = f"{org}/{slug}"
+    want = card_lib.programs_sha256(os.path.join(canon, slug))
+    if not want:
+        raise RuntimeError("the canonical build has no programs")
+    W = os.path.join(st.work, "package", slug)
+    # the snapshot is the repo's head, not the manifest's staging.revision: that revision is the A/B's old side (the card the job's "fun" variant
+    # served), and the head carries the card commits made since (model.json, Quick start); the package replaces the programs, so the head's own are
+    # of no interest, and --parent-commit = the head makes a concurrent publish fail the upload instead of being overwritten
+    rev = hf_head(repo)
+    snap, out = os.path.join(W, "snap"), os.path.join(W, "pkg")
+    hf_snapshot_small(repo, rev, snap)
+    if card_lib.programs_sha256(snap) == want:   # a crashed run uploaded already, or the package was published by hand: nothing to do
+        return {"revision": rev, "programs_sha256": want, "base": sha, "already": True}
+    alts = {card_lib.gpu_preset_name(sdk_package.load(os.path.join(snap, "model.json")), g) for g in card_lib.GPUS if card_lib.GPUS[g].get("preset_suffix")}
+    changes = sdk_package.assemble(snap, os.path.join(canon, slug), out, alts)
+    got = card_lib.programs_sha256(out)
+    if got != want:
+        raise RuntimeError(f"assembled package programs {str(got)[:12]} differ from the canonical build's {want[:12]}")
+    msg = f"Loom package rebuilt for hrx-loom {SDK_NEW} from loom-skills {sha[:10]} (card files unchanged until the card step)"
+    r = sh([PY, f"{CARD}/publish_package.py", "upload", out, "--repo", slug, "--org", org, "--parent-commit", rev, "--message", msg]
+           + (["--dry-run"] if dry else []), check=False, env=env)
+    if r.returncode:
+        raise RuntimeError(f"upload: {(r.stdout + r.stderr)[-400:]}")
+    print(f"{slug}: {r.stdout.strip().splitlines()[-1][:300]}\n   programs_sha256 {got}; model.json added by v0.2: {', '.join(p for _, p in changes) or 'nothing'}")
+    return {"revision": None if dry else hf_head(repo), "programs_sha256": got, "base": sha}
+
+
+def cmd_package(a):
+    st = State(a.state)
+    if st.d["mode"] != "sdk-ab":
+        die("package is the sdk-ab step (other modes publish no package)")
+    org = st.d["opts"]["new_org"]
+    if org != STAGING_ORG or "/" in org.strip("/"):
+        die(f"package writes {STAGING_ORG} only")
+    ok = ("collected", "ingested", "published")
+    if a.slugs:   # a named model is packaged whatever its stage (a model waiting for a confirming run, a dry run)
+        picked = [(n, e) for n, e in st.jobs.items() if e["slug"] in a.slugs and e["stage"] not in ("skipped", "unsupported")]
+    else:
+        picked = [(n, e) for n, e in st.jobs.items() if e["stage"] in ok and e.get("decision") == "promote"]
+    slugs = sorted({e["slug"] for _, e in picked})
+    missing = sorted(set(a.slugs or ()) - set(slugs))
+    if missing:
+        die(f"no job in the state for: {', '.join(missing)}")
+    if not slugs:
+        return print("nothing to package")
+    canon, sha = canonical_build(st, slugs, a.ref or ("origin/" + st.d["opts"]["base"] if resolve_ref("origin/" + st.d["opts"]["base"]) else st.d["opts"]["base"]))
+    env = dict(os.environ, PATH=LOOMBIN + os.pathsep + os.environ["PATH"])
+    for slug in slugs:
+        jobs = [(n, e) for n, e in st.jobs.items() if e["slug"] == slug]
+        if not a.dry_run and all(e.get("package") for _, e in jobs):
+            print(f"{slug}: package already published ({jobs[0][1]['package']['revision'][:10]})")
+            continue
+        try:
+            if not os.path.isfile(os.path.join(canon, slug, ".ref")):
+                raise RuntimeError("canonical build failed: " + open(os.path.join(canon, slug, "build.log")).read()[-300:])
+            res = package_one(st, slug, canon, sha, a.dry_run, env)
+            for _, e in picked:   # a job that measured other programs than the canonical build's must not be ingested against them
+                built = job_programs(e) if e["slug"] == slug else None
+                if built and built != res["programs_sha256"]:
+                    raise RuntimeError(f"the job {e['device']} built programs {built[:12]}, the canonical build of {sha[:10]} has {res['programs_sha256'][:12]} (the base moved since the job was submitted)")
+        except (RuntimeError, SystemExit, ValueError) as ex:
+            print(f"{slug}: package stopped: {str(ex)[-400:]}")
+            if not a.dry_run:
+                for _, e in jobs:
+                    e.update(stage="needs_decision", reason=f"package: {str(ex)[-300:]}")
+                st.log(f"{slug}: package stopped")
+                st.save()
+            continue
+        if not a.dry_run:
+            for _, e in jobs:
+                e["package"] = {**res, "at": now()}
+                if str(e.get("reason", "")).startswith("package:"):
+                    e.pop("reason")
+            st.log(f"{slug}: v0.2 package at {res['revision'][:10]} (programs {res['programs_sha256'][:12]})")
+            st.save()
 
 
 # ---------------------------------------------------------------- publish (card only, staging only)
@@ -953,11 +1096,11 @@ def main(argv=None):
     p.add_argument("--priority", action="store_true", help="the batches of this plan go to the head of the next submit wave and ignore --max-inflight (a targeted job, not a sweep)")
     p.set_defaults(fn=cmd_plan)
     for name, fn in (("submit", cmd_submit), ("poll", cmd_poll), ("collect", cmd_collect), ("rerun", cmd_rerun), ("ingest", cmd_ingest),
-                     ("publish", cmd_publish), ("status", cmd_status), ("adopt", cmd_adopt), ("accept", cmd_accept)):
+                     ("publish", cmd_publish), ("package", cmd_package), ("status", cmd_status), ("adopt", cmd_adopt), ("accept", cmd_accept)):
         q = sub.add_parser(name)
         q.add_argument("state")
         q.set_defaults(fn=fn)
-        if name in ("submit", "rerun", "publish"):
+        if name in ("submit", "rerun", "publish", "package"):
             q.add_argument("--dry-run", action="store_true")
         if name == "submit":
             q.add_argument("--max-batches", type=int)
@@ -972,6 +1115,9 @@ def main(argv=None):
             q.add_argument("--run", required=True)
         if name == "ingest":
             q.add_argument("--slug", action="append")
+        if name == "package":
+            q.add_argument("--slugs", nargs="+", help="only these models, whatever their stage (default: the collected jobs that were promoted)")
+            q.add_argument("--ref", help="the git ref the canonical build is made at (default: origin/<the state's base>)")
     a = ap.parse_args(argv)
     a.fn(a)
 
