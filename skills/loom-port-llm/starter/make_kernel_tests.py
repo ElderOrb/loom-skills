@@ -550,6 +550,10 @@ if cfg.get("sliding_layers") and (cfg.get("head_dim_swa") or D) == D and ((RD_SW
     save("r_qs", qs.reshape(t, -1).astype(np.float32))
     cases.append(cases[-1].replace("@qk_rope {", "@qk_rope_swa {").replace("@g_qk_rope_store[", "@g_qk_rope_store_swa[")
                  .replace('path("r_qe.npy")', 'path("r_qs.npy")'))
+# 3a. output head (argmax over the vocabulary) for one selected span of 3 tokens
+t = 3
+head_name = "output.weight" if "output.weight" in T else "token_embd.weight"
+Wh = deq(head_name).astype(np.float64)
 def _pkg_llm_text():
     """The generated llm.loom of the package under test (next to the config, or in a build dir beside it), or None."""
     import glob
@@ -584,10 +588,6 @@ def q8_rows_dot(W, xs, rows=8192):
     return out
 
 
-# 3a. output head (argmax over the vocabulary) for one selected span of 3 tokens
-t = 3
-head_name = "output.weight" if "output.weight" in T else "token_embd.weight"
-Wh = deq(head_name).astype(np.float64)
 hs = rng.standard_normal((t, H)).astype(np.float32)
 HEAD_Q8 = ACT_Q8 and T[head_name].tensor_type.name.lower() in IQ_FMTS
 logits = Wh @ (q8_ref(hs[-1:])[0] if HEAD_Q8 else hs[-1]).astype(np.float64)
