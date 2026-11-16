@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st ogdn exp4: dev gates vs vLLM on decode.spec.gdn_fold, vLLM references from exp3 (run 43840095234) so Loom is not restarted after a vLLM load; warm-up func first",
+ "_comment": "mxfp4st ogdn exp5: dev gates vs vLLM on decode.spec.gdn_fold with every vLLM reference cached (exp3 + exp4 fills: compare/vision included), so the gates never restart Loom after a vLLM load",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
@@ -7,7 +7,7 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "mxfp4-ogdn-exp4",
+   "name": "mxfp4-ogdn-exp5",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
    "kit": null,
    "llamacpp": "b1375",
@@ -26,6 +26,7 @@
     }
    ],
    "steps": [
+    "func:fold",
     "func:fold",
     "gates:fold:dev"
    ],
