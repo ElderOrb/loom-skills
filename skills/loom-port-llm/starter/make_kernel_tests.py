@@ -1219,6 +1219,52 @@ def e4m3_bytes(v):
     return b.astype(np.uint8).view(np.int8)
 from gen_mxfp4s import f8_enabled as _f8_on  # noqa: E402
 if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gemm.mxfp4s_f8: the fp8 twins of the row-scale producers (ktest_select skips them when the build has none)
+    # the fp8 GEMM on the model's own split-plane weights (real nibbles and scales; the kbench suite gemm_mxfp4s tests it on synthetic planes): the exactly
+    # dequantized weights times the e4m3 activations it is given, one case per (K, plain / SwiGLU pair)
+    _f8s_pick = {}
+    for li in range(cfg["layers"]):
+        for nm_ in ("ffn_gate", "ffn_down", "attn_qkv", "attn_gate", "ssm_out", "attn_q"):
+            name = f"blk.{li}.{nm_}.weight"
+            if name in T and T[name].tensor_type.name.lower() in SPLIT:
+                sw_ = nm_ == "ffn_gate" and f"blk.{li}.ffn_up.weight" in T and T[f"blk.{li}.ffn_up.weight"].tensor_type.name.lower() in SPLIT
+                _f8s_pick.setdefault((int(T[name].shape[0]), sw_), (name, sw_))
+    for name, swiglu in _f8s_pick.values():
+        W = deq(name); n, K = W.shape
+        if K % 128:
+            continue
+        n_use = min(n, 1024 + n % 128) // (64 if swiglu else 128) * (64 if swiglu else 128)
+        sel = lambda nm: (raw(nm).reshape(n, -1)[:n_use].reshape(-1), raw_scale(nm).reshape(n, -1)[:n_use].reshape(-1))
+        Wr, Ws_ = sel(name); Wd = W[:n_use].astype(np.float64)
+        if swiglu:
+            up = name.replace("ffn_gate", "ffn_up"); U = deq(up)[:n_use].astype(np.float64); Ur, Us_ = sel(up)
+        rows = 512
+        xf = e4m3_round(np.clip(rng.standard_normal((rows, K)) * 30.0, -440, 440))
+        inv = rng.uniform(0.25, 2.0, rows).astype(np.float32)
+        sc = np.stack([np.ones(rows, np.float32), inv * np.float32(2.0 ** -8)], 1)
+        g = (xf @ Wd.T) * inv[:, None].astype(np.float64)
+        yv = ffn_act(g) * ((xf @ U.T) * inv[:, None].astype(np.float64)) if swiglu else g
+        tag = f"gm8s_{'sw' if swiglu else 'st'}_{K}_{n_use}"
+        save(tag + "_x", e4m3_bytes(xf)); save(tag + "_s", sc); save(tag + "_y", yv.astype(np.float32)); save(tag + "_w", Wr); save(tag + "_ws", Ws_)
+        wdecl = f'  %w = check.file.read.npy path("{tag}_w.npy") : {ty(Wr)}\n  %ws = check.file.read.npy path("{tag}_ws.npy") : {ty(Ws_)}\n'
+        wargs, wtys = "%w, %ws", f"{ty(Wr)}, {ty(Ws_)}"
+        if swiglu:
+            save(tag + "_u", Ur); save(tag + "_us", Us_)
+            wdecl += f'  %u = check.file.read.npy path("{tag}_u.npy") : {ty(Ur)}\n  %us = check.file.read.npy path("{tag}_us.npy") : {ty(Us_)}\n'
+            wargs += ", %u, %us"; wtys += f", {ty(Ur)}, {ty(Us_)}"
+        tol = 1.0e-3 * float(np.abs(yv).std() + 1e-6)
+        cases.append(f"""check.case public @{tag} {{
+  %rows = check.literal value({rows}) : index
+  %k = check.literal value({K}) : index
+  %n = check.literal value({n_use}) : index
+  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{rows}x{K}xi8>
+  %s = check.file.read.npy path("{tag}_s.npy") : tensor<{rows}x2xf32>
+{wdecl}  %e = check.file.read.npy path("{tag}_y.npy") : tensor<{rows}x{n_use}xf32>
+  %y = check.generate.fill value(0.0) : tensor<{rows}x{n_use}xf32>
+  kernel.launch @g_gemm_mxfp4s_{'swiglu' if swiglu else 'store'}_f8_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, {wargs}, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {wtys}, tensor<{rows}x{n_use}xf32>)
+  check.expect.close actual(%y) expected(%e) atol({tol:.3e}) rtol(2.0e-3) nan(different) : tensor<{rows}x{n_use}xf32>
+  check.return
+}}
+""")
     # the row-scale producer's fp8 twin (the live-row-skip variant the prefill launches): row 1 is a padding row
     rs_k = cfg["ffn"] if isinstance(cfg.get("ffn"), int) else H
     f8_x = (rng.standard_normal((3, rs_k)) * np.array([[1e-3], [1.0], [3e5]])).astype(np.float32)
