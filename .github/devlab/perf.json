@@ -15,10 +15,10 @@
    "variants": [
     {
      "name": "c104",
-     "context": 106496,
+     "context": 98304,
      "execution": {
-      "context_capacity": 106496,
-      "pool_capacity": 106496
+      "context_capacity": 98304,
+      "pool_capacity": 98304
      },
      "build_args": [
       "--slug",
