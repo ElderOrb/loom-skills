@@ -15,7 +15,7 @@
 import json, math, os, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate, chunk_mode  # noqa: E402
+from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate, chunk_mode, fused_mode  # noqa: E402
 from formats import SPLIT, SCALE_DIV  # noqa: E402
 
 CFG = json.load(open(os.environ.get("LLM_CONFIG") or sys.argv[1]))
@@ -4928,22 +4928,57 @@ def gdn_layer(i, b, nm, sz, par):
         REC = REC + "\n  scf.if %gemm {\n  " + REC.replace("@g_gdn_recurrence[", "@g_gdn_recurrence_pf[") + "\n  }"
     elif chunk_mode(g) == "group":   # gfx12: spans of 64+ tokens run the chunked kernel (a gfx11 build launches nothing here: its kernel takes every span)
         REC = REC + "\n  scf.if %gemm {\n  // dual-group: rdna4 " + REC.strip().replace("@g_gdn_recurrence[", "@g_gdn_chunk_rdna4[") + "\n  // dual-group: end\n  }"
+    FRONT = f"""  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_{i}, %metadata, %info, %origins, %arena, %gq, %conv_{i}, %gs) : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer)
+  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq) : [index](index, index, index, buffer, buffer, buffer, buffer)
+  kernel.launch @g_gdn_qk_norm[%t](%t, %gs, %ginv) : [index](index, buffer, buffer)"""
+    GATE = f"""  kernel.launch @g_gdn_norm_gate[%t](%t, %info, %graw, %ssm_norm_{i}, %gz, %o) : [index](index, buffer, buffer, view<{DV}xf32>, buffer, buffer)"""
+    if fused_mode(g):   # gfx12, GEMM-shape epochs: two launches (gen_gdn_fused.py) in place of conv .. norm_gate; gfx11 and short epochs keep the chain
+        REC0 = REC.split("\n")[0]
+        FA = (f"kernel.launch @g_gdn_fa_rdna4[%t, %spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %conv_{i}, %galpha, %gbeta, %ssm_a_{i}, %dt_bias_{i}, %gs)"
+              f" : [index, index](index, index, index, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer, buffer, view<{HV}xf32>, view<{HV}xf32>, buffer)")
+        FB = (f"kernel.launch @g_gdn_fb_rdna4[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %gs, %ssm_norm_{i}, %gz, %o)"
+              f" : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{DV}xf32>, buffer, buffer)")
+        # The GEMM branch is indented, so draft/gen_draft.py's verify capture (before each 2-space g_gdn_conv launch) lands in the else branch
+        # only; the `// gdn-capture:` marker places the same capture at the head of the GEMM branch: a verify epoch can pack another
+        # request's prompt with the speculative spans (t >= 64), and its replay restores these inputs.
+        ind = lambda t: "\n".join("  " + l for l in t.split("\n"))
+        # GDN_FUSED2_MIN (choice prefill.gdn.fused2_min): the fused pair runs in epochs of at least this many rows (64 = every GEMM epoch, 128 =
+        # %big: a 64-row epoch, i.e. a prompt or tail under 64 tokens, keeps the chain, whose spans under 64 run the exact sequential kernel)
+        fmin = int(os.environ.get("GDN_FUSED2_MIN", "64"))
+        assert fmin in (64, 128), "GDN_FUSED2_MIN: 64 or 128"
+        # decode.spec.gdn_fold: draft/gen_draft.verify_program drops the fused branch from @llm_verify (`// gdn-fused:` .. `// gdn-chain:` and
+        # the closing brace before `// gdn-fused-end:`), so the chain must also cover the GEMM epochs' long spans there (the full REC).
+        from gen_gdn import fold_enabled
+        cond, rest = ("%gemm", f"{FRONT}\n{REC if fold_enabled(g) else REC0}\n{GATE}") if fmin == 64 else ("%big", f"{FRONT}\n{REC}\n{GATE}")
+        MIX = (f"  // gdn-fused: %layer_{i}\n  scf.if {cond} {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
+               f"  }} else {{\n  // gdn-chain: %layer_{i}\n{rest}\n  }}\n  // gdn-fused-end: %layer_{i}")
+    else:
+        MIX = f"{FRONT}\n{REC}\n{GATE}"
     T = P + [
         "  " + lin(fmt_of(nm("attn_qkv")), "%h", "%s_h", f"%wqkv_{i}", sz("attn_qkv"), "%gq", "%nH", "%nC", H) + "\n",
         "  " + lin(fmt_of(nm("attn_gate")), "%h", "%s_h", f"%wz_{i}", sz("attn_gate"), "%gz", "%nH", "%nVD", H) + "\n",
-        "  " + lin_mv(fmt_of(nm("ssm_alpha")), "%h", f"%walpha_{i}", sz("ssm_alpha"), "%galpha", "%nHV", H) + "\n",
-        "  " + lin_mv(fmt_of(nm("ssm_beta")), "%h", f"%wbeta_{i}", sz("ssm_beta"), "%gbeta", "%nHV", H) + "\n",
-        f"""  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_{i}, %metadata, %info, %origins, %arena, %gq, %conv_{i}, %gs) : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer)
-  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq) : [index](index, index, index, buffer, buffer, buffer, buffer)
-  kernel.launch @g_gdn_qk_norm[%t](%t, %gs, %ginv) : [index](index, buffer, buffer)
-{REC}
-  kernel.launch @g_gdn_norm_gate[%t](%t, %info, %graw, %ssm_norm_{i}, %gz, %o) : [index](index, buffer, buffer, view<{DV}xf32>, buffer, buffer)
+        ab_q8("  " + lin_mv(fmt_of(nm("ssm_alpha")), "%h", f"%walpha_{i}", sz("ssm_alpha"), "%galpha", "%nHV", H), True) + "\n",
+        ab_q8("  " + lin_mv(fmt_of(nm("ssm_beta")), "%h", f"%wbeta_{i}", sz("ssm_beta"), "%gbeta", "%nHV", H), False) + "\n",
+        f"""{MIX}
   scf.if %gemm {{
     kernel.launch @g_row_scale_f16[%t](%t, %nVD, %o, %s_o, %o16) : [index](index, index, buffer, buffer, buffer)
   }}
 """,
         "  " + lin(fmt_of(nm("ssm_out")), "%o", "%s_o", f"%wout_{i}", sz("ssm_out"), "%y", "%nVD", "%nH", VD) + "\n"]
     return "".join(T)
+
+
+def ab_q8(text, first):
+    """GDN_AB_Q8 (mxfp4s, GEMM-shape epochs): the alpha / beta projections as the 16-token int8 matvec on h quantized once to int8
+    (g_quant_q8 before alpha) instead of the f32 4-token matvec over h (two reads of the f32 rows)."""
+    if os.environ.get("GDN_AB_Q8", "") in ("", "0") or "@g_mv_mxfp4s_k5120_t4[" not in text:
+        return text
+    def sub(m):
+        ind, line = m.group(1), m.group(2)
+        new = line.replace("@g_mv_mxfp4s_k5120_t4[", "@g_mv_mxfp4s_k5120_t16_q8[", 1).replace("%zero_i32, %h,", "%zero_i32, %h16q,", 1)
+        q = f"{ind}kernel.launch @g_quant_q8[%t, %nH](%t, %nH, %h, %h16q) : [index, index](index, index, buffer, buffer)\n" if first else ""
+        return q + ind + new
+    return re.sub(r"^( *)(kernel\.launch @g_mv_mxfp4s_k5120_t4\[.*)$", sub, text, count=1, flags=re.M)
 
 
 def gelu_scalar(o, x, ind="      "):
@@ -5534,8 +5569,17 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
     if GDN:
         g = GDN
         for name, width in (("gq", g["C"]), ("gs", g["C"]), ("gz", g["VD"]), ("graw", g["VD"]), ("ginv", 2 * g["HK"]), ("galpha", g["HV"]), ("gbeta", g["HV"])):
-            L_.append(f"  %{name}_bytes = index.constant {width * 4} : offset\n  %{name}_size = index.scale %t, %{name}_bytes : index, offset -> offset\n"
-                      f"  %{name} = buffer.alloca<global> align(256) %{name}_size : buffer\n")
+            gw = name == "gs" and fused_mode(g)   # gfx12 fused GDN prefill: %gs (unused there) also holds the chunk workspace, ceil(t / 32) + spans + 1 slots
+            L_.append(f"  %{name}_bytes = index.constant {width * 4} : offset\n  %{name}_size{'_own' if gw else ''} = index.scale %t, %{name}_bytes : index, offset -> offset\n")
+            if gw:
+                from gen_gdn_fused import nslots_bytes
+                L_.append(f"  %gw_c31 = index.constant 31 : index\n  %gw_c32 = index.constant 32 : index\n  %gw_a = index.add %t, %gw_c31 : index\n"
+                          f"  %gw_b = index.div %gw_a, %gw_c32 : index\n  %gw_c = index.add %gw_b, %spans : index\n  %gw_one = index.constant 1 : index\n"
+                          f"  %gw_n = index.add %gw_c, %gw_one : index\n  %gw_slot = index.constant {nslots_bytes(g) // 256} : index\n"
+                          f"  %gw_units = index.mul %gw_n, %gw_slot : index\n  %gs_row = index.constant {width * 4 // 256} : index\n"
+                          f"  %gs_c63 = index.constant 63 : index\n  %gs_c64 = index.constant 64 : index\n  %gs_ta = index.add %t, %gs_c63 : index\n  %gs_tb = index.div %gs_ta, %gs_c64 : index\n  %gs_tp = index.mul %gs_tb, %gs_c64 : index\n  %gs_units = index.mul %gs_tp, %gs_row : index\n  %gs_umax = index.max %gs_units, %gw_units : index\n"
+                          f"  %gs_unit = index.constant 256 : offset\n  %gs_size = index.scale %gs_umax, %gs_unit : index, offset -> offset\n")
+            L_.append(f"  %{name} = buffer.alloca<global> align(256) %{name}_size : buffer\n")
         L_.append(f"  %nC = index.constant {g['C']} : index\n  %nVD = index.constant {g['VD']} : index\n  %nHV = index.constant {g['HV']} : index\n")
     if not QK_NORM:
         L_.append("  %no_norm = buffer.alloca<global> align(256) %row_bytes : buffer\n")
@@ -5953,6 +5997,11 @@ if __name__ == "__main__":
         from gen_mxfp4s import fuse_mxfp4s_f8 as _f8s_fuse
         text, _nf8s = _f8s_fuse(text)
         print("mxfp4s fp8 groups:", _nf8s)
+        from gen_mxfp4s import ab_f8_enabled as _abf8_on
+        if GDN and _abf8_on():   # gfx12: the GDN alpha / beta projections as one paired skinny fp8 GEMM (choice prefill.gdn.ab_f8)
+            from gen_mxfp4s import ab_f8 as _abf8
+            text, _nab = _abf8(text, GDN["HV"], H)
+            print("alpha/beta fp8 layers:", _nab)
     if seg_tokens():
         text = seg_attention(text)
     SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in text}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
