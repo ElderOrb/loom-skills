@@ -45,9 +45,20 @@
    "when": {},
    "set": {
     "draft.propose.head_rows": 49152,
-    "draft.propose.block": "q8_0"
+    "draft.propose.block": "q4_0"
    },
-   "evidence": "MTP proposals read load-time copies, the verified path keeps the checkpoint's bf16 tensors (llm_advance / llm_verify byte-identical with the choices off): the NextN block's matrices as Q8_0 (0.85 GB bf16 -> 0.45 GB) and a Q4_0 copy of head rows [0, 49152) + the added-token rows (0.15 GB; the bf16 head is 2.54 GB). DevLab R9700, MTP depth 3, one job each, ABBA sessions, repeat-rows 3 (exp5 43790944592, on the fast kernels): decode 53.1 -> 69.0 tok/s (+30 %), decode_2k 51.1 -> 69.6, decode_32k 46.5 -> 55.3, acceptance .50 -> .46 (bf16 head, bf16 block: .50); before the fast kernels (exp4 43786704337): 38.4 -> 42.7. Head rows N (exp5 / exp4): 49152 69.0 (acceptance .46), 65536 71.1 (.48), 81920 70.5 (.48), head only (bf16 block) at 65536 66.7; Q4_0 block 71.8 vs Q8_0 71.1 at 65536 (not chosen: lower acceptance .47 vs .48, the block is 0.2 GB smaller); depth 3 is best (2: 64.3, 4: 68.5 at N = 65536). Memory: the preparation stages the head's needed rows through 4 lanes (hrx-loom weights.h), 4 x N x 10 KB of device budget during load: N = 81920 fails chat at 81920 context and image input at 65536, N = 65536 serves 98304 with every feature, N = 49152 serves 106496 (func pass incl. image input). Reference-free dev gates (consistency, agent, sampling, spec drafted == undrafted) PASS (43786704337)."
+   "evidence": "MTP proposals read load-time copies, the verified path keeps the checkpoint's bf16 tensors (llm_advance / llm_verify byte-identical with the choices off): the NextN block's matrices as Q8_0 (0.85 GB bf16 -> 0.45 GB) and a Q4_0 copy of head rows [0, 49152) + the added-token rows (0.15 GB; the bf16 head is 2.54 GB). DevLab R9700, MTP depth 3, one job each, ABBA sessions, repeat-rows 3 (exp5 43790944592, on the fast kernels): decode 53.1 -> 69.0 tok/s (+30 %), decode_2k 51.1 -> 69.6, decode_32k 46.5 -> 55.3, acceptance .50 -> .46 (bf16 head, bf16 block: .50); before the fast kernels (exp4 43786704337): 38.4 -> 42.7. Head rows N (exp5 / exp4): 49152 69.0 (acceptance .46), 65536 71.1 (.48), 81920 70.5 (.48), head only (bf16 block) at 65536 66.7; Q4_0 block 71.8 vs Q8_0 71.1 at 65536 (not chosen: lower acceptance .47 vs .48, the block is 0.2 GB smaller); depth 3 is best (2: 64.3, 4: 68.5 at N = 65536). Memory: the preparation stages the head's needed rows through 4 lanes (hrx-loom weights.h), 4 x N x 10 KB of device budget during load: N = 81920 fails chat at 81920 context and image input at 65536, N = 65536 serves 98304 with every feature, N = 49152 serves 106496 (func pass incl. image input). Reference-free dev gates (consistency, agent, sampling, spec drafted == undrafted) PASS (43786704337). Decode PR (devlab-perf 43804664636, 43806245145, 43808693848; one job each, ABBA, repeat-rows 3; dev gates vs vLLM all PASS on the final config, 43818717444): the block as Q4_0 instead of Q8_0: decode 69.3 -> 71.9 / 70.9 (+3 % with the split below), decode_2k tie..+4 %, decode_32k 51.8 -> 54.7 (+6 %), acceptance .458 -> .445; 0.2 GB less resident, the context ladder is unchanged (98304 passes func, 106496 fails chat/tools/image input in 43806245145)."
+  },
+  {
+   "when": {
+    "devices": [
+     "rdna4"
+    ]
+   },
+   "set": {
+    "decode.spec.gdn_copy_split": 8
+   },
+   "evidence": "q38r9700 verify (devlab-perf 43763681525, Q4_K_M card): +1.9 %. This card (devlab-perf 43806245145, one job, ABBA, Q4_0 block both sides): decode 70.0 -> 71.4 (+2.0 %), decode_2k 71.7 -> 73.6 (+2.6 %), decode_32k 52.6 -> 55.5 (+5 %); spec gate (drafted == undrafted) PASS."
   }
  ]
 }
