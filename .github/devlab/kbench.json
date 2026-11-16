@@ -10,17 +10,13 @@
         "base",
         "fmp",
         "fmp+ovl",
-        "fmp+kv0",
-        "fmp+nobar",
-        "fmp+noexp"
+        "fmp+wg3qs"
       ],
       "files": [
         "bench.loom",
         "bench_fmp.loom",
         "bench_fmp+ovl.loom",
-        "bench_fmp+kv0.loom",
-        "bench_fmp+nobar.loom",
-        "bench_fmp+noexp.loom"
+        "bench_fmp+wg3qs.loom"
       ],
       "tests": [
         "test.loom"

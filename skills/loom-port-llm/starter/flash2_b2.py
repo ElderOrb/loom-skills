@@ -376,7 +376,7 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     if not FM:
         L = gen_loop(False)
     else:
-        assert nh == 2 and opts.get("vpf") and opts.get("e2") and not opts.get("wg") and not opts.get("qreg"), "fmax: two heads, V^T prefetch, e2"
+        assert nh == 2 and opts.get("vpf") and opts.get("e2") and not opts.get("qreg"), "fmax: two heads, V^T prefetch, e2"
         def fres(sfx):
             return ([f"%m{SUF[hh]}_final{sfx}" for hh in range(nh)], [f"%l{SUF[hh]}_final{sfx}" for hh in range(nh)],
                     [f"%{OP[hh]}{k}{sfx}" for hh in range(nh) for k in range(NO)])
@@ -473,16 +473,18 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
   %fo{s_}01 = scalar.maxnumf %fo{s_}0, %fo{s_}1 : f32
   %fo{s_}23 = scalar.maxnumf %fo{s_}2, %fo{s_}3 : f32
   %fo{s_}_t = scalar.maxnumf %fo{s_}01, %fo{s_}23 : f32""")
-        C.append(f"""  %fm_lim = scalar.constant {32768.0 if opts.get("ovl") else 15.0} : f32
+        NW = 12 if opts.get("wg") == 3 else 4   # waves of the workgroup: the fallback is taken by all of them or none
+        C.append(f"""  %c0_f = index.constant 0 : index
+  %fm_lim = scalar.constant {32768.0 if opts.get("ovl") else 15.0} : f32
   %fm_ol = scalar.maxnumf %fo_t, %foB_t : f32
   %fm_svf = kernel.subgroup.reduce<maxnumf> %fm_ol : f32
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-  view.store %fm_svf, %ls_view[%c0_i, %c0_i, %fb_wv, %c0] : f32, view<1x{nh}x{waves}x32xf32>
+  view.store %fm_svf, %ls_view[%c0_f, %c0_f, %c0_f, %wave] : f32, view<1x{nh}x{waves}x32xf32>
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)""" + "".join(f"""
-  %fm_v{j} = view.load %ls_view[%c0_i, %c0_i, %fq{j}, %c0] : view<1x{nh}x{waves}x32xf32> -> f32""" for j in range(4)) + f"""
-  %fm_v01 = scalar.maxnumf %fm_v0, %fm_v1 : f32
-  %fm_v23 = scalar.maxnumf %fm_v2, %fm_v3 : f32
-  %fm_vm = scalar.maxnumf %fm_v01, %fm_v23 : f32
+  %fm_wc{j} = index.constant {j} : index
+  %fm_v{j} = view.load %ls_view[%c0_f, %c0_f, %c0_f, %fm_wc{j}] : view<1x{nh}x{waves}x32xf32> -> f32""" for j in range(NW)) + "".join(f"""
+  %fm_vm{j} = scalar.maxnumf {"%fm_v0" if j == 1 else f"%fm_vm{j - 1}"}, %fm_v{j} : f32""" for j in range(1, NW)) + f"""
+  %fm_vm = scalar.addf %fm_vm{NW - 1}, %zero_f : f32
   %fm_any = scalar.cmpf ogt, %fm_vm, %fm_lim : f32
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   {mls}, {outs} = scf.if %fm_any -> ({mlt}, {ty16}) {{""")
@@ -518,7 +520,7 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
                 f"%ql_bytes = index.constant {nh * 32 * QP * 2}", f"%ql_bytes = index.constant {np_ * nh * 32 * QP * 2}")
             for hh in range(nh):
                 mid = mid.replace(f"%ql_view[%c{hh}_i,", f"%ql_view[%wg_q{hh},")
-        mid = mid.replace(f"view<1x{nh}x{waves}x", f"view<{np_}x{nh}x{waves}x").replace("[%c0_i, %c", "[%wg_pair, %c")
+        mid = mid.replace(f"view<1x{nh}x{waves}x", f"view<{np_}x{nh}x{waves}x").replace("[%c0_i, %c", "[%wg_pair, %c").replace("[%c0_i, %fm_hq", "[%wg_pair, %fm_hq")
         mid = mid.replace(f"%pl_bytes = index.constant {nh * waves * 32 * 16}", f"%pl_bytes = index.constant {np_ * nh * waves * 32 * 16}").replace(
             f"%mx_bytes = index.constant {nh * waves * 32 * 4}", f"%mx_bytes = index.constant {np_ * nh * waves * 32 * 4}")
         i = mid.index("  %pl_bytes")
