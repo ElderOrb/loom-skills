@@ -924,7 +924,9 @@ card = {
     "schema_version": 1,
     "model": {"id": model_id, "name": f"{cfg.get('name', 'llm')} (Loom port, {'safetensors' if SAFETENSORS else 'GGUF'})"},
     "programs": {"source": {
-        "inputs": [{"path": "program/prepare.loom", "data": ["weights.loom"] + VISION_POLICY + POLICIES},
+        # llm_config.json rides as data so loom-fetch delivers it: a host that samples from the logits reads the
+        # model's chat dialect (tool-call format, reasoning markers) from it for its grammars.
+        "inputs": [{"path": "program/prepare.loom", "data": ["weights.loom"] + VISION_POLICY + POLICIES + ["llm_config.json"]},
                    "program/control.loom", "program/storage.loom", "program/service.loom"],
         "libraries": ["program/llm.loom"]}},
     "services": {"chat": {"kind": "text", "version": 1}},
