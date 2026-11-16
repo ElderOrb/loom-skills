@@ -73,7 +73,7 @@ counts, the log, an ETA and scope changes after every merged PR or when the done
   (`git worktree add -b <campaign>-<name> DIR/wt/<name> origin/<campaign>`). Never work in the main checkout.
 - PRs only into the integration branch, never the base or another feature branch; the tech lead opens the one final PR into the base.
   PR body: what, why, evidence, a `loom-scope` block ([architecture.md](architecture.md) "Guards"), the closing credit line. Commit
-  trailer: the author's own credit line; no model ids in commit or PR text.
+  trailer exactly `Co-Authored-By: Claude <noreply@anthropic.com>`; no model names or versions anywhere in commit or PR text.
 - Each PR is focused; the tech lead squash-merges; never stack PRs: branch off the latest integration branch and merge it back in when
   it moves. A PR with merge conflicts gets no CI runs.
 - **Review, then merge without waiting for the owner**: an in-scope PR that passes review (DRY, meets its task's "Done when", scoped,

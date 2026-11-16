@@ -380,7 +380,7 @@ def submit_batch(st, b, dry):
     gh_api("POST", f"repos/{REPO}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
     f = "repos/%s/contents/.github/devlab/perf.json" % REPO
     fsha = gh_api("GET", f"{f}?ref={branch}", jq=".sha")
-    gh_api("PUT", f, {"message": f"devlab perf: {title}\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>", "branch": branch,
+    gh_api("PUT", f, {"message": f"devlab perf: {title}\n\nCo-Authored-By: Claude <noreply@anthropic.com>", "branch": branch,
                       "content": base64.b64encode(perf).decode(), "sha": fsha})
     pr = gh_api("POST", f"repos/{REPO}/pulls", {"title": title, "head": branch, "base": base, "body": batch_body(st, b)}, jq=".number")
     gh_api("POST", f"repos/{REPO}/issues/{pr}/labels", {"labels[]": "devlab-perf"})   # the label starts the run
