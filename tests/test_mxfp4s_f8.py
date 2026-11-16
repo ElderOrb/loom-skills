@@ -97,7 +97,8 @@ class KernelTests(unittest.TestCase):
     def test_sweep_options_compile_for_gfx1201_without_spills(self):
         """the tile shape / pipelining / grid / prefetch / output / pitch options of the generator (device/rdna4/prefill.md: all measured, none a win)"""
         for mode, kw in (("store", dict(bm=128, tn=256)), ("store", dict(bm=256, tn=256)), ("swiglu", dict(bm=256, tn=128)), ("store", dict(swp=True)),
-                         ("store", dict(rf=2, swp=True)), ("swiglu", dict(swz=True)), ("store", dict(pfa=2)), ("swiglu", dict(yf16=True)), ("store", dict(pad=32))):
+                         ("store", dict(rf=2, swp=True)), ("swiglu", dict(swz=True)), ("store", dict(pfa=2)), ("swiglu", dict(yf16=True)), ("store", dict(pad=32)),
+                         ("store", dict(radd=True)), ("swiglu", dict(ybf16=True))):
             with tempfile.TemporaryDirectory() as d:
                 f = Path(d) / "t.loom"
                 f.write_text(HEADER + R.gemm_mxfp4s_f8_m256(mode, **kw))
@@ -171,7 +172,8 @@ class ProducerTests(unittest.TestCase):
             base = self.kernel(name)
             t = R.f8_producer(base)
             self.assertIn(f'export("{name}_f8_rdna4")', t)
-            self.assertIn("%x8: buffer, %s8: buffer) {", t)
+            self.assertIn("%x8: buffer, %s8: buffer, %w16: index) {", t)
+            self.assertEqual(t.count("scf.if %w16_on {"), 1)   # the f16 operand store is guarded by the launch flag
             self.assertIn("f8E4M3", t)
             self.assertEqual(t.count("view.store %f8_scale"), 1)   # the live row's scales ...
             self.assertEqual(t.count("view.store %lv_zf, %lv_s8"), 2)   # ... and the padding row's (0, 0)
@@ -244,13 +246,63 @@ command.program.def public @llm_advance() launch(%weights: buffer) {{
         self.assertEqual(n, 3)   # gate + up (one fused group) and down
         self.assertEqual(text.count("// dual-group: rdna4 kernel.launch @g_gemm_mxfp4s_swiglu_f8_m256_rdna4[%tp, %nFF](%tp, %nH, %nFF, %h8, %s_h8, %wg, %wg_sc, %wu, %wu_sc, %f)"), 1)
         self.assertEqual(text.count("// dual-group: rdna4 kernel.launch @g_gemm_mxfp4s_store_f8_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8, %wd, %wd_sc, %y)"), 1)
-        self.assertIn("// dual-group: rdna4 kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%t](%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8)", text)
-        self.assertIn("// dual-group: rdna4 kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8)", text)
+        self.assertIn("// dual-group: rdna4 kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%t](%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8, %w16_flag)", text)
+        self.assertIn("// dual-group: rdna4 kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_flag)", text)
         self.assertEqual(text.count("scf.if %huge {"), 2)
         for buf, width in (("%h8", 5120), ("%f8", 17408)):
             self.assertRegex(text, rf"{buf}_row = index\.constant {width} : offset")
         self.assertNotIn("%o8 =", text)   # no reader of %o16: its fp8 copy is not made
         self.assertLess(text.index('export("g_row_scale_f16_live_lv_f8_rdna4")'), text.index("command.program.def"))
+
+    def program_with_next_layer(self):
+        return self.program.replace("  command.return", """  scf.if %mm {
+    kernel.launch @g_post_add_norm_rs_live_lv[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16) : [index](index, buffer, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer, buffer, buffer)
+  } else {
+    kernel.launch @g_post_add_norm[%t](%t, %y, %wn, %x, %wn, %h) : [index](index, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer)
+  }
+  command.return""")
+
+    def test_fuse_off_is_the_plain_pass(self):
+        prog = self.program_with_next_layer()
+        self.assertEqual(R.fuse_mxfp4s_f8(prog, fuse=False), R.fuse_mxfp4s_f8(prog))
+        text, _ = R.fuse_mxfp4s_f8(prog, fuse=False)
+        self.assertNotIn("radd", text)
+        self.assertNotIn("%fz_", text)
+        self.assertNotIn("_bf16_", text)
+
+    def test_fuse_adds_the_output_projection_into_the_residual_and_flags_the_producers(self):
+        text, n = R.fuse_mxfp4s_f8(self.program_with_next_layer(), fuse=True)
+        self.assertEqual(n, 3)
+        # the down projection accumulates into %x (its gfx11 provider still writes %y), the producer after it skips the add
+        self.assertIn("rdna4 kernel.launch @g_gemm_mxfp4s_store_f8_radd_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8, %wd, %wd_sc, %x)", text)
+        self.assertRegex(text, r"@g_post_add_norm_rs_live_lv_f8_rdna4\[%t\]\(%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_\w+, %fz_huge\)")
+        # the producer before the SwiGLU pair has no output projection before it: flag 0
+        self.assertRegex(text, r"@g_post_add_norm_rs_live_lv_f8_rdna4\[%t\]\(%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_\w+, %fz_zero\)")
+        # the SwiGLU pair writes bf16, the row-scale producer of its output reads it
+        self.assertIn("@g_gemm_mxfp4s_swiglu_f8_bf16_m256_rdna4[", text)
+        self.assertRegex(text, r"@g_row_scale_f16_live_lv_f8_rdna4\[%t\]\(%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8, %w16_\w+, %fz_huge\)")
+        self.assertIn("%fz_huge = scf.select %huge, %fz_one, %fz_zero : index", text)
+        self.assertIn("%fl: index) {", text)   # the twins take the flag
+
+    def test_a_reader_of_y_between_the_projection_and_the_producer_keeps_the_plain_gemm(self):
+        prog = self.program_with_next_layer().replace("  scf.if %mm {\n    kernel.launch @g_post_add_norm_rs_live_lv[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16) : [index](index, buffer, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer, buffer, buffer)\n  } else {\n    kernel.launch @g_post_add_norm[%t](%t, %y, %wn, %x, %wn, %h) : [index](index, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer)\n  }\n  command.return",
+                                                      "  kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)\n  command.return")
+        self.assertIn("g_other", prog)   # (the replacement only applies to the appended producer; the fixture's own producer stays)
+        text, _ = R.fuse_mxfp4s_f8(prog.replace("kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)", "kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)\n  scf.if %mm {\n    kernel.launch @g_post_add_norm_rs_live_lv[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16) : [index](index, buffer, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer, buffer, buffer)\n  }"), fuse=True)
+        self.assertNotIn("g_gemm_mxfp4s_store_f8_radd_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8, %wd, %wd_sc, %x)", text)
+
+    def test_the_flagged_twins_compile_for_gfx1201(self):
+        if not loom_compile():
+            self.skipTest("loom-compile not available")
+        for name in ("g_row_scale_f16_live_lv", "g_post_add_norm_rs_live_lv"):
+            with tempfile.TemporaryDirectory() as d:
+                f = Path(d) / "t.loom"
+                f.write_text(HEADER + R.f8_producer(ProducerTests().kernel(name), flag=True))
+                r = subprocess.run([loom_compile(), str(f), "--format=amdgpu-hsaco", "--target=amdgpu:gfx1201", f"--output={d}/o.hsaco"], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[:2000])
+        t = R.f8_producer(ProducerTests().kernel("g_post_add_norm_rs_live_lv"), flag=True)
+        self.assertNotIn("%ysq", t)   # no post-norm: the y statistics are dead code in the twin
+        self.assertIn("scf.if %fl_off {", t)   # x is not rewritten when the projection already added
 
     def test_the_gfx11_program_keeps_every_launch(self):
         import dual_target

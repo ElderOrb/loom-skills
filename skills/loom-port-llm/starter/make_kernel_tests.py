@@ -1049,7 +1049,7 @@ if cfg.get("recurrent_layers") and _chunk:
             arena[rd // 4:rd // 4 + SB // 4] = S0.reshape(-1); S = S0.astype(np.float64)
         for i in range(first, first + L):
             for h in range(HV):
-                kh = h % HK; q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
+                kh = (h // (HV // HK) if G_GROUPED else h % HK); q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
                 St = S[h] * np.exp(np.log1p(np.exp(float(alpha[i, h]) + dt[h])) * a_log[h])
                 d = (vs[i, h] - St @ k) / (1 + np.exp(-float(beta[i, h])))
                 S[h] = St + np.outer(d, k); raw_o[i, h] = S[h] @ q
@@ -1349,10 +1349,34 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %s = check.generate.fill value(0.0) : tensor<3x2xf32>
   %h = check.generate.fill value(0.0) : tensor<3x{rs_k}xf16>
   %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
+  %w16 = check.literal value(1) : index
   %q8 = check.generate.fill value(0) : tensor<3x{rs_k}xi8>
-{"  %fl = check.literal value(0) : index" + chr(10) if _fuse_on() else ""}  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %k, %x, %s, %h, %q8, %s8{", %fl" if _fuse_on() else ""}) : [index](index, tensor<3x4xi32>, index, tensor<3x{rs_k}xf32>, tensor<3x2xf32>, tensor<3x{rs_k}xf16>, tensor<3x{rs_k}xi8>, tensor<3x2xf32>{", index" if _fuse_on() else ""})
+{"  %fl = check.literal value(0) : index" + chr(10) if _fuse_on() else ""}  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %k, %x, %s, %h, %q8, %s8, %w16{", %fl" if _fuse_on() else ""}) : [index](index, tensor<3x4xi32>, index, tensor<3x{rs_k}xf32>, tensor<3x2xf32>, tensor<3x{rs_k}xf16>, tensor<3x{rs_k}xi8>, tensor<3x2xf32>, index{", index" if _fuse_on() else ""})
   check.expect.close actual(%s) expected(%es16) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
   check.expect.close actual(%h) expected(%eh) atol(0.0) rtol(1.0e-3) nan(different) : tensor<3x{rs_k}xf16>
+  check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
+  check.expect.equal actual(%q8) expected(%eq8) : tensor<3x{rs_k}xi8>
+  check.return
+}}
+""")
+    cases.append(f"""check.case public @row_scale_f16_live_lv_f8_nof16 {{
+  %rows = check.literal value(3) : index
+  %k = check.literal value({rs_k}) : index
+  %info = check.file.read.npy path("rs8_info.npy") : tensor<3x4xi32>
+  %x = check.file.read.npy path("rs8_x.npy") : tensor<3x{rs_k}xf32>
+  %es8 = check.file.read.npy path("rs8_s.npy") : tensor<3x2xf32>
+  %eq8 = check.file.read.npy path("rs8_q.npy") : tensor<3x{rs_k}xi8>
+  %es16 = check.file.read.npy path("rs8_s16.npy") : tensor<3x2xf32>
+  %eh = check.file.read.npy path("rs8_h.npy") : tensor<3x{rs_k}xf16>
+  %s = check.generate.fill value(0.0) : tensor<3x2xf32>
+  %h = check.generate.fill value(0.0) : tensor<3x{rs_k}xf16>
+  %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
+  %w16 = check.literal value(0) : index
+  %q8 = check.generate.fill value(0) : tensor<3x{rs_k}xi8>
+{"  %fl = check.literal value(0) : index" + chr(10) if _fuse_on() else ""}  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %k, %x, %s, %h, %q8, %s8, %w16{", %fl" if _fuse_on() else ""}) : [index](index, tensor<3x4xi32>, index, tensor<3x{rs_k}xf32>, tensor<3x2xf32>, tensor<3x{rs_k}xf16>, tensor<3x{rs_k}xi8>, tensor<3x2xf32>, index{", index" if _fuse_on() else ""})
+  check.expect.close actual(%s) expected(%es16) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
+  %hz = check.generate.fill value(0.0) : tensor<3x{rs_k}xf16>
+  check.expect.equal actual(%h) expected(%hz) : tensor<3x{rs_k}xf16>
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
   check.expect.equal actual(%q8) expected(%eq8) : tensor<3x{rs_k}xi8>
   check.return
@@ -1378,8 +1402,31 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %h16 = check.generate.fill value(0.0) : tensor<3x{H}xf16>
   %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
   %q8 = check.generate.fill value(0) : tensor<3x{H}xi8>
-{"  %fl = check.literal value(0) : index" + chr(10) if _fuse_on() else ""}  kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8{", %fl" if _fuse_on() else ""}) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>{", index" if _fuse_on() else ""})
+  %w16 = check.literal value(1) : index
+{"  %fl = check.literal value(0) : index" + chr(10) if _fuse_on() else ""}  kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8, %w16{", %fl" if _fuse_on() else ""}) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>, index{", index" if _fuse_on() else ""})
   check.expect.close actual(%h16) expected(%eh16) atol(1.0e-3) rtol(1.0e-3) nan(different) : tensor<3x{H}xf16>
+  check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
+  check.return
+}}
+""")
+    cases.append(f"""check.case public @post_add_norm_rs_live_lv_f8_nof16 {{
+  %rows = check.literal value(3) : index
+  %info = check.file.read.npy path("pa_info.npy") : tensor<3x4xi32>
+  %y = check.file.read.npy path("pa_y.npy") : tensor<3x{H}xf32>
+  %x = check.file.read.npy path("pa_x.npy") : tensor<3x{H}xf32>
+  %wp = check.file.read.npy path("pa_wp.npy") : tensor<{H}xf32>
+  %wn = check.file.read.npy path("pa_wn.npy") : tensor<{H}xf32>
+  %es8 = check.file.read.npy path("pa8_s.npy") : tensor<3x2xf32>
+  %eh16 = check.file.read.npy path("pa_h16_live_lv.npy") : tensor<3x{H}xf16>
+  %h = check.generate.fill value(0.0) : tensor<3x{H}xf32>
+  %s = check.generate.fill value(0.0) : tensor<3x2xf32>
+  %h16 = check.generate.fill value(0.0) : tensor<3x{H}xf16>
+  %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
+  %q8 = check.generate.fill value(0) : tensor<3x{H}xi8>
+  %w16 = check.literal value(0) : index
+{"  %fl = check.literal value(0) : index" + chr(10) if _fuse_on() else ""}  kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8, %w16{", %fl" if _fuse_on() else ""}) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>, index{", index" if _fuse_on() else ""})
+  %h16z = check.generate.fill value(0.0) : tensor<3x{H}xf16>
+  check.expect.equal actual(%h16) expected(%h16z) : tensor<3x{H}xf16>
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
   check.return
 }}
@@ -1403,6 +1450,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %rows = check.literal value(3) : index
   %k = check.literal value({rs_k}) : index
   %fl = check.literal value(1) : index
+  %w16 = check.literal value(0) : index
   %info = check.file.read.npy path("rs8_info.npy") : tensor<3x4xi32>
   %x = check.file.read.npy path("rs8b_x.npy") : tensor<3x{rs_k}xi16>
   %es8 = check.file.read.npy path("rs8b_s.npy") : tensor<3x2xf32>
@@ -1411,7 +1459,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %h = check.generate.fill value(0.0) : tensor<3x{rs_k}xf16>
   %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
   %q8 = check.generate.fill value(0) : tensor<3x{rs_k}xi8>
-  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %k, %x, %s, %h, %q8, %s8, %fl) : [index](index, tensor<3x4xi32>, index, tensor<3x{rs_k}xi16>, tensor<3x2xf32>, tensor<3x{rs_k}xf16>, tensor<3x{rs_k}xi8>, tensor<3x2xf32>, index)
+  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %k, %x, %s, %h, %q8, %s8, %w16, %fl) : [index](index, tensor<3x4xi32>, index, tensor<3x{rs_k}xi16>, tensor<3x2xf32>, tensor<3x{rs_k}xf16>, tensor<3x{rs_k}xi8>, tensor<3x2xf32>, index, index)
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
   check.expect.equal actual(%q8) expected(%eq8) : tensor<3x{rs_k}xi8>
   check.return
@@ -1424,6 +1472,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
             cases.append(f"""check.case public @post_add_norm_rs_live_lv_f8_radd {{
   %rows = check.literal value(3) : index
   %fl = check.literal value(1) : index
+  %w16 = check.literal value(0) : index
   %info = check.file.read.npy path("pa_info.npy") : tensor<3x4xi32>
   %y = check.file.read.npy path("pa8r_g.npy") : tensor<3x{H}xf32>
   %x = check.file.read.npy path("pa_xe_lv.npy") : tensor<3x{H}xf32>
@@ -1437,7 +1486,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %h16 = check.generate.fill value(0.0) : tensor<3x{H}xf16>
   %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
   %q8 = check.generate.fill value(0) : tensor<3x{H}xi8>
-  kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8, %fl) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>, index)
+  kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8, %w16, %fl) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>, index, index)
   check.expect.close actual(%x) expected(%ex) atol(0.0) rtol(0.0) nan(different) : tensor<3x{H}xf32>
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
   check.expect.equal actual(%q8) expected(%eq8) : tensor<3x{H}xi8>
@@ -1502,6 +1551,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %k = check.literal value({K}) : index
   %n = check.literal value({n_use}) : index
   %fl = check.literal value(1) : index
+  %w16 = check.literal value(0) : index
   %x = check.file.read.npy path("{tag}_x.npy") : tensor<{rows}x{K}xi8>
   %s = check.file.read.npy path("{tag}_s.npy") : tensor<{rows}x2xf32>
   %w = check.file.read.npy path("{tag}_w.npy") : {ty(Wr)}
@@ -1516,7 +1566,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %s8 = check.generate.fill value(7.0) : tensor<{rows}x2xf32>
   %q8 = check.generate.fill value(0) : tensor<{rows}x{n_use}xi8>
   kernel.launch @g_gemm_mxfp4s_swiglu_f8_bf16_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %w, %ws, %u, %us, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {ty(Wr)}, {ty(Ws_)}, {ty(Ur)}, {ty(Us_)}, tensor<{rows}x{n_use}xi16>)
-  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %n, %y, %s16, %h16, %q8, %s8, %fl) : [index](index, tensor<{rows}x4xi32>, index, tensor<{rows}x{n_use}xi16>, tensor<{rows}x2xf32>, tensor<{rows}x{n_use}xf16>, tensor<{rows}x{n_use}xi8>, tensor<{rows}x2xf32>, index)
+  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %n, %y, %s16, %h16, %q8, %s8, %w16, %fl) : [index](index, tensor<{rows}x4xi32>, index, tensor<{rows}x{n_use}xi16>, tensor<{rows}x2xf32>, tensor<{rows}x{n_use}xf16>, tensor<{rows}x{n_use}xi8>, tensor<{rows}x2xf32>, index, index)
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<{rows}x2xf32>
   check.return
 }}
