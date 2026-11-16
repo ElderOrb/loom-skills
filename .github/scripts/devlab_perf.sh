@@ -79,6 +79,8 @@
 #                               the step is "not supported" (never replaced by another path).
 #          gufo:V               Gufo conformance on V's package served with --loom-logits=on (validation/devlab/run_conformance.sh: conformance.py
 #                               --logits + gufo's logits_check.py); conformance_V.json (gate `gufo`), the raw files in out/gufo_V/
+#          vllmdet:V            (safetensors card, or env REFERENCE_CHECKPOINT=ORG/REPO on a GGUF card) vLLM's run-to-run determinism: the dev golden set recorded twice
+#          gates:V:LEVEL        with a safetensors card (llm_config source.kind) or REFERENCE_CHECKPOINT the reference is vLLM (scripts/vllm_reference.md), not llama.cpp
 #          ktest:V              make_kernel_tests.py + run_kernel_tests.sh with V's kit
 #          vtest:V[:HxW]        the image tower (a package with image input): starter/vision/tests (encoder kernels vs NumPy), then the whole encoder
 #                               at HxW pixels (default 320x224) on the package's weights (a safetensors package: the checkpoint's own tensors) vs
@@ -157,7 +159,8 @@ vllm_down() {   # stop the vLLM OpenAI server this job started (its process grou
 cleanup() {
   vllm_down
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
-  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
+  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
+  cp "$D"/vllm-state/vllm-*.{log,mem} "$out/" 2>/dev/null
   cp "$LOOM_SERVE_STATE"/*.log "$LLAMACPP_STATE"/*.log "$LLAMACPP_STATE"/*.mem "$out/" 2>/dev/null   # *.mem: MemAvailable/RssAnon of llama-server
   echo "devlab_perf.sh: servers stopped"
 }
@@ -241,7 +244,12 @@ for k in ("model_id", "draft"):
     c.pop(k, None)
 json.dump(c, open(dst, "w"), indent=1)
 EOF
-gguf=$("$T" -c "import json; print(json.load(open('$D/cfg.json')).get('gguf') or '')")   # safetensors cards have none (their llama.cpp steps are not supported)
+# the reference's model: the GGUF llama.cpp loads, or (a safetensors card) the checkpoint repo vLLM loads, pinned to the card's source revision
+gguf=$("$T" -c "import json; c=json.load(open('$D/cfg.json')); s=c.get('source') or {}; print(s['repo'] if s.get('kind') == 'safetensors' else c.get('gguf') or '')")
+safetensors=$("$T" -c "import json; print(1 if (json.load(open('$D/cfg.json')).get('source') or {}).get('kind') == 'safetensors' else '')")
+[ -n "${REFERENCE_CHECKPOINT:-}" ] && { safetensors=1; gguf=$REFERENCE_CHECKPOINT; }   # vLLM forced on a GGUF package (adapter check)
+[ -n "$safetensors" ] && [ -z "${REFERENCE_CHECKPOINT:-}" ] && export VLLM_REVISION=$("$T" -c "import json; print(json.load(open('$D/cfg.json'))['source'].get('revision') or '')")
+[ -n "$safetensors" ] && export VLLM_STATE=$D/vllm-state
 drafter=$("$T" -I -c "
 import json, os, sys
 sys.path.insert(0, sys.argv[1]); from matched_spec import drafter_file
@@ -351,7 +359,7 @@ pkg_preset() {   # pkg_preset MODEL_JSON -> the preset this runner serves ("" fo
 }
 serve_alone() { # serve_alone VARIANT
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
-  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
+  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
   local aw sa rp vmem; aw=$(qv "$1" "print(0 if v.get('active_wait') is False else 1)")
   sa=$(qv "$1" "print(' '.join(v.get('serve_args') or []))")   # "serve_args": extra loom-serve flags
   # a package with a `<first preset>-r9700` preset (build.py --prefill-r9700) serves it on the R9700, as the card's R9700 Quick start does
@@ -636,6 +644,22 @@ print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v)
       fa=(); { grep -q '"vision"' "$card/llm_config.json" || grep -q '"vision"' "$D/$p1/pkg/llm_config.json"; } 2>/dev/null && fa+=(--vision)   # the card's, or the rebuilt package's image input
       "$T" "$here/.github/scripts/r9700_func.py" "$url" "$cardid" "$out/func_$p1.json" ${fa[@]+"${fa[@]}"} $([ -f "$out/info_card.json" ] && echo --info "$out/info_card.json") 2>&1 | tee "$out/func_$p1.log"
       res[$s]=$(tail -1 "$out/func_$p1.log");;
+    vllmdet)   # vllmdet:V : vLLM's run-to-run determinism: the dev golden prompt set recorded twice (salts a, b), token for token; the card's golden2 question
+      [ -n "$safetensors" ] || { res[$s]="ERROR: not a safetensors package"; continue; }
+      free_gpu   # nothing else on the GPU: only the reference runs
+      export VLLM_VENV=$WORK/vllm-venv-${VLLM_VERSION:-0.18.0} LLAMA_CACHE=$D/$p1/bench/det_cache LLAMA_CACHE_BUILD=vllm-${VLLM_VERSION:-0.18.0}
+      step "vLLM determinism $p1"; t1=$(date +%s)
+      "$B/vllm_server.sh" "$gguf" "$LLAMA_PORT" 4096 > "$out/vllm_start.log" 2>&1; tail -2 "$out/vllm_start.log"
+      ( cd "$D/$p1" && mkdir -p bench && cd bench && for salt in a b; do
+          "$T" "$B/golden.py" "$D/$p1/pkg" "det_$salt.json" --llama "$lurl" --short 20 --long 1000,2000 --salt $salt || exit 1; done
+        "$T" - <<'PY'
+import json
+a, b = (json.load(open(f"det_{s}.json")) for s in "ab")
+same = sum(x["ids"] == y["ids"] for x, y in zip(a, b)); print(f"DETERMINISM {same}/{len(a)} prompts identical across two recordings")
+PY
+      ) > "$out/vllmdet_$p1.log" 2>&1; tail -1 "$out/vllmdet_$p1.log"
+      cp "$D/$p1"/bench/det_*.json "$out/" 2>/dev/null; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT"
+      res[$s]="$(grep -h DETERMINISM "$out/vllmdet_$p1.log" | tail -1) ($(( $(date +%s) - t1 )) s incl. install+load)";;
     admit)   # admit:V[:TOKENS]: ctx_admit.py on V served as configured (its execution context/pool): is a request of TOKENS (default ~ the served context) admitted? (the card's served context on the device)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "context admission $p1 ${p2:-}"
@@ -648,11 +672,23 @@ print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v)
       res[$s]=$(tail -1 "$out/fullctx_${p1}${p2:+_$p2}.txt" | cut -c1-200);;
     gates)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
-      LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
+      if [ -n "$safetensors" ]; then   # the reference is vLLM (gates.sh picks it from source.kind); VLLM_VERSION / VLLM_ROCM_VARIANT / VLLM_EXTRA_ENV come from the job's "env"
+        export VLLM_VENV=$WORK/vllm-venv-${VLLM_VERSION:-0.18.0}   # one install per runner and version, reused by later jobs
+      else
+        LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
+      fi
       export LOOM_KIT=${KIT[$p1]}
+      # "reference_cache": "PATH.tgz" (a job field, relative to the checkout): references an earlier job recorded (its gates_V/llama_cache.tgz), keyed by checkpoint
+      # revision + vLLM version + request, so a runner that cannot serve the reference (or a rerun) only serves Loom
+      rcache=$(q "print(j.get('reference_cache') or '')")
+      [ -n "$rcache" ] && { mkdir -p "$D/$p1/bench" && tar -xzf "$here/$rcache" -C "$D/$p1/bench" && echo "reference cache restored from $rcache"; }
       step "gates $p1 LEVEL=$p2"
       ( unset LLAMA_SPEC; FORCE=1 LEVEL=$p2 "$B/gates.sh" "$D/$p1/pkg" "$url" "$gguf" "$D/$p1/bench" "$LLAMA_PORT" ) > "$out/gates_$p1.out" 2>&1; rc=$?
       mkdir -p "$out/gates_$p1"; cp "$D/$p1"/bench/gates.json "$D/$p1"/bench/gates_*.log "$out/gates_$p1/" 2>/dev/null
+      if [ -n "$safetensors" ]; then   # the recorded references (reusable: keyed by checkpoint revision + vLLM version + request), the card's reference statement, install/load/memory logs
+        cp "$D/$p1"/bench/reference.json "$D/vllm-state"/vllm-*.{log,mem,json} "$out/gates_$p1/" 2>/dev/null
+        tar -C "$D/$p1/bench" -czf "$out/gates_$p1/llama_cache.tgz" llama_cache 2>/dev/null
+      fi
       res[$s]=$(grep -h "^GATES" "$out/gates_$p1.out" | tail -1 | cut -c1-300); [ -n "${res[$s]}" ] || res[$s]="rc=$rc";;
     *) echo "unknown step $s"; res[$s]=ERROR;;
   esac
