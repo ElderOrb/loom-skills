@@ -124,12 +124,14 @@ separately. Tools: `fleet/README.md`; process: [targeted-fix.md](targeted-fix.md
     new variant, no perf (the iterations measured it) and the unchanged base variant is not built or gated (a base that already passed is
     never gated again). Hand-written experiment files follow the same two shapes. `full` (the generators' default; `regen.py` always uses it,
     a card needs every step) stays for card regeneration.
-  - **The vLLM reference is cached, not loaded.** A safetensors package's gates restore the references recorded once per checkpoint
-    revision + vLLM version + request from the committed `.github/devlab/reference_cache/<org>__<repo>__vllm-<VERSION>.tgz`
+  - **Reference engines are invariant inputs: cached, not loaded** (methodology rule 16; the vLLM baseline rows are measured at campaign
+    start and in the final card job only, iteration rounds never run vLLM or llama.cpp). A package's gates restore the references recorded
+    once per engine version + checkpoint revision + request from the committed `.github/devlab/reference_cache/<org>__<repo>__<ENGINE>.tgz`
+    (`vllm-<VERSION>` for a safetensors package, `llama-<BUILD>` for a GGUF card)
     (`skills/loom-benchmark/scripts/reference_cache.py`), so a gate run whose requests are all cached never starts vLLM (the job line
     says `references: N cached before gates, 0 recorded in this job, vLLM loaded: no`). A request that is not cached (a new prompt set,
     a new checkpoint revision, a changed vision case) is recorded by that job as before; add its `gates_V/llama_cache.tgz` to the store
-    with `reference_cache.py merge --repo ORG/REPO --vllm VERSION TGZ` in the same PR. Job field `"reference_cache": "none"` forces a cold
+    with `reference_cache.py merge --repo ORG/REPO --engine ENGINE TGZ` in the same PR. Job field `"reference_cache": "none"` forces a cold
     recording.
 
 ## Regenerating many cards: `fleet/regen.py`

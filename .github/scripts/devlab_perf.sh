@@ -747,18 +747,23 @@ PY
         LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
       fi
       export LOOM_KIT=${KIT[$p1]}
-      # The vLLM references are restored before gates.sh runs, so a run whose requests are all cached never loads vLLM (72 % of a typical job):
-      #  - the committed store .github/devlab/reference_cache/<org>__<repo>__vllm-<VERSION>.tgz for the package's checkpoint (skills/loom-benchmark/scripts/reference_cache.py),
-      #    automatically, for every safetensors package;
+      # The reference outputs are invariant inputs: they are restored before gates.sh runs, so a run whose requests are all cached never loads the
+      # reference engine (vLLM was 72 % of a typical job). The committed store .github/devlab/reference_cache/<org>__<repo>__<ENGINE>.tgz
+      # (skills/loom-benchmark/scripts/reference_cache.py), automatically: ENGINE = vllm-<VERSION> for a safetensors package (its checkpoint's repo),
+      # llama-<BUILD> for a GGUF card (the card's repo). Keys: engine version + checkpoint revision / GGUF + request (prompt set, sampling): exact hits only.
       #  - "reference_cache": "PATH.tgz" (a job field, relative to the checkout) in addition: references an earlier job recorded (its gates_V/llama_cache.tgz);
       #    "reference_cache": "none" skips both (a deliberate cold recording).
-      # Keyed by checkpoint revision + vLLM version + request: a miss is recorded by this job (its llama_cache.tgz: `reference_cache.py merge` adds it to the store).
+      # A miss is recorded by this job (its llama_cache.tgz: `reference_cache.py merge` adds it to the store).
       rcache=$(q "print(j.get('reference_cache') or '')"); nref0=0; nref_hit=0
       mkdir -p "$D/$p1/bench"
-      if [ -n "$safetensors" ] && [ "$rcache" != none ]; then
-        rrepo=$("$T" -c "import json,sys; print((json.load(open(sys.argv[1])).get('source') or {}).get('repo', ''))" "$D/$p1/pkg/llm_config.json")
-        [ -n "$rrepo" ] && nref_hit=$("$T" "$B/reference_cache.py" restore --repo "$rrepo" --vllm "${VLLM_VERSION:-0.18.0}" --into "$D/$p1/bench" 2>/dev/null || echo 0)
-        echo "reference cache: $nref_hit entries restored from the committed store for $rrepo (vLLM ${VLLM_VERSION:-0.18.0})"
+      if [ "$rcache" != none ]; then
+        if [ -n "$safetensors" ]; then
+          rrepo=$("$T" -c "import json,sys; print((json.load(open(sys.argv[1])).get('source') or {}).get('repo', ''))" "$D/$p1/pkg/llm_config.json"); reng=vllm-${VLLM_VERSION:-0.18.0}
+        else
+          rrepo=$(q "print((j.get('card') or e.get('card') or '').split('@')[0])"); reng=llama-$tag
+        fi
+        [ -n "$rrepo" ] && nref_hit=$("$T" "$B/reference_cache.py" restore --repo "$rrepo" --engine "$reng" --into "$D/$p1/bench" 2>/dev/null || echo 0)
+        echo "reference cache: $nref_hit entries restored from the committed store ($rrepo, $reng)"
       fi
       if [ -n "$rcache" ] && [ "$rcache" != none ]; then
         tar -xzf "$here/$rcache" -C "$D/$p1/bench" && echo "reference cache restored from $rcache"
@@ -767,13 +772,14 @@ PY
       step "gates $p1 LEVEL=$p2"
       ( unset LLAMA_SPEC; FORCE=1 LEVEL=$p2 "$B/gates.sh" "$D/$p1/pkg" "$url" "$gguf" "$D/$p1/bench" "$LLAMA_PORT" ) > "$out/gates_$p1.out" 2>&1; rc=$?
       mkdir -p "$out/gates_$p1"; cp "$D/$p1"/bench/gates.json "$D/$p1"/bench/gates_*.log "$out/gates_$p1/" 2>/dev/null
-      if [ -n "$safetensors" ]; then   # the recorded references (reusable: keyed by checkpoint revision + vLLM version + request), the card's reference statement, install/load/memory logs
+      if [ -n "$safetensors" ]; then   # the card's reference statement, install/load/memory logs of the vLLM reference
         cp "$D/$p1"/bench/reference.json "$D/vllm-state"/vllm-*.{log,mem,json} "$out/gates_$p1/" 2>/dev/null
-        tar -C "$D/$p1/bench" -czf "$out/gates_$p1/llama_cache.tgz" llama_cache $([ -f "$D/$p1/bench/reference.json" ] && echo reference.json) 2>/dev/null
-        nref1=$("$T" "$B/reference_cache.py" count "$D/$p1/bench" 2>/dev/null || echo 0)
-        vl=no; [ -f "$D/vllm-state/vllm-$LLAMA_PORT.log" ] && vl=yes   # vllm-PORT.log exists only when vllm_server.sh started the engine
-        echo "references: $nref0 cached before gates, $(( nref1 - nref0 )) recorded in this job, vLLM loaded: $vl" | tee "$out/gates_$p1/reference_cache.txt"
       fi
+      # the recorded references (reusable: keyed by engine version + checkpoint / GGUF + request): `reference_cache.py merge` adds them to the committed store
+      tar -C "$D/$p1/bench" -czf "$out/gates_$p1/llama_cache.tgz" llama_cache $([ -f "$D/$p1/bench/reference.json" ] && echo reference.json) 2>/dev/null
+      nref1=$("$T" "$B/reference_cache.py" count "$D/$p1/bench" 2>/dev/null || echo 0)
+      vl=n/a; [ -n "$safetensors" ] && { vl=no; [ -f "$D/vllm-state/vllm-$LLAMA_PORT.log" ] && vl=yes; }   # vllm-PORT.log exists only when vllm_server.sh started the engine
+      echo "references: $nref0 cached before gates, $(( nref1 - nref0 )) recorded in this job, vLLM loaded: $vl" | tee "$out/gates_$p1/reference_cache.txt"
       res[$s]=$(grep -h "^GATES" "$out/gates_$p1.out" | tail -1 | cut -c1-300); [ -n "${res[$s]}" ] || res[$s]="rc=$rc"
       [ -f "$out/gates_$p1/reference_cache.txt" ] && res[$s]="${res[$s]} [$(cat "$out/gates_$p1/reference_cache.txt")]";;
     *) echo "unknown step $s"; res[$s]=ERROR;;
