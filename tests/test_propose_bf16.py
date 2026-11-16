@@ -69,9 +69,13 @@ class Programs(unittest.TestCase):
             raise unittest.SkipTest("fleet builds need gguf and jinja2")
         cls.tmp = tempfile.TemporaryDirectory()
         cls.dirs = {}
+        # off / q8 / q4: the card's own trunk (int8-activation MXFP4 matvecs); t_off / t_q8: a trunk without them (MXFP4S_Q8=0), where the
+        # int8 matvecs exist in the MTP programs alone
         for tag, env in (("off", {"MTP_BLOCK_PREP": "", "PROPOSE_HEAD_ROWS": "0"}),
                          ("q8", {"MTP_BLOCK_PREP": "q8_0", "PROPOSE_HEAD_ROWS": "81920"}),
-                         ("q4", {"MTP_BLOCK_PREP": "q4_0", "PROPOSE_HEAD_ROWS": "49152"})):
+                         ("q4", {"MTP_BLOCK_PREP": "q4_0", "PROPOSE_HEAD_ROWS": "49152"}),
+                         ("t_off", {"MTP_BLOCK_PREP": "", "PROPOSE_HEAD_ROWS": "0", "MXFP4S_Q8": "0"}),
+                         ("t_q8", {"MTP_BLOCK_PREP": "q8_0", "PROPOSE_HEAD_ROWS": "81920", "MXFP4S_Q8": "0"})):
             out = os.path.join(cls.tmp.name, tag)
             p = subprocess.run([sys.executable, os.path.join(ROOT, "fleet", "build_fleet.py"), "--tree", ROOT, "--out", out, "--slugs", SLUG],
                                capture_output=True, text=True, env=dict(os.environ, **env))
@@ -92,11 +96,12 @@ class Programs(unittest.TestCase):
         return text[i:text.index("\n}\n", i)]
 
     def test_verified_path_is_unchanged(self):
-        off = self.llm("off")
-        for tag in ("q8", "q4"):
-            on = self.llm(tag)
-            for name in ("llm_advance", "llm_verify"):
-                self.assertEqual(self.program(off, name), self.program(on, name), f"{name} ({tag})")
+        for base, tags in (("off", ("q8", "q4")), ("t_off", ("t_q8",))):
+            off = self.llm(base)
+            for tag in tags:
+                on = self.llm(tag)
+                for name in ("llm_advance", "llm_verify"):
+                    self.assertEqual(self.program(off, name), self.program(on, name), f"{name} ({tag})")
         # the verified head is read as stored
         self.assertIn('"lm_head.weight" : view<2542796800xi8>', self.program(self.llm("q8"), "llm_verify"))
 
@@ -125,8 +130,8 @@ class Programs(unittest.TestCase):
         self.assertEqual(full.count("config.decl @llm.prep_blocks"), 1)               # one declaration for the head's and the block's converters
         self.assertEqual(full.count('kernel.def export("g_prep_bf16_q8_0")'), 1)
 
-    def test_no_int8_in_the_trunk(self):
-        trunk = re.sub(r"command\.program\.def public (?:target\(@\w+\) )?@llm_mtp_(?:warm|propose)\(\).*?\n\}\n", "", self.llm("q8"), flags=re.S)
+    def test_no_int8_in_a_trunk_without_it(self):
+        trunk = re.sub(r"command\.program\.def public (?:target\(@\w+\) )?@llm_mtp_(?:warm|propose)\(\).*?\n\}\n", "", self.llm("t_q8"), flags=re.S)
         launches = re.findall(r"kernel\.launch @(g_(?:mv|quant)\w*q8\w*)\[", trunk)
         self.assertEqual(launches, [], "int8 activations in the trunk")
 
