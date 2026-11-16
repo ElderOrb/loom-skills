@@ -41,6 +41,7 @@ session rather than treating your current session as independent evidence.
 | A campaign: new GPU, many models, a refactor (team roles, mailboxes, state files, DevLab rules, velocity) | `loom-fleet` (`"${LOOM_SKILL_DIR}/../loom-fleet/reference/campaign.md"`) |
 | Improve these skills themselves (faster end-to-end runs, fewer failures) without regressing KPIs | `loom-fleet` (`"${LOOM_SKILL_DIR}/../loom-fleet/reference/skill-trials.md"`) |
 | Populate a Hugging Face org with many models (pick the top models, port and publish each, sweep gates on DevLab, fix and regenerate) | `loom-fleet` (`"${LOOM_SKILL_DIR}/../loom-fleet/reference/populate-org.md"`) |
+| A new hrx-loom SDK release: migrate my package, the fleet or the skills (breaking changes per version pair, rewrite and parse/link sweep scripts, DevLab SDK A/B) | `loom-migrate` (`"${LOOM_SKILL_DIR}/../loom-migrate/SKILL.md"`) |
 | What is special about a model family / GPU / quant, which levers apply where (the knowledge base router) | `loom-kb` (`"${LOOM_SKILL_DIR}/../loom-kb/SKILL.md"`) |
 
 All paths in these skills assume the install root `~/loom` (SDK venv `~/loom/.venv`,

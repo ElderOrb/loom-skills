@@ -13,6 +13,7 @@ the repo root; `campaign.md`, `targeted-fix.md` and `architecture.md` are in `sk
 - Methodology, baselines, quant, models, gates
 - Publishing and reporting
 - Hygiene
+- SDK migrations
 - Rules that are project history, not practice
 
 ## Goals and measures
@@ -118,6 +119,14 @@ the repo root; `campaign.md`, `targeted-fix.md` and `architecture.md` are in `sk
 | 62 | Big files never in `/tmp` or a scratchpad (RAM); work dirs on disk; delete outputs | brief; owner rule | `campaign.md` "Hygiene"; `skills/loom/SKILL.md` "Hard rules" |
 | 63 | Watch MemAvailable and anonymous RSS; one build at a time; memory-capped scopes | brief; owner rule | `campaign.md` "Hygiene"; `skills/loom/SKILL.md` "Hard rules" |
 | 64 | Regenerable outputs stay out of commits; verify regeneration byte for byte | owner rule | `campaign.md` "Hygiene"; `targeted-fix.md` section 2 |
+
+## SDK migrations
+
+| # | Rule | Source | Where |
+|---|---|---|---|
+| 65 | A new SDK release is migrated by one procedure with a version entry per adjacent pair: research first (release, migration table, upstream diff, the wheel), mechanical steps by idempotent script, fleet parse + link sweep, explained program diff, DevLab SDK A/B (old published card on the old SDK vs new package, ABBA, one job), staging publish | owner rule (sdk020) | `skills/loom-migrate/SKILL.md`; `skills/loom-migrate/versions/`; `scripts/sweep.py` |
+| 66 | Simplifications the release allows go in a ledger (landed or listed, measured when behavioural); optimizations it opens become issues with evidence, not work in the migration campaign | brief (sdk020) | `skills/loom-migrate/SKILL.md` steps 8 and 9 |
+| 67 | Every gotcha found is one line (symptom, cause, fix) in the version entry; a fresh agent migrates one card from the repo alone before the entry is final | brief (sdk020) | `skills/loom-migrate/versions/v0.1.0-to-v0.2.0.md` "Gotchas"; `skills/loom-migrate/SKILL.md` step 10 |
 
 ## Rules that are project history, not practice
 
