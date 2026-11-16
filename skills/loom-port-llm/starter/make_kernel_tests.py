@@ -2682,6 +2682,38 @@ def _pmv_planes(n, K):
     nib = rng.integers(0, 256, (n, K // 2), dtype=np.uint8); e = rng.integers(118, 125, (n, K // 32), dtype=np.uint8)
     v = np.empty((n, K), np.float32); v[:, 0::2] = _FP4[nib & 15]; v[:, 1::2] = _FP4[nib >> 4]
     return nib.view(np.int8).reshape(-1), e.view(np.int8).reshape(-1), v * np.repeat(np.exp2(e.astype(np.float32) - 127), 32, 1)
+_nq_mv = re.search(r'^kernel\.def export\("(g_mv_mxfp4s_k%d_t4_q8_r\d+)"\)' % H, _pkg_llm_text() or "", re.M)
+if "export(\"g_post_add_norm_q8\")" in (_pkg_llm_text() or "") and _nq_mv:   # norm_q8: x += y, h = rmsnorm(x) * w, h's int8 rows read back through a matvec
+    tag, t = "g_post_add_norm_q8", 4
+    x0 = rng.standard_normal((t, H)).astype(np.float32); y0 = rng.standard_normal((t, H)).astype(np.float32); nw = rng.uniform(0.5, 1.5, H).astype(np.float32)
+    xs_ = (x0 + y0).astype(np.float32); hh = norm(xs_.astype(np.float64), nw.astype(np.float64)).astype(np.float32)
+    wq, ws, wv = _pmv_planes(64, H)
+    ref = q8_ref(hh).astype(np.float64) @ wv.T.astype(np.float64)
+    for n_, a_ in (("x", x0), ("y", y0), ("nw", nw), ("w", wq), ("ws", ws), ("xe", xs_), ("he", hh), ("e", ref.astype(np.float32))):
+        save(f"{tag}_{n_}", a_)
+    cases.append(f"""check.case public @pmv_{tag} {{
+  %t = check.literal value({t}) : index
+  %nd = check.literal value(64) : index
+  %acc = check.literal value(0) : i32
+  %x = check.file.read.npy path("{tag}_x.npy") : {ty(x0)}
+  %y = check.file.read.npy path("{tag}_y.npy") : {ty(y0)}
+  %nw = check.file.read.npy path("{tag}_nw.npy") : {ty(nw)}
+  %w = check.file.read.npy path("{tag}_w.npy") : {ty(wq)}
+  %ws = check.file.read.npy path("{tag}_ws.npy") : {ty(ws)}
+  %xe = check.file.read.npy path("{tag}_xe.npy") : {ty(x0)}
+  %he = check.file.read.npy path("{tag}_he.npy") : {ty(x0)}
+  %e = check.file.read.npy path("{tag}_e.npy") : tensor<{t}x64xf32>
+  %h = check.generate.fill value(0.0) : {ty(x0)}
+  %hq = check.generate.fill value(0) : tensor<{t}x{2 * H}xi8>
+  %o = check.generate.fill value(0.0) : tensor<{t}x64xf32>
+  kernel.launch @g_post_add_norm_q8[%t](%t, %y, %nw, %x, %nw, %h, %hq) : [index](index, {ty(y0)}, {ty(nw)}, {ty(x0)}, {ty(nw)}, {ty(x0)}, tensor<{t}x{2 * H}xi8>)
+  kernel.launch @{_nq_mv.group(1)}[%nd, %t](%nd, %t, %acc, %hq, %w, %ws, %o) : [index, index](index, index, i32, tensor<{t}x{2 * H}xi8>, {ty(wq)}, {ty(ws)}, tensor<{t}x64xf32>)
+  check.expect.close actual(%x) expected(%xe) atol(1.0e-6) rtol(1.0e-6) nan(different) : {ty(x0)}
+  check.expect.close actual(%h) expected(%he) atol(1.0e-5) rtol(1.0e-5) nan(different) : {ty(x0)}
+  check.expect.close actual(%o) expected(%e) atol({2e-3 * float(np.abs(ref).mean()):.3g}) rtol(2.0e-3) nan(different) : tensor<{t}x64xf32>
+  check.return
+}}
+""")
 for _pk in sorted(set(re.findall(r'^kernel\.def export\("(g_pmv_mxfp4s_[^"]+)"\)', _pkg_llm_text() or "", re.M))):
     _sw = re.match(r"g_pmv_mxfp4s_k(\d+)_t4_swq_r32$", _pk)
     _dn = _sw and re.search(r'^kernel\.def export\("(g_mv_mxfp4s_k%d_t4_q8_r(\d+))"\)' % cfg["ffn"], _pkg_llm_text(), re.M)
