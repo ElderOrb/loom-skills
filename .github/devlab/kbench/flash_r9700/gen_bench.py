@@ -46,8 +46,9 @@ VARIANTS = {   # name -> flash2_g6.py options (FLASH2_G6_OPTS)
     "sacc2": {"B": "2", "sacc": 2},
     "fm": {"B": "2", "fmax": 1, "vpf": "top2", "e2": 1},   # fixed reference m0 (first + diagonal page), running-max fallback above m0 + 15
     "fmt": {"B": "2", "fmax": 1, "vpf": "top", "e2": 1},
+    "fmp": {"B": "2", "fmax": 1, "vpf": "top2", "e2": 1, "peel": 1},   # + unmasked loop below the diagonal
 }
-TESTED = ["fm", "fmt"]
+TESTED = ["fm", "fmp"]
 
 
 def opts_of(v):
