@@ -15,3 +15,17 @@
   - A fused gfx12 front (conv + history commit + q/k norms in one launch; ktest, gates and text match pass) LOST 4 % decode (v1 128-thread
     blocks, run 43771517926; v2 one wave per 128 channels, run 43774217524): the fused kernel costs ~18 us per launch, the three legacy
     kernels ~16.6 us together. The chain is latency-bound (dependent metadata / origin / history loads), not launch-bound. Not merged.
+
+## Fold instead of capture / restore / replay (`decode.spec.gdn_fold`, R9700, MXFP4 Qwen3.8-27B, mxfp4st)
+
+  - The replay of a drafted step re-runs conv + q/k norms + the recurrence over the accepted inputs: it re-reads every layer's state
+    (3 MiB) a second time and costs ~240 tiny launches. With `GDN_FOLD` the verification records what the fold needs (raw conv input
+    and key per step, the update scalar dk per value column and the decay per head; banks of 8 rows per speculative span, indexed by its
+    rank), and after acceptance ONE `g_gdn_fold` launch (all layers, S = fma(k, dk, S * decay) per accepted step, the recurrence's own
+    op order) plus ONE `g_gdn_fold_hist` launch publish the state and the conv history. Bit-identical to the replay (ktest
+    `gdn_fold_vs_replay`, kbench `gdn_fold`). Drafted step 33.94 -> 33.45 ms, GDN 2.00 -> 1.48 ms/step, decode +2 %.
+  - Size per-span scratch with a cap: the runtime prepares @llm_verify at every packing shape up to (1024, 1024) (schedule.c), so
+    `spans x 8` rows were 29 GB there (RESOURCE_EXHAUSTED at serve); `min(spans, 32) x 8` keeps the largest verify scratch below the capture's.
+  - What is left: the fold reads + writes 288 MiB at the bandwidth roof (0.48 ms) and the verify recurrence still reads the state once
+    (0.58 ms, latency-bound). A deferred fold (applied by the next verification's recurrence, ninfer / Lucebox SpecLA) would merge
+    the two reads, but every other reader of the state (advance epochs, prefix captures, forks) would then need the pending factors.
