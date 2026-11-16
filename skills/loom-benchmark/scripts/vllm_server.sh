@@ -3,7 +3,10 @@
 # llamacpp_server.sh does for a GGUF. gates.sh and devlab_perf.sh use it when llm_config.json "source.kind" is "safetensors".
 # usage: vllm_server.sh CHECKPOINT_DIR_OR_REPO [PORT=8130] [MAX_MODEL_LEN=36864]
 #        vllm_server.sh --stop PORT
-#        vllm_server.sh --install       (only the install; prints the venv python)
+#        vllm_server.sh --install       (only the install; prints the venv python as its last line)
+#        vllm_server.sh --env           (after --install: shell `export` lines for anything else that runs vLLM from that venv, e.g.
+#                                        eval "$(vllm_server.sh --env)" before `vllm serve`: ROCM_PATH/PATH/LD_LIBRARY_PATH/PYTORCH_ROCM_ARCH for the HIP dev
+#                                        packages Quark's MXFP4 emulation JIT needs, the userland MPI libs)
 #   VLLM_VENV      the environment (default $VLLM_STATE/venv); created with uv (python 3.12) on first use
 #   VLLM_VERSION / VLLM_ROCM_VARIANT   the pinned wheel (defaults below: vllm.ai/rocm stable index); the cache key names it
 #   VLLM_REVISION  checkpoint revision passed to vLLM (recorded in /props and the card)
@@ -81,6 +84,11 @@ install() {
   echo "INSTALLED vllm $VLLM_VERSION $VLLM_ROCM_VARIANT in $(( $(date +%s) - t0 )) s" | tee -a "$state/vllm-install.log"
 }
 if [ "${1:-}" = --install ]; then install && echo "$venv/bin/python"; exit; fi
+if [ "${1:-}" = --env ]; then
+  ldextra
+  GFX_ARCH=$("$venv/bin/python" -c "import torch; print(torch.cuda.get_device_properties(0).gcnArchName.split(':')[0])" 2>/dev/null || true); rocmenv
+  for v in LD_LIBRARY_PATH ROCM_PATH HIP_PATH ROCM_HOME PATH PYTORCH_ROCM_ARCH; do [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"; done; exit 0
+fi
 ckpt=${1:?usage: vllm_server.sh CHECKPOINT [PORT] [MAX_MODEL_LEN]}; port=${2:-8130}; mlen=${3:-36864}
 if curl -s -m 2 localhost:$port/health >/dev/null 2>&1; then echo "port $port is busy"; exit 1; fi
 install

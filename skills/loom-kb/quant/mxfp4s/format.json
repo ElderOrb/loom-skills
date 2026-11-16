@@ -18,5 +18,9 @@
     "rdna3": false,
     "rdna4": true
   },
-  "evidence": "first card amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom on the R9700 (gfx1201, DevLab runs 43770308768, 43771486278, 43772073750): kernel tests 45/45 and 46/46 (mxfp4s matvec per output width, GEMM 128/256 rows, bf16 embed/head, grouped GDN chain), func chat + tools, consistency 2/2; not yet run on Strix Halo (gfx1151: kernels compile)"
+  "evidence": "first card amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom on the R9700 (gfx1201, DevLab runs 43770308768, 43771486278, 43772073750): kernel tests 45/45 and 46/46 (mxfp4s matvec per output width, GEMM 128/256 rows, bf16 embed/head, grouped GDN chain), func chat + tools, consistency 2/2; not yet run on Strix Halo (gfx1151: kernels compile)",
+  "target_families": [
+    "rdna4"
+  ],
+  "target_reason": "the fast path is FP8 WMMA (gfx12); gfx11 (Strix Halo) has none, and the GGUF Q4_K_M card serves it. Owner decision 2026-11-15: MXFP4 safetensors cards have no Strix rows."
 }
