@@ -13,47 +13,34 @@
    "memory_bytes_r9700": 34000000000,
    "variants": [
     {
-     "name": "c82",
-     "context": 81920,
+     "name": "c108",
+     "context": 108544,
      "execution": {
-      "context_capacity": 81920,
-      "pool_capacity": 81920
+      "context_capacity": 108544,
+      "pool_capacity": 108544
      }
     },
     {
-     "name": "c98",
-     "context": 98304,
+     "name": "c110",
+     "context": 110592,
      "execution": {
-      "context_capacity": 98304,
-      "pool_capacity": 98304
+      "context_capacity": 110592,
+      "pool_capacity": 110592
      }
     },
     {
-     "name": "c106",
-     "context": 106496,
+     "name": "c112",
+     "context": 112640,
      "execution": {
-      "context_capacity": 106496,
-      "pool_capacity": 106496
-     }
-    },
-    {
-     "name": "c113",
-     "context": 113664,
-     "execution": {
-      "context_capacity": 113664,
-      "pool_capacity": 113664
+      "context_capacity": 112640,
+      "pool_capacity": 112640
      }
     }
    ],
    "steps": [
-    "func:c82",
-    "func:c98",
-    "func:c106",
-    "func:c113",
-    "fullctx:c82",
-    "fullctx:c98",
-    "fullctx:c106",
-    "fullctx:c113"
+    "func:c108",
+    "func:c110",
+    "func:c112"
    ],
    "runner": "r9700"
   }
