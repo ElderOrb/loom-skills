@@ -393,6 +393,9 @@ serve_alone() { # serve_alone VARIANT
     vmem=none
   fi
   [ -n "${PROFILE_SA:-}" ] && sa="$sa $PROFILE_SA"   # the profile step: --print_device_statistics
+  # VRAM still held by the process that was just stopped (a vLLM / llama.cpp server, the reference fill, the last loom-serve) makes the load fail
+  # (RESOURCE_EXHAUSTED / "model is unavailable"): wait until it is released, and log what was held (vram_log.txt)
+  "$B/wait_vram.sh" "serve $1" 1024 180 "$out/vram_log.txt"
   step "serve $1"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
   grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
   curl -sf "$url/v1/models" >/dev/null || return 1
@@ -479,6 +482,7 @@ vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned 
   read -r ck rev < <("$T" -c "import json; s=json.load(open('$card/llm_config.json'))['source']; print(s['repo'], s.get('revision') or 'main')")
   args="--max-model-len $ml"; [ "$1" = on ] && [ -n "$spec" ] && args="$args --speculative-config '$spec'"
   echo "$args" > "$out/vllm_args.txt"; "$vpy" -c "import vllm; print(vllm.__version__.split('+')[0])" > "$out/vllm_version.txt" 2>/dev/null
+  "$B/wait_vram.sh" "vllm serve ($1)" 1024 180 "$out/vram_log.txt"
   step "vllm serve $ck@${rev:0:8}: $args"
   eval env VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} ${VLLM_EXTRA_ENV:-} setsid nohup "$vpy" -m vllm.entrypoints.openai.api_server --model "$ck" --revision "$rev" \
     --served-model-name vllm-card --port "$VPORT" $args > "$out/vllm_serve.log" 2>&1 &
@@ -511,6 +515,7 @@ while [ "$qi" -lt "${#queue[@]}" ]; do
       "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
       ms=(); ids=(); for v in $variants; do ms+=("$D/$v/pkg/model_ab.json"); ids+=("$cardid-$v"); done
       nv=${#ms[@]}; abmem=$(( 11000000000 * nv + 4000000000 )); [ -n "$RDEV" ] && [ "$abmem" -gt "$mem" ] && abmem=$mem
+      "$B/wait_vram.sh" "ab serve" 1024 180 "$out/vram_log.txt"
       step "ab: one loom-serve with $nv packages ($abmem bytes)"
       "$SV/serve.sh" abserve "$PORT" amdgpu "$abmem" "${ms[@]}" | tail -2
       "$T" "$here/.github/scripts/ab_decode.py" "$url" "${ids[@]}" --rounds "$p1" --think "${p2:-$TH}" --log "$out/ab.jsonl" 2>&1 | tee "$out/ab.log"
