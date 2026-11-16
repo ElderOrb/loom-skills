@@ -77,6 +77,11 @@ GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf
        "a2pfa": {"rf": 2, "swp": True, "pfa": 2}, "p0": {"pad": 0}, "p32": {"pad": 32}, "p64": {"pad": 64}, "p80": {"pad": 80}, "p112": {"pad": 112}}   # variants that are generator parameters (the levers), not text ablations
 
 
+# the variants whose results are checked against float64 (the others are timing-only levers that lost or tied; hrx-loom 0.1.0 fails to verify a module of ~65k lines
+# ("view type references encoding value ... not defined at this point", notes/sdk_blockers.md), so the checked set stays at ~60 cases)
+TESTED = ["staged", "adirect", "adbuf", "adk2", "adr2", "adn128", "t128x256", "t256x256", "swp", "a2swp", "pfa2", "yf16", "pfa1"]
+
+
 def ytype(variant):
     """the output element type of a variant's kernels"""
     return "f16" if GEN.get(variant.split("+")[0] if variant else "", {}).get("yf16") else "f32"
@@ -280,7 +285,7 @@ def save(d, name, a):
 def tests(outdir):
     rng = np.random.default_rng(7)
     out = []
-    for order, variant in [("pairs", ""), ("split16", "")] + [("pairs", v) for v in GEN]:
+    for order, variant in [("pairs", ""), ("split16", "")] + [("pairs", v) for v in TESTED]:
         for mode, K, n in (("store", 5120, 1024), ("swiglu", 5120, 512), ("store", 17408, 256)):
             rows = 512
             kn = f"t_{mode}_{order}{'_' + variant if variant else ''}_{K}"

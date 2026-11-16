@@ -62,27 +62,11 @@
       "gen": "gemm_mxfp4s/gen_bench.py",
       "gen_variants": [
         "base",
-        "r1024",
-        "p0",
-        "p0+r1024",
-        "p64",
-        "p64+r1024",
-        "p80",
-        "p80+r1024",
-        "p112",
-        "p112+r1024"
+        "r1024"
       ],
       "files": [
         "bench.loom",
-        "bench_r1024.loom",
-        "bench_p0.loom",
-        "bench_p0+r1024.loom",
-        "bench_p64.loom",
-        "bench_p64+r1024.loom",
-        "bench_p80.loom",
-        "bench_p80+r1024.loom",
-        "bench_p112.loom",
-        "bench_p112+r1024.loom"
+        "bench_r1024.loom"
       ],
       "tests": [
         "test.loom"
