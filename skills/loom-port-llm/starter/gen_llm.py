@@ -15,7 +15,7 @@
 import json, math, os, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate  # noqa: E402
+from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate, chunk_mode  # noqa: E402
 from formats import SPLIT, SCALE_DIV  # noqa: E402
 
 CFG = json.load(open(os.environ.get("LLM_CONFIG") or sys.argv[1]))
@@ -4831,6 +4831,8 @@ def gdn_layer(i, b, nm, sz, par):
         # every span runs in exactly one of the two kernels (by its own length), so the pf kernel is only needed when
         # the epoch can hold a long span
         REC = REC + "\n  scf.if %gemm {\n  " + REC.replace("@g_gdn_recurrence[", "@g_gdn_recurrence_pf[") + "\n  }"
+    elif chunk_mode(g) == "group":   # gfx12: spans of 64+ tokens run the chunked kernel (a gfx11 build launches nothing here: its kernel takes every span)
+        REC = REC + "\n  scf.if %gemm {\n  // dual-group: rdna4 " + REC.strip().replace("@g_gdn_recurrence[", "@g_gdn_chunk_rdna4[") + "\n  // dual-group: end\n  }"
     T = P + [
         "  " + lin(fmt_of(nm("attn_qkv")), "%h", "%s_h", f"%wqkv_{i}", sz("attn_qkv"), "%gq", "%nH", "%nC", H) + "\n",
         "  " + lin(fmt_of(nm("attn_gate")), "%h", "%s_h", f"%wz_{i}", sz("attn_gate"), "%gz", "%nH", "%nVD", H) + "\n",
@@ -5706,7 +5708,7 @@ if __name__ == "__main__":
         COMMON += MXFP4
     if any(t["type"] in SPLIT for t in TENS.values()):
         COMMON += MXFP4S
-    if any(t["type"] == "bf16" for t in TENS.values()) and "func.def inline @g_bf16_values" not in COMMON:   # bf16 embedding / head / MTP block (safetensors)
+    if (CFG.get("source") or {}).get("kind") == "safetensors" and any(t["type"] == "bf16" for t in TENS.values()) and "func.def inline @g_bf16_values" not in COMMON:   # bf16 embedding / head / MTP block (safetensors)
         COMMON += BF16_VALUES
     # A BF16 (safetensors) head with a reduced-vocabulary proposal copy: only the proposals run the int8 head (over the Q4_0 copy);
     # the verified head keeps its f32-activation kernels.
