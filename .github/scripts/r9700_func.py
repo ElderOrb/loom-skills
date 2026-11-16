@@ -12,6 +12,7 @@ import json
 import struct
 import sys
 import time
+import urllib.error
 import urllib.request
 import zlib
 
@@ -46,6 +47,8 @@ def chat(messages, max_tokens=256, **extra):
 def check(name, fn):
     try:
         ok, detail = fn()
+    except urllib.error.HTTPError as e:   # the server's own reason (a 503 says why: retained state, capacity ...)
+        ok, detail = False, f"HTTPError: HTTP Error {e.code}: {e.read()[:400].decode('utf-8', 'replace')}"
     except Exception as e:
         ok, detail = False, f"{type(e).__name__}: {e}"
     R["checks"][name] = {"ok": ok, "detail": detail}
