@@ -235,6 +235,12 @@ CHOICE("decode.mv.q8_r32", "bool", True, "MV_Q8_R32", doc="Int8 16-token matvecs
 CHOICE("decode.spec.gdn_copy_split", "int", 1, "GDN_COPY_SPLIT", kernels=["g_gdn_capture*", "g_gdn_restore*"], rows=ROWS_DECODE, devices=["rdna4"], per_target=True,
        doc="Workgroups per token of the gated delta-net capture / restore copies of a drafted step (gfx12 twin; 1 = the one-workgroup-per-token "
            "kernel on both targets). R9700 Qwen3.8-27B MTP 3: 8 = -0.8 ms of a 40 ms step.")
+CHOICE("decode.spec.gdn_fold", "bool", False, "GDN_FOLD", enc=("1", None),
+       kernels=["g_gdn_conv_bank", "g_gdn_recurrence_rec*", "g_gdn_fold*", "g_gdn_capture*", "g_gdn_restore*"], rows=ROWS_DECODE, from_pr="mxfp4st-ogdn",
+       doc="Drafted verification of a gated delta-net hybrid without capture / restore / replay: the verification records each speculative "
+           "step's fold factors (raw conv input + key, update scalar per value column, decay per head) and, after acceptance, one launch "
+           "folds the accepted steps into every layer's state and one commits the conv histories (gen_gdn.fold_kernels). Published state "
+           "bit-identical to the replay's; the verify scratch holds 8 rows per span instead of every epoch token's replay inputs.")
 CHOICE("decode.mv.pair_proj", "str", "qg", "PAIR_PROJ", kernels=["g_mv*_pair"], rows=ROWS_DECODE + ROWS_STREAMS,
        doc="Paired projections: qg (q + gate), kv (k + v), 1 (both), 0 (off). k + v measured no faster end to end.")
 
@@ -383,6 +389,25 @@ CHOICE("hybrid.gdn.chunk", "bool", False, "GDN_CHUNK", devices=["rdna4"], rows=R
        from_pr="q38r9700 gdnpf",
        doc="gfx12 chunked (WY) gated delta-net prefill (gen_gdn_chunk.py): spans of 64+ tokens run g_gdn_chunk_rdna4 (f16 WMMA, f32 state), the "
            "sequential kernel's gfx12 twin the shorter ones; the gfx11 kernels do not change (128 x 128 heads only).")
+CHOICE("prefill.gdn.fused2", "bool", False, "GDN_FUSED2", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_fa_rdna4", "g_gdn_fb_rdna4"],
+       from_pr="mxfp4st olayer",
+       doc="gfx12 fused gated delta-net prefill in two launches (gen_gdn_fused.py): g_gdn_fa_rdna4 (conv + SiLU, q/k norms, gates, the WY solve "
+           "and W = T beta e^gc K, U = T beta V, P per (value head, 32-token chunk), fully parallel) and g_gdn_fb_rdna4 (the serial state pass "
+           "d = U - W S, O = e^gc Q S + P d, S update, norm-gate epilogue, conv history commit) replace conv, commit, qk_norm, the chunk kernel and "
+           "norm_gate in GEMM-shape epochs; gfx11 and short epochs keep the chain (128 x 128 heads, conv 4).")
+CHOICE("prefill.gdn.fused2_min", "int", 64, "GDN_FUSED2_MIN", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_fa_rdna4", "g_gdn_fb_rdna4"],
+       from_pr="mxfp4st olayer2",
+       doc="With prefill.gdn.fused2: the smallest epoch (rows) that takes the fused pair: 64 = every GEMM-shape epoch; 128 = 64-row epochs (prompts and "
+           "tails under 64 tokens) keep the chain, whose spans under 64 tokens run the exact sequential recurrence.")
+CHOICE("prefill.gdn.ab_f8", "bool", False, "GDN_AB_F8", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_ab_gemm_mxfp4s_store_pair_f8_m256_rdna4"],
+       from_pr="mxfp4st olayer2",
+       doc="MXFP4 split-plane hybrids with prefill.gdn.ab_q8 and the fp8 GEMMs (gen_mxfp4s.ab_f8): in GEMM-shape epochs whose rows are a multiple of 32 "
+           "the 48-row GDN alpha / beta projections run as ONE paired skinny fp8 WMMA GEMM (32 x 48 tiles, both weights, K step 256) on the fp8 rows the "
+           "producer twin already wrote for the qkv GEMM (%h8), not g_quant_q8 + two int8 16-token matvecs; gfx11 keeps the int8 launches.")
+CHOICE("prefill.gdn.ab_q8", "bool", False, "GDN_AB_Q8", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_quant_q8", "g_mv_mxfp4s_k5120_t16_q8"],
+       from_pr="mxfp4st olayer",
+       doc="MXFP4 split-plane hybrids, GEMM-shape epochs: the 48-row GDN alpha / beta projections run as the 16-token int8 matvec on h quantized "
+           "once to int8, not as the f32 4-token matvec over h (gen_llm.ab_q8).")
 
 # ======================================================================================================================
 # Speculative decoding (gen_llm.py, draft/)
@@ -402,6 +427,16 @@ CHOICE("draft.propose.block", "str", None, "MTP_BLOCK_PREP", kernels=["g_prep_*"
        doc="MTP proposals of a safetensors checkpoint whose NextN block is BF16: the block's matrices (eh_proj, attention, FFN) are read from a "
        "load-time Q8_0 or Q4_0 copy (q8_0 | q4_0; empty: as stored). The block feeds proposals only (verification never reads it), so only "
        "acceptance moves (draft/prep_weights.py, weights.loom).", **{})
+CHOICE("draft.propose.head_pieces", "bool", False, "PROPOSE_HEAD_PIECES", enc=("1", "0"), kernels=["g_prep_*", "g_head_mv*_p40_pc*"], rows=ROWS_DECODE + ROWS_STREAMS,
+       doc="The proposal head's copy (draft.propose.head_rows, BF16 head) as several load-time prepared tensors of decode.head.piece_rows rows "
+       "(draft/prep_weights.piece_entries): hrx-loom stages a prepared tensor's input whole through four lanes, so one N-row copy costs "
+       "4 x N x 2H bytes of device budget while loading, pieces 4 x piece x 2H; one head launch per piece (g_head_mv*_pc<chunks>).", **{})
+CHOICE("decode.head.verify", "str", None, "VERIFY_HEAD_PREP", kernels=["g_prep_*", "g_head_mv*_q8_pc*"], rows=ROWS_DECODE + ROWS_STREAMS,
+       doc="q8_0: the verified head of a safetensors checkpoint with an untied BF16 head reads a load-time Q8_0 copy (int8 activations, "
+       "decode.head.piece_rows-row prepared tensors) instead of the BF16 tensor: about half the head bytes per step, and the BF16 tensor is "
+       "no longer resident. CHANGES the verified output (lossy weights): opt-in, gated (golden vs the reference, near-tie statistics).", **{})
+CHOICE("decode.head.piece_rows", "int", 16384, "HEAD_PIECE_ROWS", kernels=["g_head_mv*_pc*"], rows=ROWS_DECODE + ROWS_STREAMS,
+       doc="Rows per prepared piece of a pieced head (draft.propose.head_pieces, decode.head.verify); a multiple of 128.", **{})
 CHOICE("draft.dflash.splits", "int", 32, "DFL_SPLITS", kernels=["g_dfl_attention", "g_dfl_ctx_split"], rows=ROWS_DECODE,
        doc="DFlash context-attention splits.")
 CHOICE("draft.dflash.prep_weights", "bool", True, "DRAFTER_PREP", kernels=["g_dfl_*"], rows=ROWS_DECODE + ROWS_STREAMS,

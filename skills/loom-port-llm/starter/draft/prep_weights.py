@@ -56,6 +56,32 @@ def subset_entry(src, dst, N, base, V, H):
     return (src, dst, rows * H // unit, (V * H // 256 * SRC_SUPER[src], split, skip))
 
 
+def piece_entries(dst, key, N, base, V, H, piece_rows, prefix):
+    """A BF16 head's row subset (subset_rows: [0, N) + the added-token rows; N >= V: every row) copied as several prepared
+    tensors of piece_rows rows each (keys prefix0, prefix1, ...; the last piece holds the remainder). hrx-loom stages each prepared
+    tensor's input ranges whole through four load-time lanes (weights.h: the staging extent is the LARGEST tensor's staged bytes),
+    so one copy of N rows costs 4 x N x 2H bytes of device budget while loading; pieces cost 4 x piece_rows x 2H whatever N is.
+    Each piece reads `key` explicitly (its own parameter key is not a checkpoint tensor): entry (bf16r, dst, blocks,
+    (len1, split, 0, off2, len2, off1, key)); a piece that straddles the head/tail boundary stages two ranges. Returns
+    ({piece key: entry}, [rows per piece])."""
+    assert piece_rows % 128 == 0 and H % 32 == 0
+    n, tail, rows = subset_rows(N, base, V)
+    entries, sizes = {}, []
+    for k, a in enumerate(range(0, rows, piece_rows)):
+        b = min(rows, a + piece_rows)
+        segs = []   # source row ranges of combined rows [a, b): head rows map to themselves, rows >= n to tail + (r - n)
+        if a < n:
+            segs.append((a, min(b, n)))
+        if b > n:
+            segs.append((tail + max(a, n) - n, tail + b - n))
+        (s0, e0), *rest = segs
+        o2, l2 = (rest[0][0] * H * 2, (rest[0][1] - rest[0][0]) * H * 2) if rest else (0, 0)
+        entries[f"{prefix}{k}"] = ("bf16r", dst, (b - a) * H // 32,
+                                   ((e0 - s0) * H * 2, (e0 - s0) * H // 32, 0, o2, l2, s0 * H * 2, key))
+        sizes.append(b - a)
+    return entries, sizes
+
+
 def _decode(src, g="%g", origin="%in_origin"):
     if src in ("bf16", "f16"):
         return f"""    %ib = index.constant 64 : offset
@@ -327,13 +353,18 @@ command.program.def public @llm_prep_{n}() launch(%output: buffer, %input: buffe
 """
 
 
-def library(pairs):
-    """Config declarations + converters for the (src, dst) pairs any policy of the package uses (llm.loom)."""
+def library(pairs, have=""):
+    """Config declarations + converters for the (src, dst) pairs any policy of the package uses (llm.loom). have: text that
+    already holds some of them (another policy's library): those are not emitted twice."""
     if not pairs:
         return ""
     sub = "config.decl @llm.prep_split : i64\n\nconfig.decl @llm.prep_skip : i64\n" if any(s in SRC_SUPER for s, _ in pairs) else ""
-    return ("config.decl @llm.prep_blocks : i64\n\nconfig.decl @llm.prep_input : i64\n" + sub
-            + "".join(kernel(s, d) for s, d in sorted(pairs)))
+    text = ("config.decl @llm.prep_blocks : i64\n\nconfig.decl @llm.prep_input : i64\n" + sub
+            + "".join(kernel(s, d) for s, d in sorted(pairs) if f'export("g_prep_{s}_{d}")' not in have))
+    for c in ("blocks", "input", "split", "skip"):
+        if f"config.decl @llm.prep_{c} : i64" in have:
+            text = text.replace(f"config.decl @llm.prep_{c} : i64\n\n", "", 1).replace(f"config.decl @llm.prep_{c} : i64\n", "", 1)
+    return text
 
 
 def policy(entries, what):
@@ -342,6 +373,8 @@ def policy(entries, what):
     hx = lambda s: s.encode().hex()
     SUB = any(len(e) > 3 for e in entries.values())
     SUB2 = any(len(e) > 3 and len(e[3]) > 3 for e in entries.values())   # bf16r: a second staged range (llm.prep_skip carries its origin)
+    SUB3 = any(len(e) > 3 and len(e[3]) > 5 for e in entries.values())   # piece_entries: the first range's offset + an explicit source key
+    skeys = sorted({e[3][6] for e in entries.values() if len(e) > 3 and len(e[3]) > 5})
     pairs = sorted({e[:2] for e in entries.values()})
     names = sorted(entries)
     rod = "".join(f'global.rodata.def @root{j} = bytes("{hx(f"llm_prep_{s}_{d}")}")\n\n' for j, (s, d) in enumerate(pairs))
@@ -349,14 +382,19 @@ def policy(entries, what):
         rod += f'global.rodata.def @split_key = bytes("{hx("llm.prep_split")}")\n\nglobal.rodata.def @skip_key = bytes("{hx("llm.prep_skip")}")\n\n'
     rod += f'global.rodata.def @blocks_key = bytes("{hx("llm.prep_blocks")}")\n\nglobal.rodata.def @input_key = bytes("{hx("llm.prep_input")}")\n\n'
     rod += "".join(f'// "{n}"\nglobal.rodata.def @k{i} = bytes("{hx(n)}")\n\n' for i, n in enumerate(names))
+    rod += "".join(f'// source "{n}"\nglobal.rodata.def @s{i} = bytes("{hx(n)}")\n\n' for i, n in enumerate(skeys))
     body = ["  %zero = scalar.constant 0 : i64\n  %blocks_0 = scalar.constant 0 : i64\n  %kind_0 = scalar.constant 0 : i64\n"
             "  %inb_0 = scalar.constant 0 : i64\n  %outb_0 = scalar.constant 0 : i64\n"
             + ("  %len_0 = scalar.constant 0 : i64\n  %split_0 = scalar.constant 0 : i64\n  %skip_0 = scalar.constant 0 : i64\n" if SUB else "")
-            + ("  %off2_0 = scalar.constant 0 : i64\n  %len2_0 = scalar.constant 0 : i64\n" if SUB2 else "")]
+            + ("  %off2_0 = scalar.constant 0 : i64\n  %len2_0 = scalar.constant 0 : i64\n" if SUB2 else "")
+            + ("  %off1_0 = scalar.constant 0 : i64\n" + "".join(f"  %sk{i} = global.load @s{i} : buffer\n" for i in range(len(skeys))) if SUB3 else "")]
+    prev_src = "%key"
+    o2n, l2n = ("%nso_", "%nsl_") if SUB3 else ("%no2", "%nl2")   # %no2<i> / %nl2<i> collide with %no<2x> beyond 20 entries (only one-entry policies used them)
     for i, n in enumerate(names):
         s, d, b, *ex = entries[n]
         ln, sp, sk, *r2 = ex[0] if ex else (b * SRC.get(s, 0), b, 0)
-        o2, l2 = r2 if r2 else (0, 0)
+        o2, l2, *r3 = r2 if r2 else (0, 0)
+        o1, skey = r3 if r3 else (0, None)
         body.append(f"  %name{i} = global.load @k{i} : buffer\n"
                     f"  %is{i} = func.call @same(%key, %name{i}) : (buffer, buffer) -> (i1)\n"
                     f"  %nb{i} = scalar.constant {b} : i64\n  %nk{i} = scalar.constant {pairs.index((s, d))} : i64\n"
@@ -368,8 +406,12 @@ def policy(entries, what):
                     + (f"  %nl{i} = scalar.constant {ln} : i64\n  %nsp{i} = scalar.constant {sp} : i64\n  %nsk{i} = scalar.constant {sk} : i64\n"
                        f"  %len_{i + 1} = scf.select %is{i}, %nl{i}, %len_{i} : i64\n  %split_{i + 1} = scf.select %is{i}, %nsp{i}, %split_{i} : i64\n"
                        f"  %skip_{i + 1} = scf.select %is{i}, %nsk{i}, %skip_{i} : i64\n" if SUB else "")
-                    + (f"  %no2{i} = scalar.constant {o2} : i64\n  %nl2{i} = scalar.constant {l2} : i64\n"
-                       f"  %off2_{i + 1} = scf.select %is{i}, %no2{i}, %off2_{i} : i64\n  %len2_{i + 1} = scf.select %is{i}, %nl2{i}, %len2_{i} : i64\n" if SUB2 else ""))
+                    + (f"  {o2n}{i} = scalar.constant {o2} : i64\n  {l2n}{i} = scalar.constant {l2} : i64\n"
+                       f"  %off2_{i + 1} = scf.select %is{i}, {o2n}{i}, %off2_{i} : i64\n  %len2_{i + 1} = scf.select %is{i}, {l2n}{i}, %len2_{i} : i64\n" if SUB2 else "")
+                    + (f"  %nfo_{i} = scalar.constant {o1} : i64\n  %off1_{i + 1} = scf.select %is{i}, %nfo_{i}, %off1_{i} : i64\n"
+                       + (f"  %src_{i + 1} = scf.select %is{i}, %sk{skeys.index(skey)}, {prev_src} : buffer\n" if skey else "") if SUB3 else ""))
+        if SUB3 and skey:
+            prev_src = f"%src_{i + 1}"
     N = len(names)
     stage = []
     for j, _ in enumerate(pairs):
@@ -389,7 +431,7 @@ def policy(entries, what):
 """ if pairs[j][0] in SRC_SUPER else "") + "    }\n")
     second = f"""    %has2 = scalar.cmpi ne, %len2_{N}, %zero : i64
     %second = scf.if %has2 -> (i64) {{
-      %s2 = func.call @input(%source, %key, %off2_{N}, %len2_{N}, %align) : (i32, buffer, i64, i64, i64) -> (i64)
+      %s2 = func.call @input(%source, {prev_src}, %off2_{N}, %len2_{N}, %align) : (i32, buffer, i64, i64, i64) -> (i64)
       scf.yield %s2 : i64
     }} else {{
       scf.yield %zero : i64
@@ -428,7 +470,7 @@ func.def public @prepare_weight(%key: buffer) -> (i64) {{
     %source = scalar.constant 0 : i32
     %align = scalar.constant 256 : i64
     {"%length = scalar.muli %blocks_" + str(N) + ", %inb_" + str(N) + " : i64" if not SUB else "%length = scalar.addi %len_" + str(N) + ", %zero : i64"}
-    %first = func.call @input(%source, %key, %zero, %length, %align) : (i32, buffer, i64, i64, i64) -> (i64)
+    %first = func.call @input(%source, {prev_src}, {"%off1_" + str(N) if SUB3 else "%zero"}, %length, %align) : (i32, buffer, i64, i64, i64) -> (i64)
 {second}{"".join(stage)}    %prepared = scalar.muli %blocks_{N}, %outb_{N} : i64
     scf.yield %prepared : i64
   }} else {{

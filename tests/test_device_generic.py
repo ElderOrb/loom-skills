@@ -62,7 +62,7 @@ class DeviceJobs(unittest.TestCase):
         doc = json.loads(r.stdout)
         (j,) = doc["jobs"]
         self.assertTrue(j["require_preset_r9700"])
-        self.assertEqual(j["served_context"], 98304)   # exec.context_cap of the model node (measured with the MTP proposal copies: func passes on every runner)
+        self.assertEqual(j["served_context"], 110592)   # exec.context_cap of the model node (measured with the MTP proposal copies: func passes on every runner)
         self.assertFalse([x for x in j["steps"] if x.startswith("llama")])
         has_vllm = os.path.exists(os.path.join(ROOT, "skills", "loom-benchmark", "scripts", "vllm_shim.py"))   # the gates step needs the vLLM reference
         self.assertEqual(any(x.startswith("gates") for x in j["steps"]), has_vllm)

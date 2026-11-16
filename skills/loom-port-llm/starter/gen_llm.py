@@ -15,7 +15,7 @@
 import json, math, os, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate, chunk_mode  # noqa: E402
+from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate, chunk_mode, fused_mode  # noqa: E402
 from formats import SPLIT, SCALE_DIV  # noqa: E402
 
 CFG = json.load(open(os.environ.get("LLM_CONFIG") or sys.argv[1]))
@@ -49,6 +49,27 @@ if MTP_LAYER is not None and os.environ.get("MTP_BLOCK_PREP"):
         if _n.startswith(f"blk.{MTP_LAYER}.") and _t["type"] == "bf16" and len(_t["shape"]) == 2 and _t["shape"][0] % 32 == 0:
             MBLK_PREP[_n] = ("bf16", _mdst, _t["shape"][0] * _t["shape"][1] // 32)
             _t["type"] = _mdst
+# VERIFY_HEAD_PREP=q8_0 (choice decode.head.verify; safetensors checkpoint with an untied BF16 head): the verified head (every program's
+# argmax / sampling head) reads a load-time Q8_0 copy instead of the BF16 tensor, in HEAD_PIECE_ROWS-row pieces (prep_weights.piece_entries:
+# separately prepared tensors, so the load-time staging stays one piece wide). It CHANGES the verified output (lossy weights, int8
+# activations as the trunk's matvecs): opt-in, gated. HEAD_SRC_FMT keeps the checkpoint's format for the proposal-head copy.
+HEAD_SRC_FMT = {}
+VHEAD_PREP = os.environ.get("VERIFY_HEAD_PREP") or None
+HEAD_PIECE_ROWS = int(os.environ.get("HEAD_PIECE_ROWS", "16384") or 16384)
+if VHEAD_PREP:
+    _hn = "output.weight"
+    assert VHEAD_PREP == "q8_0", f"VERIFY_HEAD_PREP={VHEAD_PREP}: q8_0"
+    assert (CFG.get("source") or {}).get("kind") == "safetensors" and CFG["tensors"].get(_hn, {}).get("type") == "bf16", \
+        "VERIFY_HEAD_PREP prepares an untied BF16 head of a safetensors checkpoint"
+    HEAD_SRC_FMT[_hn] = "bf16"
+    CFG["tensors"][_hn]["type"] = VHEAD_PREP
+
+
+def src_fmt(name):
+    """The checkpoint's own format of a tensor (VERIFY_HEAD_PREP retypes the head to its prepared copy)."""
+    return HEAD_SRC_FMT.get(name) or CFG["tensors"][name]["type"]
+
+
 def nff(i):
     """index SSA of layer i's FFN width."""
     return "%nFF" if FF_UNIFORM else f"%nFF{FFL[i]}"
@@ -4156,7 +4177,81 @@ kernel.def export("g_logits_export") @g_logits_export(%spans: index) {{
 """
 
 
-def head_mv(TG, fmt, iq=False, suffix=""):
+def head_mv(TG, fmt, iq=False, suffix="", piece=None):
+    """head_mv_whole(); piece=LC: the variant over one piece of the head (HEAD_PIECES: a separately prepared tensor of LC x 128 rows,
+    the last piece fewer): name + _pc<LC>, LC chunk workgroups, a trailing launch operand %chunk0 (the piece's first 128-row chunk).
+    Rows address the piece's own buffer (row - 128 x chunk0); partials, logits and token ids keep the whole head's indexing, so one
+    g_head_select reads every piece's chunks. Each row's arithmetic is the whole-head kernel's (bit-identical results)."""
+    text = head_mv_whole(TG, fmt, iq, suffix)
+    if not piece:
+        return text
+    name = "g_head_mv" + (f"_t{TG}" if TG > 1 else "") + ("_q8" if iq else "") + suffix
+    LC = piece
+    reps = [(f'export("{name}") @{name}(', f'export("{name}_pc{LC}") @{name}_pc{LC}('),
+            (f"  %chunks = index.constant {CHUNKS} : index\n", f"  %chunks = index.constant {LC} : index\n"),
+            ("%partials: buffer, %logits: buffer) {", "%partials: buffer, %logits: buffer, %chunk0_arg: index) {"),
+            (f"  %chunk_id = kernel.workgroup.id<y> : index\n  %chunk = index.assume %chunk_id [range(%chunk_id, 0, {CHUNKS - 1})] : index\n",
+             f"  %lchunk_id = kernel.workgroup.id<y> : index\n  %lchunk = index.assume %lchunk_id [range(%lchunk_id, 0, {LC - 1})] : index\n"
+             f"  %chunk0 = index.assume %chunk0_arg [range(%chunk0_arg, 0, {CHUNKS - 1})] : index\n  %chunk_sum = index.add %lchunk, %chunk0 : index\n"
+             f"  %chunk = index.assume %chunk_sum [range(%chunk_sum, 0, {CHUNKS - 1})] : index\n"),
+            ("  %first_row = index.mul %chunk, %rows : index", "  %first_row = index.mul %chunk, %rows : index\n  %row0 = index.mul %chunk0, %rows : index"),
+            ("    %ro = index.scale %row_c, %row_bytes : index, offset -> offset", "    %row_loc = index.sub %row_c, %row0 : index\n    %ro = index.scale %row_loc, %row_bytes : index, offset -> offset")]
+    for a, b in reps:
+        assert text.count(a) == 1, f"head_mv piece: {a!r} x {text.count(a)}"
+        text = text.replace(a, b)
+    return text
+
+
+def head_pieces(text, root, key, prefix, sizes, rows):
+    """In every command program, `%v = command.parameter ROOT, "KEY" : view<S>` (a head) becomes one parameter per piece (keys
+    prefix0, prefix1, ..., `sizes` rows each, S scaled by rows) and every head launch reading %v one launch of its _pc<LC> variant per
+    piece, with the piece's first chunk as the trailing operand. Returns (text, {(kernel, LC)}) for the variants to emit."""
+    import re as _re
+    used = set()
+    pat = _re.compile(r'^([ \t]*)(%\w+) = command\.parameter ' + _re.escape(root) + r', "' + _re.escape(key) + r'" : view<(\d+)xi8>\n', _re.M)
+    lpat = _re.compile(r'^([ \t]*)kernel\.launch @(g_head_mv\w*)\[([^\]]*)\]\(([^)]*)\) : \[index\]\(([^)]*)\)$', _re.M)
+    c0 = [sum(sizes[:k]) // 128 for k in range(len(sizes))]
+    parts = text.split("\ncommand.program.def")
+    hits = 0
+    for b, blk in enumerate(parts[1:], 1):
+        m0 = pat.search(blk)
+        if not m0:
+            continue
+        hits += 1
+        ind, var, size = m0.group(1), m0.group(2), int(m0.group(3))
+        assert size % rows == 0
+        rb = size // rows
+        lines = "".join(f'{ind}{var}_p{k} = command.parameter {root}, "{prefix}{k}" : view<{n * rb}xi8>\n{ind}{var}_c{k} = index.constant {c0[k]} : index\n'
+                        for k, n in enumerate(sizes))
+        blk = blk[:m0.start()] + lines + blk[m0.end():]
+
+        def sub(m):
+            args = [a.strip() for a in m.group(4).split(",")]
+            if var not in args:
+                return m.group(0)
+            tys = [t.strip() for t in m.group(5).split(",")]
+            i = args.index(var)
+            assert tys[i] == f"view<{size}xi8>", (tys[i], size)
+            out = []
+            for k, n in enumerate(sizes):
+                lc = (n + 127) // 128
+                used.add((m.group(2), lc))
+                a2 = args[:i] + [f"{var}_p{k}"] + args[i + 1:] + [f"{var}_c{k}"]
+                t2 = tys[:i] + [f"view<{n * rb}xi8>"] + tys[i + 1:] + ["index"]
+                out.append(f"{m.group(1)}kernel.launch @{m.group(2)}_pc{lc}[{m.group(3)}]({', '.join(a2)}) : [index]({', '.join(t2)})")
+            return "\n".join(out)
+        blk = lpat.sub(sub, blk)
+        assert not _re.search(_re.escape(var) + r'(?!\w)', blk.split("\n}\n", 1)[0]), f"head_pieces: {var} has a use that is not a head launch"
+        parts[b] = blk
+    assert hits, f"head_pieces: no parameter {key!r} on {root}"
+    return "\ncommand.program.def".join(parts), used
+
+
+PHEAD_MAIN = {}      # proposal-head piece entries prepared by the main weight policy (draft.propose.head_pieces)
+HEAD_PIECES = []     # (root, key, piece key prefix, rows per piece, format, kernel suffix, head rows): heads read as several prepared tensors
+
+
+def head_mv_whole(TG, fmt, iq=False, suffix=""):
     """Output head argmax: workgroup = 128 vocabulary rows x TG spans,
     one lane per 32-value group of the 6656-wide row with each span's
     activations in registers; weights stream once per group of TG spans.
@@ -4833,22 +4928,57 @@ def gdn_layer(i, b, nm, sz, par):
         REC = REC + "\n  scf.if %gemm {\n  " + REC.replace("@g_gdn_recurrence[", "@g_gdn_recurrence_pf[") + "\n  }"
     elif chunk_mode(g) == "group":   # gfx12: spans of 64+ tokens run the chunked kernel (a gfx11 build launches nothing here: its kernel takes every span)
         REC = REC + "\n  scf.if %gemm {\n  // dual-group: rdna4 " + REC.strip().replace("@g_gdn_recurrence[", "@g_gdn_chunk_rdna4[") + "\n  // dual-group: end\n  }"
+    FRONT = f"""  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_{i}, %metadata, %info, %origins, %arena, %gq, %conv_{i}, %gs) : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer)
+  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq) : [index](index, index, index, buffer, buffer, buffer, buffer)
+  kernel.launch @g_gdn_qk_norm[%t](%t, %gs, %ginv) : [index](index, buffer, buffer)"""
+    GATE = f"""  kernel.launch @g_gdn_norm_gate[%t](%t, %info, %graw, %ssm_norm_{i}, %gz, %o) : [index](index, buffer, buffer, view<{DV}xf32>, buffer, buffer)"""
+    if fused_mode(g):   # gfx12, GEMM-shape epochs: two launches (gen_gdn_fused.py) in place of conv .. norm_gate; gfx11 and short epochs keep the chain
+        REC0 = REC.split("\n")[0]
+        FA = (f"kernel.launch @g_gdn_fa_rdna4[%t, %spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %conv_{i}, %galpha, %gbeta, %ssm_a_{i}, %dt_bias_{i}, %gs)"
+              f" : [index, index](index, index, index, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer, buffer, view<{HV}xf32>, view<{HV}xf32>, buffer)")
+        FB = (f"kernel.launch @g_gdn_fb_rdna4[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %gs, %ssm_norm_{i}, %gz, %o)"
+              f" : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{DV}xf32>, buffer, buffer)")
+        # The GEMM branch is indented, so draft/gen_draft.py's verify capture (before each 2-space g_gdn_conv launch) lands in the else branch
+        # only; the `// gdn-capture:` marker places the same capture at the head of the GEMM branch: a verify epoch can pack another
+        # request's prompt with the speculative spans (t >= 64), and its replay restores these inputs.
+        ind = lambda t: "\n".join("  " + l for l in t.split("\n"))
+        # GDN_FUSED2_MIN (choice prefill.gdn.fused2_min): the fused pair runs in epochs of at least this many rows (64 = every GEMM epoch, 128 =
+        # %big: a 64-row epoch, i.e. a prompt or tail under 64 tokens, keeps the chain, whose spans under 64 run the exact sequential kernel)
+        fmin = int(os.environ.get("GDN_FUSED2_MIN", "64"))
+        assert fmin in (64, 128), "GDN_FUSED2_MIN: 64 or 128"
+        # decode.spec.gdn_fold: draft/gen_draft.verify_program drops the fused branch from @llm_verify (`// gdn-fused:` .. `// gdn-chain:` and
+        # the closing brace before `// gdn-fused-end:`), so the chain must also cover the GEMM epochs' long spans there (the full REC).
+        from gen_gdn import fold_enabled
+        cond, rest = ("%gemm", f"{FRONT}\n{REC if fold_enabled(g) else REC0}\n{GATE}") if fmin == 64 else ("%big", f"{FRONT}\n{REC}\n{GATE}")
+        MIX = (f"  // gdn-fused: %layer_{i}\n  scf.if {cond} {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
+               f"  }} else {{\n  // gdn-chain: %layer_{i}\n{rest}\n  }}\n  // gdn-fused-end: %layer_{i}")
+    else:
+        MIX = f"{FRONT}\n{REC}\n{GATE}"
     T = P + [
         "  " + lin(fmt_of(nm("attn_qkv")), "%h", "%s_h", f"%wqkv_{i}", sz("attn_qkv"), "%gq", "%nH", "%nC", H) + "\n",
         "  " + lin(fmt_of(nm("attn_gate")), "%h", "%s_h", f"%wz_{i}", sz("attn_gate"), "%gz", "%nH", "%nVD", H) + "\n",
-        "  " + lin_mv(fmt_of(nm("ssm_alpha")), "%h", f"%walpha_{i}", sz("ssm_alpha"), "%galpha", "%nHV", H) + "\n",
-        "  " + lin_mv(fmt_of(nm("ssm_beta")), "%h", f"%wbeta_{i}", sz("ssm_beta"), "%gbeta", "%nHV", H) + "\n",
-        f"""  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_{i}, %metadata, %info, %origins, %arena, %gq, %conv_{i}, %gs) : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer)
-  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq) : [index](index, index, index, buffer, buffer, buffer, buffer)
-  kernel.launch @g_gdn_qk_norm[%t](%t, %gs, %ginv) : [index](index, buffer, buffer)
-{REC}
-  kernel.launch @g_gdn_norm_gate[%t](%t, %info, %graw, %ssm_norm_{i}, %gz, %o) : [index](index, buffer, buffer, view<{DV}xf32>, buffer, buffer)
+        ab_q8("  " + lin_mv(fmt_of(nm("ssm_alpha")), "%h", f"%walpha_{i}", sz("ssm_alpha"), "%galpha", "%nHV", H), True) + "\n",
+        ab_q8("  " + lin_mv(fmt_of(nm("ssm_beta")), "%h", f"%wbeta_{i}", sz("ssm_beta"), "%gbeta", "%nHV", H), False) + "\n",
+        f"""{MIX}
   scf.if %gemm {{
     kernel.launch @g_row_scale_f16[%t](%t, %nVD, %o, %s_o, %o16) : [index](index, index, buffer, buffer, buffer)
   }}
 """,
         "  " + lin(fmt_of(nm("ssm_out")), "%o", "%s_o", f"%wout_{i}", sz("ssm_out"), "%y", "%nVD", "%nH", VD) + "\n"]
     return "".join(T)
+
+
+def ab_q8(text, first):
+    """GDN_AB_Q8 (mxfp4s, GEMM-shape epochs): the alpha / beta projections as the 16-token int8 matvec on h quantized once to int8
+    (g_quant_q8 before alpha) instead of the f32 4-token matvec over h (two reads of the f32 rows)."""
+    if os.environ.get("GDN_AB_Q8", "") in ("", "0") or "@g_mv_mxfp4s_k5120_t4[" not in text:
+        return text
+    def sub(m):
+        ind, line = m.group(1), m.group(2)
+        new = line.replace("@g_mv_mxfp4s_k5120_t4[", "@g_mv_mxfp4s_k5120_t16_q8[", 1).replace("%zero_i32, %h,", "%zero_i32, %h16q,", 1)
+        q = f"{ind}kernel.launch @g_quant_q8[%t, %nH](%t, %nH, %h, %h16q) : [index, index](index, index, buffer, buffer)\n" if first else ""
+        return q + ind + new
+    return re.sub(r"^( *)(kernel\.launch @g_mv_mxfp4s_k5120_t4\[.*)$", sub, text, count=1, flags=re.M)
 
 
 def gelu_scalar(o, x, ind="      "):
@@ -5439,8 +5569,17 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
     if GDN:
         g = GDN
         for name, width in (("gq", g["C"]), ("gs", g["C"]), ("gz", g["VD"]), ("graw", g["VD"]), ("ginv", 2 * g["HK"]), ("galpha", g["HV"]), ("gbeta", g["HV"])):
-            L_.append(f"  %{name}_bytes = index.constant {width * 4} : offset\n  %{name}_size = index.scale %t, %{name}_bytes : index, offset -> offset\n"
-                      f"  %{name} = buffer.alloca<global> align(256) %{name}_size : buffer\n")
+            gw = name == "gs" and fused_mode(g)   # gfx12 fused GDN prefill: %gs (unused there) also holds the chunk workspace, ceil(t / 32) + spans + 1 slots
+            L_.append(f"  %{name}_bytes = index.constant {width * 4} : offset\n  %{name}_size{'_own' if gw else ''} = index.scale %t, %{name}_bytes : index, offset -> offset\n")
+            if gw:
+                from gen_gdn_fused import nslots_bytes
+                L_.append(f"  %gw_c31 = index.constant 31 : index\n  %gw_c32 = index.constant 32 : index\n  %gw_a = index.add %t, %gw_c31 : index\n"
+                          f"  %gw_b = index.div %gw_a, %gw_c32 : index\n  %gw_c = index.add %gw_b, %spans : index\n  %gw_one = index.constant 1 : index\n"
+                          f"  %gw_n = index.add %gw_c, %gw_one : index\n  %gw_slot = index.constant {nslots_bytes(g) // 256} : index\n"
+                          f"  %gw_units = index.mul %gw_n, %gw_slot : index\n  %gs_row = index.constant {width * 4 // 256} : index\n"
+                          f"  %gs_c63 = index.constant 63 : index\n  %gs_c64 = index.constant 64 : index\n  %gs_ta = index.add %t, %gs_c63 : index\n  %gs_tb = index.div %gs_ta, %gs_c64 : index\n  %gs_tp = index.mul %gs_tb, %gs_c64 : index\n  %gs_units = index.mul %gs_tp, %gs_row : index\n  %gs_umax = index.max %gs_units, %gw_units : index\n"
+                          f"  %gs_unit = index.constant 256 : offset\n  %gs_size = index.scale %gs_umax, %gs_unit : index, offset -> offset\n")
+            L_.append(f"  %{name} = buffer.alloca<global> align(256) %{name}_size : buffer\n")
         L_.append(f"  %nC = index.constant {g['C']} : index\n  %nVD = index.constant {g['VD']} : index\n  %nHV = index.constant {g['HV']} : index\n")
     if not QK_NORM:
         L_.append("  %no_norm = buffer.alloca<global> align(256) %row_bytes : buffer\n")
@@ -5615,18 +5754,31 @@ if __name__ == "__main__":
         # PROPOSE_HEAD_ROWS=N (MTP and DFlash proposals, Q6_K head): the proposals' head pass reads a load-time Q4_0 copy of the head's
         # rows [0, N) plus the added tokens' rows (a reduced draft vocabulary, prep_weights.subset_entry); verification keeps the head
         PROWS = int(os.environ.get("PROPOSE_HEAD_ROWS", "0") or 0)
+        if PROWS > 0 and os.environ.get("PROPOSE_HEAD_PIECES") == "1" and PROWS >= V:
+            PROWS = V   # every row: the full head as a Q4_0 copy (rows past the vocabulary mean all of it)
         HPREP, PHEAD_ROWS = {}, None
         if PROWS > 0 and gen_draft.DRAFT["kind"] in ("mtp", "dflash") and (gen_draft.DRAFT["kind"] == "dflash" or MTP_LAYER is not None):
             import prep_weights
-            PSRC = "bf16r" if fmt_of(head_name) == "bf16" else fmt_of(head_name)   # bf16r: BF16 rows re-encoded (safetensors head)
+            PSRC = "bf16r" if src_fmt(head_name) == "bf16" else src_fmt(head_name)   # bf16r: BF16 rows re-encoded (safetensors head)
             assert PSRC in prep_weights.SRC_SUPER and ACT_Q8 and H % 32 == 0, \
-                f"PROPOSE_HEAD_ROWS needs a Q6_K or BF16 head with int8 activations (head {fmt_of(head_name)}, ACT_Q8={ACT_Q8})"
+                f"PROPOSE_HEAD_ROWS needs a Q6_K or BF16 head with int8 activations (head {src_fmt(head_name)}, ACT_Q8={ACT_Q8})"
             PBASE = base_vocab() or V
             PDST = "q6_k" if os.environ.get("PROPOSE_HEAD", "q4_0") == "q6_k" and PSRC == "q6_k" else "q4_0"   # q6_k: the rows kept as they are (no re-rounding)
             HPREP = {TENS[head_name].get("hf", head_name): prep_weights.subset_entry(PSRC, PDST, PROWS, PBASE, V, H)}
             HKEY = TENS[head_name].get("hf", head_name)
             PHEAD_ROWS = prep_weights.subset_rows(PROWS, PBASE, V)
-            open(os.path.join(out_dir, "head_weights.loom"), "w", newline="\n").write(prep_weights.policy(HPREP, "the proposal head"))
+            _hpol = HPREP
+            if os.environ.get("PROPOSE_HEAD_PIECES") == "1":   # choice draft.propose.head_pieces: the copy as HEAD_PIECE_ROWS-row prepared tensors
+                assert PSRC == "bf16r", "PROPOSE_HEAD_PIECES: a BF16 (safetensors) head"
+                _hpol, _sizes = prep_weights.piece_entries(PDST, HKEY, PROWS, PBASE, V, H, HEAD_PIECE_ROWS, HKEY + "#p")
+                HEAD_PIECES.append(("%w_phead", HKEY, HKEY + "#p", _sizes, PDST, "_p40", PHEAD_ROWS[2]))
+                # The pieces' keys are not checkpoint tensors, so the main weight policy prepares them (one load-time preparation plan; a
+                # separate head_weights.loom plan made the first load of a fresh R9700 VM fail, RESOURCE_EXHAUSTED); build_draft binds the
+                # proposals' head root with it.
+                PHEAD_MAIN.update(_hpol)
+                open(os.path.join(out_dir, "phead_main"), "w").write("")
+            if not PHEAD_MAIN:
+                open(os.path.join(out_dir, "head_weights.loom"), "w", newline="\n").write(prep_weights.policy(_hpol, "the proposal head"))
             gfacts["phead"] = prep_weights.dst_bytes(PDST, HPREP[HKEY][2])
             if PHEAD_ROWS[2] < V:
                 gfacts["phead_rows"] = (PHEAD_ROWS[2], PHEAD_ROWS[0], PHEAD_ROWS[1] - PHEAD_ROWS[0])
@@ -5683,7 +5835,7 @@ if __name__ == "__main__":
         # (4 drafting streams at depth 3: 69 vs 146 ms per epoch on Bolt-E4B), at the price of rare near-tie flips vs
         # 1-token decode. SPEC_EXACT=1 keeps the 4-token matvec (decode's rounding) at every width instead.
         # ACT_Q8: the int8 matvec streams weights once per 16 tokens, so the GEMM takes over later (SPEC_MM_FROM).
-        MTP_ONLY_Q8 = bool(MBLK_PREP or (PHEAD_ROWS and fmt_of(head_name) == "bf16")) and not TRUNK_Q8
+        MTP_ONLY_Q8 = bool(MBLK_PREP or (PHEAD_ROWS and src_fmt(head_name) == "bf16")) and not TRUNK_Q8
         mm_from = int(os.environ.get("SPEC_MM_FROM", "17" if USED_MVQ and not MTP_ONLY_Q8 else "5"))
         program = "\n".join(spec) if os.environ.get("SPEC_EXACT") == "1" else gen_draft.small_gemm("\n".join(spec), mm_from)
         # The drafter's catch-up (warm) program only feeds proposals, never the output, so it takes the GEMM from
@@ -5845,22 +5997,47 @@ if __name__ == "__main__":
         from gen_mxfp4s import fuse_mxfp4s_f8 as _f8s_fuse
         text, _nf8s = _f8s_fuse(text)   # choice prefill.mxfp4s.fuse (MXFP4S_FUSE): fuse_enabled() inside
         print("mxfp4s fp8 groups:", _nf8s)
+        from gen_mxfp4s import ab_f8_enabled as _abf8_on
+        if GDN and _abf8_on():   # gfx12: the GDN alpha / beta projections as one paired skinny fp8 GEMM (choice prefill.gdn.ab_f8)
+            from gen_mxfp4s import ab_f8 as _abf8
+            text, _nab = _abf8(text, GDN["HV"], H)
+            print("alpha/beta fp8 layers:", _nab)
     if seg_tokens():
         text = seg_attention(text)
     SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in text}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
     MB_USED = {n: e for n, e in MBLK_PREP.items() if f'"{n}"' in text}   # MTP_BLOCK_PREP: the NextN block's matrices the programs read
-    if SRC_PREP or MB_USED:
+    if SRC_PREP or MB_USED or VHEAD_PREP or PHEAD_MAIN:
         import prep_weights
         entries = {t["hf"]: ("bf16e", "f32_" + t["prep"]["op"], int(math.prod(t["shape"]))) for t in SRC_PREP.values()}
         assert all(t["prep"]["src"] == "bf16" for t in SRC_PREP.values()), "prepared tensors are bf16 in the checkpoint"
         entries.update({TENS[n]["hf"]: e for n, e in MB_USED.items()})
-        _lib = prep_weights.library({e[:2] for e in entries.values()})   # the converters (their stage programs are roots of the weight policy)
-        if "config.decl @llm.prep_blocks" in text:   # the proposal head's converters (spec_kernels) declared the shared configs already
+        entries.update(PHEAD_MAIN)
+        if VHEAD_PREP:   # the verified head: a Q8_0 copy of every row, HEAD_PIECE_ROWS rows per prepared tensor
+            _hk = TENS["output.weight"]["hf"]
+            _ve, _vs = prep_weights.piece_entries(VHEAD_PREP, _hk, V, V, V, H, HEAD_PIECE_ROWS, _hk + "#v")
+            entries.update(_ve)
+            HEAD_PIECES.append(("%weights", _hk, _hk + "#v", _vs, VHEAD_PREP, "", V))
+        _lib = prep_weights.library({e[:2] for e in entries.values()}, have=text)   # the converters (their stage programs are roots of the weight policy)
+        if "config.decl @llm.prep_blocks" in text and "config.decl @llm.prep_blocks" in _lib:   # the proposal head's converters (spec_kernels) declared the shared configs already
             _lib = _lib.replace("config.decl @llm.prep_blocks : i64\n\nconfig.decl @llm.prep_input : i64\n\n", "", 1)
         text += "\n" + _lib
         open(os.path.join(out_dir, "weights.loom"), "w", newline="\n").write(
-            prep_weights.policy(entries, "the safetensors checkpoint's bf16 norms, A_log, dt_bias and conv1d" + (" and the MTP block's matrices" if MB_USED else "")))
+            prep_weights.policy(entries, "the safetensors checkpoint's bf16 norms, A_log, dt_bias and conv1d" + (" and the MTP block's matrices" if MB_USED else "")
+                                + (" and the verified head's Q8_0 copy" if VHEAD_PREP else "") + (" and the proposal head's Q4_0 pieces" if PHEAD_MAIN else "")))
     text = hf_rename(text)
+    if HEAD_PIECES:   # heads read as several prepared tensors (draft.propose.head_pieces, decode.head.verify): one launch per piece
+        _pk = []
+        for _root, _key, _prefix, _sizes, _pfmt, _suf, _rows in HEAD_PIECES:
+            text, _used = head_pieces(text, _root, _key, _prefix, _sizes, _rows)
+            _V, _CH = V, CHUNKS
+            V, CHUNKS = _rows, (_rows + 127) // 128
+            for _kn, _lc in sorted(_used):
+                _m = re.match(r"g_head_mv(?:_t(\d+))?(_q8)?(\w*)$", _kn)
+                assert _m and _m.group(3) == _suf and _m.group(2), f"head piece kernel {_kn}"
+                _pk.append(head_mv(int(_m.group(1) or 1), _pfmt, iq=True, suffix=_suf, piece=_lc))
+            V, CHUNKS = _V, _CH
+            _pk.append(f"// head pieces: {_prefix} rows={_rows} piece={_sizes[0]} n={len(_sizes)} fmt={_pfmt} suffix={_suf} on {_root}\n")
+        text += "\n" + "".join(_pk)
     out = os.path.join(out_dir, "model.loom")
     open(out, "w", newline="\n").write(text)
     print("wrote", out)

@@ -68,7 +68,7 @@
 #          determinism:V:C:R    determinism.py (issue #39's script, when present)
 #          admit:V[:TOKENS]     ctx_admit.py on V served alone: a prompt of TOKENS (default: its context minus the answer) is admitted or refused (admit_V*.txt)
 #          vllm:N[:long]        vLLM ROCm (vllm_server.sh --install) serving the card's checkpoint, the card's drafting (job "vllm_spec" = the --speculative-config JSON), perf.py --kind vllm N times
-#                               (job "vllm_max_len": --max-model-len, default the served context); perf_vllm_nN.jsonl, vllm_args.txt, vllm_version.txt (a card with no llama.cpp baseline)
+#                               (job "vllm_max_len": --max-model-len, default the served context); perf_vllm_nN.jsonl, vllm_args_on.txt, vllm_kv_on.txt, vllm_version.txt (a card with no llama.cpp baseline)
 #          vllmc4[:N]           4 streams on vLLM without drafting, N (default 3) runs of c4_steady.py: c4_vllm_nN.txt
 #          fullctx:V[:TOKENS]   ctx_admit.py --complete: a request of ~the served context (or TOKENS) is prefilled to the end and answered (fullctx_V*.txt)
 #          func:V               V served alone: the functional checks the card claims (chat, tool calling, image input;
@@ -393,9 +393,20 @@ serve_alone() { # serve_alone VARIANT
     vmem=none
   fi
   [ -n "${PROFILE_SA:-}" ] && sa="$sa $PROFILE_SA"   # the profile step: --print_device_statistics
+  # VRAM still held by the process that was just stopped (a vLLM / llama.cpp server, the reference fill, the last loom-serve) makes the load fail
+  # (RESOURCE_EXHAUSTED / "model is unavailable"): wait until it is released, and log what was held (vram_log.txt)
+  "$B/wait_vram.sh" "serve $1" 1024 180 "$out/vram_log.txt"
   step "serve $1"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
   grep -q '^FAILED' "$out/serve_$1.out" && { echo "REGISTRATION FAILED on $RUNNER for variant $1 (fast fail, see serve_$1.out):"; grep -m6 -E 'AMDGPU|error|ERROR' "$out/serve_$1.out" | cut -c1-300; return 1; }
-  curl -sf "$url/v1/models" >/dev/null
+  curl -sf "$url/v1/models" >/dev/null || return 1
+  # "ready" is the compiled registration; the weights load on the FIRST request, and until then every request is refused. Wait for that
+  # first answer before any step sends its own (a cold runner lost the first server of a job to it: func, gates, consistency failed
+  # for a reason that is not theirs). A model that does not load in 5 minutes FAILS the step (no restart that would make it pass): the
+  # first-load failure is a user-facing bug; its evidence (the server's answer and log) is kept as cold_first_serve_V.txt.
+  if ! "$T" "$B/wait_model.py" "$url" --wait 300 | tee "$out/cold_first_serve_$1.txt"; then
+    echo "serve $1: the model did not load (cold_first_serve_$1.txt)"; cp "$LOOM_SERVE_STATE/perf-$1.log" "$out/cold_first_serve_$1.log" 2>/dev/null; return 1
+  fi
+  rm -f "$out/cold_first_serve_$1.txt"
 }
 gufo_bundle() {   # gufo_bundle -> exports GUFO_BUNDLE (the experiment's/job's "bundle" tarball, fetched once per runner), or fails
   [ -n "${GUFO_BUNDLE:-}" ] && [ -x "$GUFO_BUNDLE/run.sh" ] && return 0
@@ -458,6 +469,10 @@ vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned 
   # A server already up in the same mode is reused (vllm:N and vllm:N:long are one load: 27B takes minutes to load); any other engine stops it.
   [ -f "$vpid" ] && [ "${VLLM_MODE:-}" = "$1" ] && kill -0 "$(cat "$vpid")" 2>/dev/null && curl -sf "$vurl/v1/models" >/dev/null 2>&1 && return 0
   vllm_down
+  # the old server must be gone (its port closed) before the next one starts: a server that is still shutting down answered the new one's
+  # readiness probe and the c4 rows ran on it (with drafting on)
+  for _ in $(seq 180); do curl -sf "$vurl/v1/models" >/dev/null 2>&1 || break; sleep 1; done
+  curl -sf "$vurl/v1/models" >/dev/null 2>&1 && { echo "the previous vLLM server still answers on $VPORT"; return 1; }
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
   "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
   [ -x "$B/vllm_server.sh" ] || { echo "no vllm_server.sh in this checkout (vLLM reference engine, PR #875)"; return 1; }
@@ -470,14 +485,20 @@ vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned 
   spec=$(q "print(j.get('vllm_spec') or '')")
   read -r ck rev < <("$T" -c "import json; s=json.load(open('$card/llm_config.json'))['source']; print(s['repo'], s.get('revision') or 'main')")
   args="--max-model-len $ml"; [ "$1" = on ] && [ -n "$spec" ] && args="$args --speculative-config '$spec'"
-  echo "$args" > "$out/vllm_args.txt"; "$vpy" -c "import vllm; print(vllm.__version__.split('+')[0])" > "$out/vllm_version.txt" 2>/dev/null
+  echo "$args" > "$out/vllm_args_$1.txt"; "$vpy" -c "import vllm; print(vllm.__version__.split('+')[0])" > "$out/vllm_version.txt" 2>/dev/null
+  "$B/wait_vram.sh" "vllm serve ($1)" 1024 180 "$out/vram_log.txt"
   step "vllm serve $ck@${rev:0:8}: $args"
   eval env VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} ${VLLM_EXTRA_ENV:-} setsid nohup "$vpy" -m vllm.entrypoints.openai.api_server --model "$ck" --revision "$rev" \
-    --served-model-name vllm-card --port "$VPORT" $args > "$out/vllm_serve.log" 2>&1 &
+    --served-model-name vllm-card --port "$VPORT" $args > "$out/vllm_serve_$1.log" 2>&1 &
   echo $! > "$vpid"; VLLM_MODE=$1
   for _ in $(seq 1800); do
-    curl -sf "$vurl/v1/models" >/dev/null 2>&1 && { echo "vLLM ready"; return 0; }
-    kill -0 "$(cat "$vpid")" 2>/dev/null || { echo "vLLM died:"; tail -15 "$out/vllm_serve.log" | cut -c1-250; return 1; }
+    curl -sf "$vurl/v1/models" >/dev/null 2>&1 && {
+      echo "vLLM ready"
+      # what the engine can hold at once (a request longer than the KV cache never finishes) and what it spent its memory on
+      { grep -m1 -o "GPU KV cache size: [0-9,]* tokens" "$out/vllm_serve_$1.log"; grep -m1 -o "Model loading took [0-9.]* GiB" "$out/vllm_serve_$1.log"
+        grep -m1 -o "Available KV cache memory: [0-9.]* GiB" "$out/vllm_serve_$1.log"; } | tee "$out/vllm_kv_$1.txt"
+      return 0; }
+    kill -0 "$(cat "$vpid")" 2>/dev/null || { echo "vLLM died:"; tail -15 "$out/vllm_serve_$1.log" | cut -c1-250; return 1; }
     sleep 1
   done
   echo "vLLM did not come up in 30 min"; return 1
@@ -498,6 +519,7 @@ while [ "$qi" -lt "${#queue[@]}" ]; do
       "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
       ms=(); ids=(); for v in $variants; do ms+=("$D/$v/pkg/model_ab.json"); ids+=("$cardid-$v"); done
       nv=${#ms[@]}; abmem=$(( 11000000000 * nv + 4000000000 )); [ -n "$RDEV" ] && [ "$abmem" -gt "$mem" ] && abmem=$mem
+      "$B/wait_vram.sh" "ab serve" 1024 180 "$out/vram_log.txt"
       step "ab: one loom-serve with $nv packages ($abmem bytes)"
       "$SV/serve.sh" abserve "$PORT" amdgpu "$abmem" "${ms[@]}" | tail -2
       "$T" "$here/.github/scripts/ab_decode.py" "$url" "${ids[@]}" --rounds "$p1" --think "${p2:-$TH}" --log "$out/ab.jsonl" 2>&1 | tee "$out/ab.log"
@@ -567,10 +589,15 @@ import json,statistics as st; r=[json.loads(l) for l in open('$out/$lf')]
 k='decode_tps_32k' if '${p2:-}' else 'decode_tps'
 print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v), 2) if (v := [x[k] for x in r if x.get(k)]) else 'n/a (no row served: beyond the served context)')");;
     vllm)   # vllm:N[:long]: the vLLM baseline of a safetensors card, N serve-session-less runs on one server (the card's drafting config), perf.py --kind vllm
-      vllm_up on || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
+      vllm_up on || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve_on.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
+      vkv=$(grep -o "cache size: [0-9][0-9,]* tokens" "$out/vllm_kv_on.txt" 2>/dev/null | grep -o "[0-9][0-9,]*" | tr -d ',')
+      if [ -n "${p2:-}" ] && [ -n "$vkv" ] && [ "$vkv" -lt 40000 ]; then   # the long rows (8k/16k/32k documents, decode after 32k) can never finish: vLLM would wait for KV blocks forever
+        echo "vLLM's KV cache holds $vkv tokens: the 8k/16k/32k rows are not measured" | tee "$out/vllm_note.txt"
+        res[$s]="SKIP (vLLM KV cache $vkv tokens)"; continue
+      fi
       step "vllm perf x $p1 ${p2:-} (thinking $TH)"
       for i in $(seq 1 "$p1"); do
-        (cd "$out" && "$T" "$B/perf.py" "$vurl" vllm --kind vllm --model vllm-card --no-campaign --thinking "$TH" --repeat-rows "$rrows" --log "perf_vllm_n$p1.jsonl" ${p2:+--long} | tail -1)
+        (cd "$out" && timeout 3600 "$T" "$B/perf.py" "$vurl" vllm --kind vllm --model vllm-card --no-campaign --thinking "$TH" --repeat-rows "$rrows" --log "perf_vllm_n$p1.jsonl" ${p2:+--long} | tail -1)
         echo "{\"session_end\": \"vllm\"}" >> "$out/perf_vllm_n$p1.jsonl"
       done
       res[$s]=$("$T" -c "
@@ -578,10 +605,12 @@ import json,statistics as st; r=[json.loads(l) for l in open('$out/perf_vllm_n$p
 k='decode_tps_32k' if '${p2:-}' else 'decode_tps'
 print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v), 2) if (v := [x[k] for x in r if x.get(k)]) else 'n/a')");;
     vllmc4)   # vllmc4:N: 4 streams on vLLM without drafting (the same load-time exception as Loom's c4), N runs of c4_steady.py
-      vllm_up off || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
+      vllm_up off || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve_off.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
       step "vllm c4"
       cn=${p1:-3}
-      for i in $(seq 1 "$cn"); do (cd "$out" && "$T" "$B/c4_steady.py" "$vurl" 4 --model vllm-card --thinking "$TH" | tail -1 | tee -a "c4_vllm_n$cn.txt"); done
+      for i in $(seq 1 "$cn"); do (cd "$out" && timeout 1800 "$T" "$B/c4_steady.py" "$vurl" 4 --model vllm-card --thinking "$TH" 2> "c4_vllm_err.txt" | tail -1 | tee -a "c4_vllm_n$cn.txt"); done
+      # 4 streams that never decode together (the engine serves fewer at a time: KV / state blocks): the engine's own message is the card's note
+      grep -q agg_tps "$out/c4_vllm_n$cn.txt" 2>/dev/null || { echo "vLLM could not run 4 concurrent streams: $(tail -1 "$out/c4_vllm_err.txt" | cut -c1-200)" > "$out/vllm_note_c4.txt"; res[$s]="no 4-stream rate (vllm_note_c4.txt)"; vllm_down; continue; }
       echo "{\"session_end\": \"vllm\"}" >> "$out/c4_vllm_n$cn.txt"
       res[$s]=$("$T" -c "import json,statistics as st; print('vllm c4 median', st.median(r['agg_tps'] for l in open('$out/c4_vllm_n$cn.txt') if 'agg_tps' in (r := json.loads(l))))");;
     llamac4)   # llamac4[:N_MAX]
@@ -662,6 +691,21 @@ print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v)
       EXTRA_GUFO_ARGS="${gp:+--loom-preset $gp}" BUNDLE=$GUFO_BUNDLE "$GUFO_BUNDLE/validation/devlab/run_conformance.sh" "$D/$p1/pkg" "$out/gufo_$p1" 8181 > "$out/gufo_$p1.log" 2>&1; rc=$?
       tail -4 "$out/gufo_$p1.log" | cut -c1-300
       res[$s]=$("$T" "$here/.github/scripts/gufo_gate.py" "$out/gufo_$p1" "$out/conformance_$p1.json" "$rc" 2>&1 | tail -1 | cut -c1-300);;
+    smoke)   # smoke:V  one served chat request (the iterate preset's whole functional check: build, serve, answer; func:V is the full list)
+      serve_alone "$p1" || { res[$s]=ERROR; continue; }
+      step "smoke $p1"
+      "$T" - "$url" "$cardid" > "$out/smoke_$p1.log" 2>&1 <<'PY'
+import json, sys, urllib.request
+url, model = sys.argv[1:3]
+req = urllib.request.Request(url + "/v1/chat/completions", json.dumps({"model": model, "max_tokens": 16, "temperature": 0,
+        "messages": [{"role": "user", "content": "Reply with one short sentence about the sea."}]}).encode(), {"Content-Type": "application/json"})
+r = json.load(urllib.request.urlopen(req, timeout=300))
+m = r["choices"][0]["message"]
+t = (m.get("content") or m.get("reasoning_content") or m.get("reasoning") or "").strip()
+print("SMOKE", "PASS" if t else "FAIL", repr(t[:80]))
+sys.exit(0 if t else 1)
+PY
+      res[$s]=$(tail -1 "$out/smoke_$p1.log" | cut -c1-200); [ -n "${res[$s]}" ] || res[$s]=ERROR;;
     func)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "functional checks $p1"
@@ -703,18 +747,41 @@ PY
         LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
       fi
       export LOOM_KIT=${KIT[$p1]}
-      # "reference_cache": "PATH.tgz" (a job field, relative to the checkout): references an earlier job recorded (its gates_V/llama_cache.tgz), keyed by checkpoint
-      # revision + vLLM version + request, so a runner that cannot serve the reference (or a rerun) only serves Loom
-      rcache=$(q "print(j.get('reference_cache') or '')")
-      [ -n "$rcache" ] && { mkdir -p "$D/$p1/bench" && tar -xzf "$here/$rcache" -C "$D/$p1/bench" && echo "reference cache restored from $rcache"; }
+      # The reference outputs are invariant inputs: they are restored before gates.sh runs, so a run whose requests are all cached never loads the
+      # reference engine (vLLM was 72 % of a typical job). The committed store .github/devlab/reference_cache/<org>__<repo>__<ENGINE>.tgz
+      # (skills/loom-benchmark/scripts/reference_cache.py), automatically: ENGINE = vllm-<VERSION> for a safetensors package (its checkpoint's repo),
+      # llama-<BUILD> for a GGUF card (the card's repo). Keys: engine version + checkpoint revision / GGUF + request (prompt set, sampling): exact hits only.
+      #  - "reference_cache": "PATH.tgz" (a job field, relative to the checkout) in addition: references an earlier job recorded (its gates_V/llama_cache.tgz);
+      #    "reference_cache": "none" skips both (a deliberate cold recording).
+      # A miss is recorded by this job (its llama_cache.tgz: `reference_cache.py merge` adds it to the store).
+      rcache=$(q "print(j.get('reference_cache') or '')"); nref0=0; nref_hit=0
+      mkdir -p "$D/$p1/bench"
+      if [ "$rcache" != none ]; then
+        if [ -n "$safetensors" ]; then
+          rrepo=$("$T" -c "import json,sys; print((json.load(open(sys.argv[1])).get('source') or {}).get('repo', ''))" "$D/$p1/pkg/llm_config.json"); reng=vllm-${VLLM_VERSION:-0.18.0}
+        else
+          rrepo=$(q "print((j.get('card') or e.get('card') or '').split('@')[0])"); reng=llama-$tag
+        fi
+        [ -n "$rrepo" ] && nref_hit=$("$T" "$B/reference_cache.py" restore --repo "$rrepo" --engine "$reng" --into "$D/$p1/bench" 2>/dev/null || echo 0)
+        echo "reference cache: $nref_hit entries restored from the committed store ($rrepo, $reng)"
+      fi
+      if [ -n "$rcache" ] && [ "$rcache" != none ]; then
+        tar -xzf "$here/$rcache" -C "$D/$p1/bench" && echo "reference cache restored from $rcache"
+      fi
+      nref0=$("$T" "$B/reference_cache.py" count "$D/$p1/bench" 2>/dev/null || echo 0)
       step "gates $p1 LEVEL=$p2"
       ( unset LLAMA_SPEC; FORCE=1 LEVEL=$p2 "$B/gates.sh" "$D/$p1/pkg" "$url" "$gguf" "$D/$p1/bench" "$LLAMA_PORT" ) > "$out/gates_$p1.out" 2>&1; rc=$?
       mkdir -p "$out/gates_$p1"; cp "$D/$p1"/bench/gates.json "$D/$p1"/bench/gates_*.log "$out/gates_$p1/" 2>/dev/null
-      if [ -n "$safetensors" ]; then   # the recorded references (reusable: keyed by checkpoint revision + vLLM version + request), the card's reference statement, install/load/memory logs
+      if [ -n "$safetensors" ]; then   # the card's reference statement, install/load/memory logs of the vLLM reference
         cp "$D/$p1"/bench/reference.json "$D/vllm-state"/vllm-*.{log,mem,json} "$out/gates_$p1/" 2>/dev/null
-        tar -C "$D/$p1/bench" -czf "$out/gates_$p1/llama_cache.tgz" llama_cache 2>/dev/null
       fi
-      res[$s]=$(grep -h "^GATES" "$out/gates_$p1.out" | tail -1 | cut -c1-300); [ -n "${res[$s]}" ] || res[$s]="rc=$rc";;
+      # the recorded references (reusable: keyed by engine version + checkpoint / GGUF + request): `reference_cache.py merge` adds them to the committed store
+      tar -C "$D/$p1/bench" -czf "$out/gates_$p1/llama_cache.tgz" llama_cache $([ -f "$D/$p1/bench/reference.json" ] && echo reference.json) 2>/dev/null
+      nref1=$("$T" "$B/reference_cache.py" count "$D/$p1/bench" 2>/dev/null || echo 0)
+      vl=n/a; [ -n "$safetensors" ] && { vl=no; [ -f "$D/vllm-state/vllm-$LLAMA_PORT.log" ] && vl=yes; }   # vllm-PORT.log exists only when vllm_server.sh started the engine
+      echo "references: $nref0 cached before gates, $(( nref1 - nref0 )) recorded in this job, vLLM loaded: $vl" | tee "$out/gates_$p1/reference_cache.txt"
+      res[$s]=$(grep -h "^GATES" "$out/gates_$p1.out" | tail -1 | cut -c1-300); [ -n "${res[$s]}" ] || res[$s]="rc=$rc"
+      [ -f "$out/gates_$p1/reference_cache.txt" ] && res[$s]="${res[$s]} [$(cat "$out/gates_$p1/reference_cache.txt")]";;
     *) echo "unknown step $s"; res[$s]=ERROR;;
   esac
   echo "RESULT $job $s: ${res[$s]}"
