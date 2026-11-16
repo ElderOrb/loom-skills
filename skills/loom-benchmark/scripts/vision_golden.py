@@ -240,7 +240,7 @@ def main():
         if unknown:
             raise SystemExit(f"unknown --cases {unknown}; have {sorted(items)}")
         items = {k: items[k] for k in want}
-    from bench_common import ALT_SALT_VISION, alt_record, record_alt
+    from bench_common import ALT_SALT_VISION, alt_record, cached, record_alt
     for name, (durl, q, size) in items.items():   # all references first: with LLAMA_DEFER they are queued
         refs[name] = reference(pkg, a.llama, durl, q, a.tokens)
         if alt_record():   # REFERENCE_ALT=record: the store's second recording of this case (the re-recording below reads it from the cache)
@@ -252,7 +252,7 @@ def main():
         print("VISION_RESULT " + json.dumps({"verdict": "RECORDED", "cases": len(items)}))
         return 0
     model = requests.get(a.url + "/v1/models", timeout=30).json()["data"][0]["id"]
-    bad = []; rows = []; alt_decided = []
+    bad = []; rows = []; alt_decided = []; alt_stored = [n for n, (d, q, _) in items.items() if cached(reference_body(pkg, d, q, a.tokens), pkg, ALT_SALT_VISION)]
     for name, (durl, q, size) in items.items():
         got = request(a.url, model, durl, q, a.tokens)
         def views_for(ref):   # llama.cpp's prefill views (default numerics, image encoder on the CPU) after the reference's tokens
@@ -274,7 +274,7 @@ def main():
                      "llama": refs[name].get("content", "")})
         if st == "FAIL":
             bad.append(name)
-    print("VISION_RESULT " + json.dumps({"verdict": "FAIL" if bad else "PASS", "cases": len(rows), "failed": bad, "alt_decided": alt_decided}))
+    print("VISION_RESULT " + json.dumps({"verdict": "FAIL" if bad else "PASS", "cases": len(rows), "failed": bad, "alt_stored": alt_stored, "alt_decided": alt_decided}))
     json.dump(rows, open("vision_golden.json", "w"), indent=1)
     sys.exit(1 if bad else 0)
 

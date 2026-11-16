@@ -41,6 +41,16 @@ class Alt(unittest.TestCase):
             self.assertFalse(bc.record_alt_greedy("u", [4, 5], 64, None))   # first recorded by this very job: not independent
         self.assertEqual(self.calls, [(b1, bc.ALT_SALT_TEXT)])
 
+    def test_cached_peek(self):
+        b = bc.greedy_body([9], 8)
+        with mock.patch.dict(os.environ, {"LLAMA_CACHE": self.d}):
+            self.assertFalse(bc.cached(b, None, bc.ALT_SALT_TEXT))
+            k = bc.ref_key(b, None, bc.ALT_SALT_TEXT)
+            os.makedirs(os.path.join(self.d, k[:2]))
+            open(os.path.join(self.d, k[:2], k + ".json"), "w").write("{}")
+            self.assertTrue(bc.cached(b, None, bc.ALT_SALT_TEXT))
+            self.assertFalse(bc.cached(b, None, ""))
+
     def test_off_without_the_env(self):
         with mock.patch.dict(os.environ, {"REFERENCE_ALT": ""}), mock.patch.object(bc, "llama_completion") as lc:
             self.assertFalse(bc.record_alt_greedy("u", [1], 8, None))

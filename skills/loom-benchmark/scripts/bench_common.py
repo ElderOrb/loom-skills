@@ -258,6 +258,12 @@ def stored_at_start(key):
 _STORED = None
 
 
+def cached(body, pkg=None, salt=""):
+    """Is this reference request already in the cache ($LLAMA_CACHE)? (never requests anything)"""
+    k = ref_key(body, pkg, salt)
+    return os.path.exists(os.path.join(os.environ.get("LLAMA_CACHE", "llama_cache"), k[:2], k + ".json"))
+
+
 def record_alt(url, body, pkg, salt, what=""):
     """In an alt-recording job: request the second recording (salt) of `body` when its first recording came from the store; True when requested."""
     if not alt_record():
