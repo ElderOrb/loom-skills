@@ -153,6 +153,19 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     %rw{j}_v = index.mul %ph{j}_i, %c16 : index
     %rw{j} = index.assume %rw{j}_v [range(%rw{j}_v, 0, 1048560), lt(%rw{j}_v, %pl_rows_m)] : index""")
     A("    %rk_a = scf.select %fb_is2, %rw2, %rw3 : index\n    %rk_b = scf.select %fb_is1, %rw1, %rk_a : index\n    %rk_c = scf.select %fb_is0, %rw0, %rk_b : index\n    %rk = index.assume %rk_c [range(%rk_c, 0, 1048560), lt(%rk_c, %pl_rows_m)] : index")
+    opts = opts or {}
+    VPF = opts.get("vpf", "")      # "" = the V^T loads inside the PV loop; "top" / "mid" / "top2": issued at the block start / after the QK loop / half each
+
+    def vloads(jjs):
+        out = ""
+        for jj in jjs:
+            out += (f"    %vj{jj}_ro = index.scale %rw{jj}, %pos_bytes : index, offset -> offset\n    %vj{jj}_o = index.add %vb_o, %vj{jj}_ro : offset\n"
+                    f"    %vj{jj} = buffer.view %arena[%vj{jj}_o] : buffer -> view<{d // 4}x16xf16, %vt_g_layout>\n")
+            for k in range(NO):
+                out += f"    %vc{jj}_{k} = vector.fragment.load<lhs> %vj{jj}[%kcol{k}, %c0] shape [%c16, %c16] : view<{d // 4}x16xf16, %vt_g_layout> -> vector<8xf16>\n"
+        return out
+    if VPF in ("top", "top2"):
+        A(vloads(range(4) if VPF == "top" else (0, 1)))
     A("    %kw_lr_v = index.add %rk, %lane_col : index\n    %kw_lr = index.assume %kw_lr_v [range(%kw_lr_v, 0, 1048575), lt(%kw_lr_v, %pool)] : index\n"
       f"    %kw_c256 = index.constant {d // 2} : index\n    %kw_h = index.mul %lane_half, %kw_c256 : index\n    %c64k = index.constant 64 : index\n    %fq8c = index.constant 8 : index")
     sinit = ", ".join(f"%s{x} = %init : vector<8xf32>" for x in ABC)
@@ -177,6 +190,8 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
           + "\n".join(f"      %sq{x}{sl} = vector.mma %kf{sl}, %qb{x}{sl}, {cur[hh]} : vector<8xf16>, vector<8xf16>, vector<8xf32>" for hh, x in enumerate(ABC)))
         cur = [f"%sq{x}{sl}" for x in ABC]
     A(f"      scf.yield {', '.join(cur)} : {sty}\n    }}")
+    if VPF in ("mid", "top2"):
+        A(vloads(range(4) if VPF == "mid" else (2, 3)))
     A(f"""    %tf32 = index.cast %blk_first : index to i32
     %kbase32 = scalar.addi %tf32, %dh16_i32 : i32
     %base_v = vector.splat %kbase32 : vector<8xi32>
@@ -229,40 +244,62 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     ON = ["on", "onB", "onC"]
     for k in range(NO):
         A("\n".join(f"    %os{SUF[hh]}{k} = vector.mulf %{AP[hh]}{k}, %alpha{SUF[hh]}_v : vector<8xf32>" for hh in range(nh)))
-    pvin = ", ".join(f"%{PA[hh]}{k} = %os{SUF[hh]}{k} : vector<8xf32>" for hh in range(nh) for k in range(NO))
-    pvout = ", ".join(f"%{ON[hh]}{k}" for hh in range(nh) for k in range(NO))
-    A(f"    {pvout} = scf.for %jj = [%c0 to %c4 step %c1]({pvin}) -> ({ty16}) unroll {{")
-    VJ = """      %rj_a = scf.select %jj_c2, %rw2, %rw3 : index
+    if VPF:   # straight-line PV over the four pages of the block (V^T fragments already loaded)
+        cur = {(hh, k): f"%os{SUF[hh]}{k}" for hh in range(nh) for k in range(NO)}
+        for jj in range(4):
+            for hh, x in enumerate(ABC):
+                A(f"    %pr{x}{jj} = vector.load %pl_view[%c0_i, %c{hh}_i, %fq{jj}, %lane, %c0] : view<1x{nh}x{waves}x32x8xf16> -> vector<8xf16>\n"
+                  f"    %pf{x}{jj} = vector.fragment<rhs> %pr{x}{jj} shape [%c16, %c16] : vector<8xf16>")
+            if partial:
+                A(f"""    %vkc{jj} = scalar.constant {16 * jj} : i32
+    %vkb{jj} = scalar.addi %tf32, %vkc{jj} : i32
+    %vkb{jj}_v = vector.splat %vkb{jj} : vector<8xi32>
+    %vkp{jj} = vector.addi %vkb{jj}_v, %row_off : vector<8xi32>
+    %vok{jj} = vector.cmpi sle, %vkp{jj}, %pos_hi_v : vector<8xi32> -> vector<8xi1>""")
+            for k in range(NO):
+                vname = f"%vc{jj}_{k}"
+                if partial:
+                    A(f"    %vs{jj}_{k} = vector.select %vok{jj}, %vc{jj}_{k}, %zv8 : vector<8xf16>\n    %vm{jj}_{k} = vector.fragment<lhs> %vs{jj}_{k} shape [%c16, %c16] : vector<8xf16>")
+                    vname = f"%vm{jj}_{k}"
+                for hh, x in enumerate(ABC):
+                    nm = f"%{ON[hh]}{k}" if jj == 3 else f"%{BN[hh]}{jj}_{k}"
+                    A(f"    {nm} = vector.mma {vname}, %pf{x}{jj}, {cur[(hh, k)]} : vector<8xf16>, vector<8xf16>, vector<8xf32>")
+                    cur[(hh, k)] = nm
+    else:
+        pvin = ", ".join(f"%{PA[hh]}{k} = %os{SUF[hh]}{k} : vector<8xf32>" for hh in range(nh) for k in range(NO))
+        pvout = ", ".join(f"%{ON[hh]}{k}" for hh in range(nh) for k in range(NO))
+        A(f"    {pvout} = scf.for %jj = [%c0 to %c4 step %c1]({pvin}) -> ({ty16}) unroll {{")
+        VJ = """      %rj_a = scf.select %jj_c2, %rw2, %rw3 : index
       %rj_b = scf.select %jj_c1, %rw1, %rj_a : index
       %rj_c = scf.select %jj_c0, %rw0, %rj_b : index
       %rj = index.assume %rj_c [range(%rj_c, 0, 1048560), lt(%rj_c, %pl_rows_m)] : index
       %vj_ro = index.scale %rj, %pos_bytes : index, offset -> offset
       %vj_o = index.add %vb_o, %vj_ro : offset
 """
-    A(f"""      %jj_a = index.assume %jj [range(%jj, 0, 3)] : index
+        A(f"""      %jj_a = index.assume %jj [range(%jj, 0, 3)] : index
       %jj_c1 = index.cmp eq, %jj, %c1 : index
       %jj_c2 = index.cmp eq, %jj, %c2 : index
       %jj_c0 = index.cmp eq, %jj, %c0 : index
 {VJ}      %vj = buffer.view %arena[%vj_o] : buffer -> view<{d // 4}x16xf16, %vt_g_layout>""" + "".join(f"""
       %pr{x} = vector.load %pl_view[%c0_i, %c{hh}_i, %jj_a, %lane, %c0] : view<1x{nh}x{waves}x32x8xf16> -> vector<8xf16>
       %pf{x} = vector.fragment<rhs> %pr{x} shape [%c16, %c16] : vector<8xf16>""" for hh, x in enumerate(ABC)))
-    if partial:
-        A("""      %jj16 = index.mul %jj_a, %c16 : index
+        if partial:
+            A("""      %jj16 = index.mul %jj_a, %c16 : index
       %jj16_i = index.cast %jj16 : index to i32
       %vkb = scalar.addi %tf32, %jj16_i : i32
       %vkb_v = vector.splat %vkb : vector<8xi32>
       %vkp = vector.addi %vkb_v, %row_off : vector<8xi32>
       %vok = vector.cmpi sle, %vkp, %pos_hi_v : vector<8xi32> -> vector<8xi1>""")
-    for k in range(NO):
-        A(f"      %vc{k} = vector.fragment.load<lhs> %vj[%kcol{k}, %c0] shape [%c16, %c16] : view<{d // 4}x16xf16, %vt_g_layout> -> vector<8xf16>")
-    for k in range(NO):
-        vname = f"%vc{k}"
-        if partial:
-            A(f"      %vs{k} = vector.select %vok, %vc{k}, %zv8 : vector<8xf16>\n      %vm{k} = vector.fragment<lhs> %vs{k} shape [%c16, %c16] : vector<8xf16>")
-            vname = f"%vm{k}"
-        A("\n".join(f"      %{BN[hh]}{k} = vector.mma {vname}, %pf{x}, %{PA[hh]}{k} : vector<8xf16>, vector<8xf16>, vector<8xf32>" for hh, x in enumerate(ABC)))
-    A("      scf.yield " + ", ".join(f"%{BN[hh]}{k}" for hh in range(nh) for k in range(NO)) + f" : {ty16}")
-    A("    }")
+        for k in range(NO):
+            A(f"      %vc{k} = vector.fragment.load<lhs> %vj[%kcol{k}, %c0] shape [%c16, %c16] : view<{d // 4}x16xf16, %vt_g_layout> -> vector<8xf16>")
+        for k in range(NO):
+            vname = f"%vc{k}"
+            if partial:
+                A(f"      %vs{k} = vector.select %vok, %vc{k}, %zv8 : vector<8xf16>\n      %vm{k} = vector.fragment<lhs> %vs{k} shape [%c16, %c16] : vector<8xf16>")
+                vname = f"%vm{k}"
+            A("\n".join(f"      %{BN[hh]}{k} = vector.mma {vname}, %pf{x}, %{PA[hh]}{k} : vector<8xf16>, vector<8xf16>, vector<8xf32>" for hh, x in enumerate(ABC)))
+        A("      scf.yield " + ", ".join(f"%{BN[hh]}{k}" for hh in range(nh) for k in range(NO)) + f" : {ty16}")
+        A("    }")
     A("    scf.yield " + ", ".join(f"%m{SUF[hh]}_new, %l{SUF[hh]}_new" for hh in range(nh)) + ", " + ", ".join(f"%{ON[hh]}{k}" for hh in range(nh) for k in range(NO)) + f" : {mlt}, {ty16}\n  }}\n")
     loop = "".join(x if x.endswith("\n") else x + "\n" for x in L)
     loop = _ablate(loop, (opts or {}).get("abl", ""))
