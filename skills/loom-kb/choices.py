@@ -455,7 +455,7 @@ CHOICE("feature.logits_export", "bool", True, "LLM_LOGITS", kernels=["g_logits_e
 # ======================================================================================================================
 # Not choices: everything else the generators and their tools read from the environment
 # ======================================================================================================================
-NOT("A/B instrument of decode.spec.gdn_fold_defer (pending-fold slot layout; the default is the measured one)", "GDN_PEND_TAIL", "GDN_PEND_NT")
+NOT("A/B instrument of decode.spec.gdn_fold_defer (pending-fold slot layout; the default is the measured one)", "GDN_PEND_TAIL", "GDN_PEND_NT", "GDN_STATE_LU")
 NOT("input path or file selection (not a model-affecting knob)", "CATALOG", "LOOM_SKILLS", "LOOM_KB_ROOT", "LOOM_ROOT", "VENV", "HF", "HF_HOME",
     "HF_HUB_CACHE", "LD_LIBRARY_PATH", "LOOM_SERVE_STATE", "VISION_TEST_DIR", "FLASH2_OUT", "LLM_OUT")
 NOT("transport between a generator and its subprocesses (set by the caller from cfg / the build)", "LLM_CONFIG", "LLM_DRAFT",
