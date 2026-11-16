@@ -213,7 +213,7 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
         else:
             CH = int(opts.get("sacc", 1))   # independent S^T accumulation chains per head (2: even / odd fragments, summed after the loop)
             SN = [[f"%s{x}" + ("" if c == 0 else f"c{c}") for c in range(CH)] for x in ABC]
-            sinit = ", ".join(f"{SN[hh][c]} = %init : vector<8xf32>" for c in range(CH) for hh, x in enumerate(ABC))
+            sinit = ", ".join(f"{SN[hh][c]} = {'%sinit' + x if fm and c == 0 else '%init'} : vector<8xf32>" for c in range(CH) for hh, x in enumerate(ABC))
             sres = ", ".join(f"%s{x}_f" for x in ABC) if CH == 1 else ", ".join(f"%s{x}_p{c}" for c in range(CH) for x in ABC)
             sty = ", ".join(["vector<8xf32>"] * (nh * CH))
             A(f"    {sres} = scf.for %kw = [%c0 to %c{NKW} step %c1]({sinit}) -> ({sty}){' unroll' if opts.get('kwu') else ''}{{")
@@ -255,18 +255,30 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     %inwin = vector.cmpi sge, %kpos, %low_v : vector<8xi32> -> vector<8xi1>
     %winok = vector.ori %inwin, %ns_v : vector<8xi1>
     %valid = vector.andi %causal, %winok : vector<8xi1>""")
-        for hh, s_ in enumerate(SUF):
-            A(f"""    %sc{s_} = vector.mulf %s{ABC[hh]}_f, %scale_v : vector<8xf32>
+        if fm:   # fixed reference (S^T came out of the MMAs shifted by -m0, log2 units): no running max, no exchange, no rescale
+            for hh, s_ in enumerate(SUF):
+                A(f"""    %masked{s_} = vector.select %valid, %s{ABC[hh]}_f, %neg_v : vector<8xf32>
+    %lmax{s_} = vector.reduce<maxnumf> %masked{s_}, %neg_big : vector<8xf32>, f32
+    %m{s_}_new = scalar.maxnumf %m{s_}, %lmax{s_} : f32
+    %p{s_} = vector.exp2f<afn> %masked{s_} : vector<8xf32>
+    %ls{s_} = vector.reduce<addf> %p{s_}, %zero_f : vector<8xf32>, f32
+    %l{s_}_new = scalar.addf %l{s_}, %ls{s_} : f32
+    %pt_h{s_} = vector.fptrunc %p{s_} : vector<8xf32> to vector<8xf16>
+    vector.store %pt_h{s_}, %pl_view[%c0_i, %c{hh}_i, %fb_wv, %lane, %c0] : vector<8xf16>, view<1x{nh}x{waves}x32x8xf16>""")
+            A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+        else:
+            for hh, s_ in enumerate(SUF):
+                A(f"""    %sc{s_} = vector.mulf %s{ABC[hh]}_f, %scale_v : vector<8xf32>
     %masked{s_} = vector.select %valid, %sc{s_}, %neg_v : vector<8xf32>
     %lmax{s_} = vector.reduce<maxnumf> %masked{s_}, %neg_big : vector<8xf32>, f32
     %omax{s_}, %omax{s_}_u = kernel.subgroup.shuffle<xor> %lmax{s_}, %exchange, %width : f32, i32, i32
     %tmax{s_} = scalar.maxnumf %lmax{s_}, %omax{s_} : f32
     view.store %tmax{s_}, %mx_view[%c0_i, %c{hh}_i, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>""")
-        A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
-        for hh, s_ in enumerate(SUF):
-            for i in range(4):
-                A(f"    %mx{s_}{i} = view.load %mx_view[%c0_i, %c{hh}_i, %fq{i}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32")
-            A(f"""    %mxa{s_} = scalar.maxnumf %mx{s_}0, %mx{s_}1 : f32
+            A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+            for hh, s_ in enumerate(SUF):
+                for i in range(4):
+                    A(f"    %mx{s_}{i} = view.load %mx_view[%c0_i, %c{hh}_i, %fq{i}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32")
+                A(f"""    %mxa{s_} = scalar.maxnumf %mx{s_}0, %mx{s_}1 : f32
     %mxb{s_} = scalar.maxnumf %mx{s_}2, %mx{s_}3 : f32
     %bm{s_} = scalar.maxnumf %mxa{s_}, %mxb{s_} : f32
     %m{s_}_new = scalar.maxnumf %m{s_}, %bm{s_} : f32
@@ -282,11 +294,11 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     %pt_h{s_} = vector.fptrunc %p{s_} : vector<8xf32> to vector<8xf16>
     vector.store %pt_h{s_}, %pl_view[%c0_i, %c{hh}_i, %fb_wv, %lane, %c0] : vector<8xf16>, view<1x{nh}x{waves}x32x8xf16>
     view.store %tsum{s_}, %ls_view[%c0_i, %c{hh}_i, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>""")
-        A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
-        for hh, s_ in enumerate(SUF):
-            for j in range(4):
-                A(f"    %lv{s_}{j} = view.load %ls_view[%c0_i, %c{hh}_i, %fq{j}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32")
-            A(f"""    %lt01{s_} = scalar.addf %lv{s_}0, %lv{s_}1 : f32
+            A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+            for hh, s_ in enumerate(SUF):
+                for j in range(4):
+                    A(f"    %lv{s_}{j} = view.load %ls_view[%c0_i, %c{hh}_i, %fq{j}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32")
+                A(f"""    %lt01{s_} = scalar.addf %lv{s_}0, %lv{s_}1 : f32
     %lt012{s_} = scalar.addf %lt01{s_}, %lv{s_}2 : f32
     %lt{s_} = scalar.addf %lt012{s_}, %lv{s_}3 : f32
     %l_scaled{s_} = scalar.mulf %l{s_}, %alpha{s_} : f32
@@ -297,10 +309,10 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
         PA = ["pa", "pb", "pcc"]
         BN = ["bn", "bnB", "bnC"]
         ON = ["on", "onB", "onC"]
-        for k in range(NO):
+        for k in range(NO if not fm else 0):
             A("\n".join(f"    %os{SUF[hh]}{k} = vector.mulf %{AP[hh]}{k}, %alpha{SUF[hh]}_v : vector<8xf32>" for hh in range(nh)))
         if VPF:   # straight-line PV over the four pages of the block (V^T fragments already loaded)
-            cur = {(hh, k): f"%os{SUF[hh]}{k}" for hh in range(nh) for k in range(NO)}
+            cur = {(hh, k): (f"%{AP[hh]}{k}" if fm else f"%os{SUF[hh]}{k}") for hh in range(nh) for k in range(NO)}
             for jj in range(4):
                 for hh, x in enumerate(ABC):
                     A(f"    %pr{x}{jj} = vector.load %pl_view[%c0_i, %c{hh}_i, %fq{jj}, %lane, %c0] : view<1x{nh}x{waves}x32x8xf16> -> vector<8xf16>\n"
@@ -358,7 +370,113 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
         A("    scf.yield " + ", ".join(f"%m{SUF[hh]}_new, %l{SUF[hh]}_new" for hh in range(nh)) + ", " + ", ".join(f"%{ON[hh]}{k}" for hh in range(nh) for k in range(NO)) + f" : {mlt}, {ty16}\n  }}\n")
         return L
 
-    L = gen_loop(False)
+    FM = bool(opts.get("fmax")) and not partial
+    if not FM:
+        L = gen_loop(False)
+    else:
+        assert nh == 2 and opts.get("vpf") and opts.get("e2") and not opts.get("wg") and not opts.get("qreg"), "fmax: two heads, V^T prefetch, e2"
+        def fres(sfx):
+            return ([f"%m{SUF[hh]}_final{sfx}" for hh in range(nh)], [f"%l{SUF[hh]}_final{sfx}" for hh in range(nh)],
+                    [f"%{OP[hh]}{k}{sfx}" for hh in range(nh) for k in range(NO)])
+        def renamed(lines, sfx):
+            t = "".join(x if x.endswith("\n") else x + "\n" for x in lines)
+            h, rest = t.split("\n", 1)
+            for a in [x for g in fres("") for x in g]:
+                h = re.sub(re.escape(a) + r"\b(?!\w)", a + sfx, h, count=1)
+            return h + "\n" + rest
+        P = []
+        P.append(f"""  // fixed reference m0 = max over the first page and the diagonal page (wave w: page w / 2, head w % 2); a later score above m0 + 15 (log2)
+  // makes the whole tile fall back to the running-max loop
+  %fm_isd = index.cmp uge, %fb_wv, %c2 : index
+  %fm_pgf_v = index.div %key_low, %c16 : index
+  %fm_pgf = index.min %fm_pgf_v, %pg_live : index
+  %fm_pg_s = scf.select %fm_isd, %pg_live, %fm_pgf : index
+  %fm_pg = index.assume %fm_pg_s [range(%fm_pg_s, 0, %kh_last), lt(%fm_pg_s, %blocks)] : index
+  %fm_ph_r = view.load %kh_map[%fm_pg] : view<[%blocks]xi32> -> i32
+  %fm_ph_s = scalar.addi %fm_ph_r, %kh_lane0 : i32
+  %fm_ph_b = scalar.assume %fm_ph_s [range(%fm_ph_s, 0, 65535)] : i32
+  %fm_ph_i = index.cast %fm_ph_b : i32 to index
+  %fm_rw_v = index.mul %fm_ph_i, %c16 : index
+  %fm_rw = index.assume %fm_rw_v [range(%fm_rw_v, 0, 1048560), lt(%fm_rw_v, %pl_rows_m)] : index
+  %fm_lr_v = index.add %fm_rw, %lane_col : index
+  %fm_lr = index.assume %fm_lr_v [range(%fm_lr_v, 0, 1048575), lt(%fm_lr_v, %pool)] : index
+  %fm_hq_v = index.rem %fb_wv, %c2 : index
+  %fm_hq = index.assume %fm_hq_v [range(%fm_hq_v, 0, 1)] : index
+  %fm_c128 = index.constant {d // 2} : index
+  %fm_kh = index.mul %lane_half, %fm_c128 : index""")
+        cur = "%init"
+        for kw in range(NKW):
+            P.append(f"""  %fm_kc{kw}_o = index.constant {64 * kw} : index
+  %fm_kc{kw}_v = index.add %fm_kh, %fm_kc{kw}_o : index
+  %fm_kc{kw} = index.assume %fm_kc{kw}_v [range(%fm_kc{kw}_v, 0, {d - 64})] : index
+  %fm_kv{kw} = vector.load %k_pv[%fm_lr, %fm_kc{kw}] : view<[%pool]x{d}xf16, %k_g_layout> -> vector<64xf16>
+  %fm_qv{kw} = vector.load %ql_view[%fm_hq, %lane, %fm_kc{kw}_o] : view<{nh}x32x{QP}xf16> -> vector<64xf16>""")
+            for sl in range(8):
+                P.append(f"""  %fm_kf{kw}_{sl}s = vector.slice %fm_kv{kw}[{8 * sl}] : vector<64xf16> -> vector<8xf16>
+  %fm_kf{kw}_{sl} = vector.fragment<lhs> %fm_kf{kw}_{sl}s shape [%c16, %c16] : vector<8xf16>
+  %fm_qf{kw}_{sl}s = vector.slice %fm_qv{kw}[{8 * sl}] : vector<64xf16> -> vector<8xf16>
+  %fm_qf{kw}_{sl} = vector.fragment<rhs> %fm_qf{kw}_{sl}s shape [%c16, %c16] : vector<8xf16>
+  %fm_s{kw}_{sl} = vector.mma %fm_kf{kw}_{sl}, %fm_qf{kw}_{sl}, {cur} : vector<8xf16>, vector<8xf16>, vector<8xf32>""")
+                cur = f"%fm_s{kw}_{sl}"
+        P.append(f"""  %fm_pk = index.mul %fm_pg, %c16 : index
+  %fm_pk32 = index.cast %fm_pk : index to i32
+  %fm_pkv = vector.splat %fm_pk32 : vector<8xi32>
+  %fm_kpos = vector.addi %fm_pkv, %row_off : vector<8xi32>
+  %fm_ok = vector.cmpi sle, %fm_kpos, %qp_v : vector<8xi32> -> vector<8xi1>
+  %fm_msk = vector.select %fm_ok, {cur}, %neg_v : vector<8xf32>
+  %fm_lm = vector.reduce<maxnumf> %fm_msk, %neg_big : vector<8xf32>, f32
+  %fm_om, %fm_om_u = kernel.subgroup.shuffle<xor> %fm_lm, %exchange, %width : f32, i32, i32
+  %fm_tm = scalar.maxnumf %fm_lm, %fm_om : f32
+  view.store %fm_tm, %mx_view[%c0_i, %fm_hq, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)""")
+        for hh, x in enumerate(ABC):
+            s_ = SUF[hh]
+            P.append(f"""  %fm_ma{s_} = view.load %mx_view[%c0_i, %c{hh}_i, %fq{hh}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32
+  %fm_mb{s_} = view.load %mx_view[%c0_i, %c{hh}_i, %fq{hh + 2}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32
+  %fm_m{s_} = scalar.maxnumf %fm_ma{s_}, %fm_mb{s_} : f32
+  %fm_nm{s_} = scalar.subf %zero_f, %fm_m{s_} : f32
+  %fm_nmv{s_} = vector.splat %fm_nm{s_} : vector<8xf32>
+  %sinit{x} = vector.fragment<init> %fm_nmv{s_} shape [%c16, %c16] : vector<8xf32>""")
+        P.append("  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+        fast = renamed(gen_loop(True), "_fa")
+        mf, lf, of = fres("_fa")
+        C = []
+        for hh, s_ in enumerate(SUF):
+            C.append(f"""  %fl{s_}_o, %fl{s_}_u = kernel.subgroup.shuffle<xor> {lf[hh]}, %exchange, %width : f32, i32, i32
+  %fl{s_}_w = scalar.addf {lf[hh]}, %fl{s_}_o : f32
+  %fo{s_}_o, %fo{s_}_u = kernel.subgroup.shuffle<xor> {mf[hh]}, %exchange, %width : f32, i32, i32
+  %fo{s_}_w = scalar.maxnumf {mf[hh]}, %fo{s_}_o : f32
+  view.store %fl{s_}_w, %ls_view[%c0_i, %c{hh}_i, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>
+  view.store %fo{s_}_w, %mx_view[%c0_i, %c{hh}_i, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>""")
+        C.append("  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+        for hh, s_ in enumerate(SUF):
+            for j in range(4):
+                C.append(f"  %fl{s_}{j} = view.load %ls_view[%c0_i, %c{hh}_i, %fq{j}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32\n"
+                         f"  %fo{s_}{j} = view.load %mx_view[%c0_i, %c{hh}_i, %fq{j}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32")
+            C.append(f"""  %fl{s_}01 = scalar.addf %fl{s_}0, %fl{s_}1 : f32
+  %fl{s_}23 = scalar.addf %fl{s_}2, %fl{s_}3 : f32
+  %fl{s_}_t = scalar.addf %fl{s_}01, %fl{s_}23 : f32
+  %fo{s_}01 = scalar.maxnumf %fo{s_}0, %fo{s_}1 : f32
+  %fo{s_}23 = scalar.maxnumf %fo{s_}2, %fo{s_}3 : f32
+  %fo{s_}_t = scalar.maxnumf %fo{s_}01, %fo{s_}23 : f32""")
+        C.append(f"""  %fm_lim = scalar.constant 15.0 : f32
+  %fm_ol = scalar.maxnumf %fo_t, %foB_t : f32
+  %fm_svf = kernel.subgroup.reduce<maxnumf> %fm_ol : f32
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  view.store %fm_svf, %ls_view[%c0_i, %c0_i, %fb_wv, %c0] : f32, view<1x{nh}x{waves}x32xf32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)""" + "".join(f"""
+  %fm_v{j} = view.load %ls_view[%c0_i, %c0_i, %fq{j}, %c0] : view<1x{nh}x{waves}x32xf32> -> f32""" for j in range(4)) + f"""
+  %fm_v01 = scalar.maxnumf %fm_v0, %fm_v1 : f32
+  %fm_v23 = scalar.maxnumf %fm_v2, %fm_v3 : f32
+  %fm_vm = scalar.maxnumf %fm_v01, %fm_v23 : f32
+  %fm_any = scalar.cmpf ogt, %fm_vm, %fm_lim : f32
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  {mls}, {outs} = scf.if %fm_any -> ({mlt}, {ty16}) {{""")
+        slow = renamed(gen_loop(False), "_sl")
+        ms, ls_, os_ = fres("_sl")
+        tail_if = (f"    scf.yield {', '.join(f'{ms[hh]}, {ls_[hh]}' for hh in range(nh))}, {', '.join(os_)} : {mlt}, {ty16}\n  }} else {{\n"
+                   f"    scf.yield {', '.join(f'%fo{SUF[hh]}_t, %fl{SUF[hh]}_t' for hh in range(nh))}, {', '.join(of)} : {mlt}, {ty16}\n  }}\n")
+        L = ["\n".join(P) + "\n" + fast + "\n".join(C) + "\n" + slow + tail_if]
     loop = "".join(x if x.endswith("\n") else x + "\n" for x in L)
     loop = _ablate(loop, (opts or {}).get("abl", ""))
     if opts.get("e2"):   # exp2 domain: Q^T staged pre-scaled by scale * log2(e); S^T comes out in log2 units, P = exp2(S - m)

@@ -8,25 +8,19 @@
       "gen": "flash_r9700/gen_bench.py",
       "gen_variants": [
         "base",
-        "sacc2",
         "vtop2+e2",
-        "noqk+nopv",
-        "mm1",
-        "mm2",
-        "mm8",
-        "mm1l24",
-        "mm8l24"
+        "fm",
+        "fmt",
+        "fm+noqk",
+        "fm+nopv"
       ],
       "files": [
         "bench.loom",
-        "bench_sacc2.loom",
         "bench_vtop2+e2.loom",
-        "bench_noqk+nopv.loom",
-        "bench_mm1.loom",
-        "bench_mm2.loom",
-        "bench_mm8.loom",
-        "bench_mm1l24.loom",
-        "bench_mm8l24.loom"
+        "bench_fm.loom",
+        "bench_fmt.loom",
+        "bench_fm+noqk.loom",
+        "bench_fm+nopv.loom"
       ],
       "tests": [
         "test.loom"
