@@ -14,14 +14,14 @@ import gen_draft  # noqa: E402
 CFG = {"gdn": {"conv_kernel": 4, "k_heads": 16, "v_heads": 48, "head_k": 128, "head_v": 128, "inner": 6144, "v_order": "grouped"},
        "recurrent_layers": [i for i in range(64) if i % 4 != 3]}
 ENV = {"GDN_ROW_LANES": "8", "GDN_COLS": "4", "LLM_DRAFT": '{"kind": "mtp"}', "GDN_CHUNK": "1"}
-KEYS = list(ENV) + ["GDN_FOLD", "GDN_FOLD_DEFER"]
+KEYS = list(ENV) + ["GDN_FOLD", "GDN_FOLD_DEFER", "GDN_PEND_TAIL"]
 
 
 def with_env(fn, **extra):
     old = {k: os.environ.get(k) for k in KEYS}
     try:
         os.environ.update(ENV)
-        for k in ("GDN_FOLD", "GDN_FOLD_DEFER"):
+        for k in ("GDN_FOLD", "GDN_FOLD_DEFER", "GDN_PEND_TAIL"):
             os.environ.pop(k, None)
         os.environ.update(extra)
         return fn()
@@ -56,13 +56,22 @@ class GdnFoldDefer(unittest.TestCase):
         self.assertNotIn("g_gdn_pend", kernels(GDN_FOLD="1"))
 
     def test_slot_holds_the_pending_fold(self):
-        off, on = geometry(GDN_FOLD="1"), geometry(GDN_FOLD="1", GDN_FOLD_DEFER="1")
-        self.assertEqual(off["pend_off"], 0)
-        self.assertEqual(on["pend_off"], off["layer_bytes"])
-        need = on["pend_off"] + gen_gdn.PEND_HEAD + gen_gdn.FOLD_W * (16 * 128 + 48 * 128 + 48) * 4
-        self.assertGreaterEqual(on["layer_bytes"], need)
-        self.assertEqual(on["layer_bytes"] % 256, 0)
-        self.assertEqual(on["slot_bytes"], on["layer_bytes"] * len(CFG["recurrent_layers"]))
+        off = geometry(GDN_FOLD="1")
+        NG = len(CFG["recurrent_layers"])
+        block = gen_gdn.PEND_HEAD + gen_gdn.FOLD_W * (16 * 128 + 48 * 128 + 48) * 4
+        self.assertEqual(off["pend_stride"], 0)
+        tail = geometry(GDN_FOLD="1", GDN_FOLD_DEFER="1")   # default: every layer's pending block after the states, layer stride unchanged
+        self.assertEqual(tail["layer_bytes"], off["layer_bytes"])
+        self.assertEqual(tail["pend_base"], off["layer_bytes"] * NG)
+        self.assertGreaterEqual(tail["pend_stride"], block)
+        self.assertEqual(tail["slot_bytes"], tail["pend_base"] + tail["pend_stride"] * NG)
+        inter = geometry(GDN_FOLD="1", GDN_FOLD_DEFER="1", GDN_PEND_TAIL="0")   # after each layer's state + history
+        self.assertEqual(inter["pend_base"], off["layer_bytes"])
+        self.assertEqual(inter["pend_stride"], inter["layer_bytes"])
+        self.assertGreaterEqual(inter["layer_bytes"], off["layer_bytes"] + block)
+        self.assertEqual(inter["slot_bytes"], inter["layer_bytes"] * NG)
+        for g in (tail, inter):
+            self.assertEqual(g["layer_bytes"] % 256, 0)
 
     def test_on_emits_the_defer_kernels(self):
         t = kernels(GDN_FOLD="1", GDN_FOLD_DEFER="1")
