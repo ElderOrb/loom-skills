@@ -57,7 +57,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     the R9700 against the staged variant (a_direct=False). rf: 16-row activation fragments per wave (default 4 for store, 2 for swiglu: measured best, see
     device/rdna4/prefill.md); kmult 2 doubles the K step; nt 128 halves the workgroup; a_pf / dbuf are measured non-wins kept for the record."""
     if ws:   # the wave-specialized design (ws = producer waves)
-        return gemm_mxfp4s_f8_ws(mode, prefix, order, npw=ws, rf=rf, pad=pad)
+        return gemm_mxfp4s_f8_ws(mode, prefix, order, npw=ws, rf=rf, pad=pad, lvs=lvs)
     two_w = mode == "swiglu"
     BM = bm or nt                 # rows of the workgroup tile (default 256; 128 / 256 with a wider tn: the tile shapes of the prefill GEMM sweep)
     TN = tn or (64 if two_w else 128)     # output columns per tile (swiglu: of each of gate and up)
@@ -536,7 +536,7 @@ def _bf8_decode_text(j, q, e, row, col, view, TW, PX, order, sfx, ind="    "):
     return "\n".join(ind + x for x in t)
 
 
-def gemm_mxfp4s_f8_ws(mode, prefix="g", order="pairs", npw=4, rf=None, pad=16, kmult=1):
+def gemm_mxfp4s_f8_ws(mode, prefix="g", order="pairs", npw=4, rf=None, pad=16, kmult=1, lvs=False):
     """Wave-specialized variant of gemm_mxfp4s_f8_m256 (same launch ABI, name and results): the workgroup has the WMMA waves of the 256 x 128
     (swiglu 256 x 64 x 2) tile plus `npw` producer waves. The weight stage is double-buffered in LDS: during K step s the WMMA waves multiply
     buffer s % 2 (activation fragments from global memory) while the producer waves decode step s + 1 into the other buffer (their raw nibble and
@@ -677,6 +677,22 @@ def gemm_mxfp4s_f8_ws(mode, prefix="g", order="pairs", npw=4, rf=None, pad=16, k
   %rows_m15 = index.sub %rows, %c15 : index''')
     for r in range(RF):
         A(f"  %xrow{r}_v = index.add %row_origin, {'%wave_row' if r == 0 else f'%wave_row{r}'} : index\n  %xrow{r} = index.assume %xrow{r}_v [lt(%xrow{r}_v, %rows_m15)] : index")
+    if lvs:   # lane-vector operand loads (see gemm_mxfp4s_f8_m256 lv), the next K pair's loads issued before this pair's WMMAs
+        A("""  %lv_c32 = index.constant 32 : index
+  %lv_lane = index.rem %workitem, %lv_c32 : index
+  %lv_l16 = index.rem %lv_lane, %c16 : index
+  %lv_h = index.div %lv_lane, %c16 : index
+  %lv_h16 = index.mul %lv_h, %c16 : index""")
+        for r in range(RF):
+            A(f"""  %lv_xr{r} = index.add %xrow{r}, %lv_l16 : index
+  %lv_xm{r} = index.mul %lv_xr{r}, %k : index
+  %lv_xo{r}_i = index.add %lv_xm{r}, %lv_h16 : index
+  %lv_xo{r} = index.scale %lv_xo{r}_i, %one_off : index, offset -> offset""")
+        for p in range(KS // 32):
+            A(f"  %lv_kc{p} = index.constant {32 * p} : index\n  %lv_bk{p} = index.add %lv_h16, %lv_kc{p} : index")
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                A(f"  %lv_bn{wi}{c}_c = index.constant {wi * TN + c * 16} : index\n  %lv_bn{wi}{c}_a = index.add %wave_col, %lv_bn{wi}{c}_c : index\n  %lv_bn{wi}{c} = index.add %lv_bn{wi}{c}_a, %lv_l16 : index")
     wsrc = "%wsel" if two_w else "%w"
     ssrc = "%wssel" if two_w else "%ws"
 
@@ -720,7 +736,40 @@ def gemm_mxfp4s_f8_ws(mode, prefix="g", order="pairs", npw=4, rf=None, pad=16, k
     A("    " + ", ".join(f"%f{a}" for a in accs) + ", " + ", ".join(f"%fc{i}" for i in range(len(carried))) + f" = scf.if %is_mma -> ({acc_t}, {car_t}) {{")
     A(f"      %w_cur_f8 = buffer.view %w_stage[%cur_off] : buffer -> view<{PX}x{TW}xf8E5M2, %b_storage>\n      %kbase = index.mul %step, %c128 : index")
     cur = {a: f"%i{a}" for a in accs}
-    for kk in range(KS // 16):
+
+    def mma(kk):
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                for r in range(RF):
+                    a = f"{wi}r{r}c{c}"
+                    A(f"      %m{a}_{kk} = vector.mma %l{r}_{kk}, %rf{wi}{c}_{kk}, {cur[a]} : vector<2xi32>, vector<2xi32>, vector<8xf32>")
+                    cur[a] = f"%m{a}_{kk}"
+
+    def lv_loads(p):
+        for r in range(RF):
+            A(f"""      %lv_a{r}_{p} = vector.load %lv_xv{r}[%lv_kc{p}] : view<{KS}xi8> -> vector<16xi8>
+      %lv_aw{r}_{p} = vector.bitcast %lv_a{r}_{p} : vector<16xi8> to vector<4xi32>""")
+            for q in range(2):
+                A(f"""      %lv_ar{r}_{2 * p + q} = vector.slice %lv_aw{r}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
+      %l{r}_{2 * p + q} = vector.fragment<lhs> %lv_ar{r}_{2 * p + q} shape [%c16, %c16] using {{schema = %a_schema : encoding<schema>}} : vector<2xi32>""")
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                A(f"""      %lv_b{wi}{c}_{p} = vector.load %w_cur_st[%lv_bn{wi}{c}, %lv_bk{p}] : view<{TW}x{PX}xi8> -> vector<16xi8>
+      %lv_bw{wi}{c}_{p} = vector.bitcast %lv_b{wi}{c}_{p} : vector<16xi8> to vector<4xi32>""")
+                for q in range(2):
+                    A(f"""      %lv_br{wi}{c}_{2 * p + q} = vector.slice %lv_bw{wi}{c}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
+      %rf{wi}{c}_{2 * p + q} = vector.fragment<rhs> %lv_br{wi}{c}_{2 * p + q} shape [%c16, %c16] using {{schema = %b_schema : encoding<schema>}} : vector<2xi32>""")
+    if lvs:
+        A(f"      %w_cur_st = buffer.view %w_stage[%cur_off] : buffer -> view<{TW}x{PX}xi8>\n      %lv_kb = index.scale %kbase, %one_off : index, offset -> offset")
+        for r in range(RF):
+            A(f"      %lv_xp{r} = index.add %lv_xo{r}, %lv_kb : offset\n      %lv_xv{r} = buffer.view %x[%lv_xp{r}] : buffer -> view<{KS}xi8>")
+        lv_loads(0)
+        for p in range(KS // 32):
+            if p + 1 < KS // 32:
+                lv_loads(p + 1)
+            mma(2 * p)
+            mma(2 * p + 1)
+    for kk in range(0 if lvs else KS // 16):
         A(f"      %fk{kk} = index.constant {kk * 16} : index\n      %kg{kk} = index.add %kbase, %fk{kk} : index")
         for r in range(RF):
             A(f"      %l{r}_{kk} = vector.fragment.load<lhs> %x_g8[%xrow{r}, %kg{kk}] shape [%c16, %c16] : view<[%rows]x[%k]xf8E4M3, %a_storage> -> vector<2xi32>")
@@ -729,12 +778,7 @@ def gemm_mxfp4s_f8_ws(mode, prefix="g", order="pairs", npw=4, rf=None, pad=16, k
                 A(f'''      %wr{wi}{c}_{kk}_c = index.constant {wi * TN + c * 16} : index
       %wr{wi}{c}_{kk} = index.add %wave_col, %wr{wi}{c}_{kk}_c : index
       %rf{wi}{c}_{kk} = vector.fragment.load<rhs> %w_cur_f8[%fk{kk}, %wr{wi}{c}_{kk}] shape [%c16, %c16] : view<{PX}x{TW}xf8E5M2, %b_storage> -> vector<2xi32>''')
-        for wi in range(len(weights)):
-            for c in range(cfr):
-                for r in range(RF):
-                    a = f"{wi}r{r}c{c}"
-                    A(f"      %m{a}_{kk} = vector.mma %l{r}_{kk}, %rf{wi}{c}_{kk}, {cur[a]} : vector<2xi32>, vector<2xi32>, vector<8xf32>")
-                    cur[a] = f"%m{a}_{kk}"
+        mma(kk)
     A("      scf.yield " + ", ".join(cur[a] for a in accs) + ", " + ", ".join(c[0] for c in carried) + f" : {acc_t}, {car_t}\n    }} else {{")
     A(f"      %w_nxt = buffer.view %w_stage[%nxt_off] : buffer -> view<{TW}x{PX}xi8>")
     for j in range(NB):
