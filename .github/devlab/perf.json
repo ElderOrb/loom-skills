@@ -1,47 +1,153 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
+ "_comment": "mxfp4st defold exp1: decode.spec.gdn_fold_defer (variant defer: this branch + GDN_FOLD_DEFER=1 on the AMD node) vs origin/mxfp4st (eager fold): ktest + func + per-kernel profile of a drafted decode; ABBA decode; long + 4-stream. Evidence branch, not for merge. Served context 110592.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
+ "kit": null,
+ "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "name": "defold-kt-prof",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "repeat_rows": 3,
    "variants": [
     {
-     "name": "card",
-     "build": {}
+     "name": "base",
+     "ref": "origin/mxfp4st",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
     },
     {
-     "name": "nodraft",
+     "name": "defer",
+     "build": {
+      "GDN_FOLD_DEFER": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    }
+   ],
+   "steps": [
+    "ktest:defer",
+    "func:defer",
+    "profile:base:dec",
+    "profile:defer:dec",
+    "profile:defer:dec",
+    "profile:base:dec"
+   ]
+  },
+  {
+   "name": "defold-abba",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
+   "kit": null,
+   "llamacpp": "b1375",
+   "repeat_rows": 3,
+   "variants": [
+    {
+     "name": "base",
+     "ref": "origin/mxfp4st",
      "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    },
+    {
+     "name": "defer",
+     "build": {
+      "GDN_FOLD_DEFER": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    }
+   ],
+   "steps": [
+    "perf:base:1",
+    "perf:defer:1",
+    "perf:defer:1",
+    "perf:base:1",
+    "perf:base:1",
+    "perf:defer:1"
+   ]
+  },
+  {
+   "name": "defold-long-c4",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
+   "kit": null,
+   "llamacpp": "b1375",
+   "repeat_rows": 3,
+   "variants": [
+    {
+     "name": "base",
+     "ref": "origin/mxfp4st",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    },
+    {
+     "name": "defer",
+     "build": {
+      "GDN_FOLD_DEFER": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    },
+    {
+     "name": "base_nd",
+     "ref": "origin/mxfp4st",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592,
+     "execution": {
+      "draft_depth": 0
+     }
+    },
+    {
+     "name": "defer_nd",
+     "build": {
+      "GDN_FOLD_DEFER": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592,
      "execution": {
       "draft_depth": 0
      }
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
+    "perf:base:1:long",
+    "perf:defer:1:long",
+    "perf:defer:1:long",
+    "perf:base:1:long",
+    "c4:base_nd",
+    "c4:defer_nd",
+    "c4:defer_nd",
+    "c4:base_nd"
    ]
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
