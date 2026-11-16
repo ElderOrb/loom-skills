@@ -1,5 +1,6 @@
 """The kit's migration to hrx-loom 0.2.0rc1: IR spellings, publish_epoch / vision ABI, the pool range, the SDK pin, and the fleet tools reading both
 SDK spellings (base = v0.1 programs, head = v0.2)."""
+import importlib.util
 import json
 import re
 import sys
@@ -84,6 +85,7 @@ class AbiTests(unittest.TestCase):
                     if "func.call" in ln:
                         self.assertIn(": (buffer, buffer, buffer, i32,", ln)   # control_state + plan + media_plan + count
 
+    @unittest.skipUnless(importlib.util.find_spec("gguf") and importlib.util.find_spec("numpy"), "vision generator needs gguf + numpy")
     def test_vision_component_uses_the_finite_batch_abi(self):
         import gen_component
         t = gen_component.control_program({"patch": 14, "merge": 2}, 1024, 256, 0)
