@@ -1841,7 +1841,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
         def bf16_vals(a):
             return bf16_bits(a).view(np.float16).astype(np.float32) * np.float32(16.0)
         # row-scale twin reading a bf16 row (flag 1): the same fp8 row and scales as numpy's from the bf16-rounded values
-        f8_xb = np.round((rng.standard_normal((3, rs_k)) * np.array([[2.0], [1.0], [3e4]])) * 16) / 16   # multiples of 1/16: no tiny values (a tiny negative converts to -0, which numpy's e4m3 reference cannot see)
+        f8_xb = np.round((rng.standard_normal((3, rs_k)) * np.array([[2.0], [1.0], [3e4]])) * 16) / 16 + 0.0   # multiples of 1/16: no tiny values (a tiny negative converts to -0, which numpy's e4m3 reference cannot see)
         xb = bf16_vals(f8_xb)
         b_mx = np.abs(xb).max(1); b_e = np.frexp(b_mx)[1] - 1
         b_sc = np.where(f8_live, 2.0 ** (7 - b_e), 0.0); b_iv = np.where(f8_live, 2.0 ** (b_e - 7 - 8.0), 0.0)

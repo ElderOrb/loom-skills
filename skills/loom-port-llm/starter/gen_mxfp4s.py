@@ -720,7 +720,7 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None, radd=False):
                 radd_leaf[i] = xr
                 fl_prod.add(pi)
     for g, _, _, _ in triples:   # the row-scale producers of the SwiGLU output (their data argument is the gate leaf's output buffer) read f16 x 2^-4
-        if fuse:
+        if fuse and os.environ.get("X_F16S", "1") != "0":
             ya = _split(_LAUNCH.match(lines[g]).group("args"))[-1]
             fl_prod.update(pi for idx in producers.values() for pi in idx if (_split(_LAUNCH.match(lines[pi]).group("args"))[-3] == ya
                                                                           and _LAUNCH.match(lines[pi]).group("k").startswith("g_row_scale_f16")))
@@ -772,7 +772,7 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None, radd=False):
         region = lines[g - 2:s1 + 1]
         repl[g - 2] = "\n".join([
             f"{ind}scf.if %huge {{",
-            f"{ind}  // dual-group: rdna4 kernel.launch @{prefix}_gemm_mxfp4s_swiglu_f8{'_f16s' if fuse else ''}_m256_rdna4[{mg.group('grid')}]({', '.join(args)}) : [{mg.group('gt')}]({', '.join(at)})",
+            f"{ind}  // dual-group: rdna4 kernel.launch @{prefix}_gemm_mxfp4s_swiglu_f8{'_f16s' if (fuse and os.environ.get('X_F16S', '1') != '0') else ''}_m256_rdna4[{mg.group('grid')}]({', '.join(args)}) : [{mg.group('gt')}]({', '.join(at)})",
             f"{ind}  {lines[g].strip()}", f"{ind}  {lines[u].strip()}", f"{ind}  {lines[s0 + 1].strip()}",
             f"{ind}  // dual-group: end",
             f"{ind}}} else {{"] + region + [f"{ind}}}"])
