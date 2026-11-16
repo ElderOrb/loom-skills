@@ -136,7 +136,8 @@ separately. Tools: `fleet/README.md`; process: [targeted-fix.md](targeted-fix.md
     The store is one coherent recording: vLLM's answer to the same request varies between jobs (28 of 101 keys recorded in different jobs of this
     campaign differ in their tokens, mostly late near-tie flips), so `merge` only ever adds keys, never replaces one, and the store is not a union of
     every job's tgz. A fixed recording also makes the gate deterministic. Agent-turn requests contain Loom's own earlier replies: a change that alters
-    Loom's text creates new keys (a miss, recorded by that job); a change that keeps the text identical never misses.
+    Loom's text creates new keys (a miss, recorded by that job); a change that keeps the text identical never misses. The consistency gate asks the reference only to diagnose a concurrent-vs-alone mismatch (scheduling-dependent), so a mismatch
+    is the one case in which a gate run on a cached store still loads vLLM.
 
 ## Regenerating many cards: `fleet/regen.py`
 
