@@ -258,6 +258,12 @@ def main():
                     st, detail = "PASS", f"{d2} (matches llama.cpp's {what}; plain recording: {detail})"
                     break
         print(f"{st} {name} {size}: {detail}", flush=True)
+        # Diagnostics (no verdict effect): both replies' heads, and VISION_REPEAT=N further identical Loom requests on the same server
+        # (is the first reply of a fresh server the odd one out? is Loom's reply run-to-run stable?)
+        print(f"   loom : {(got.get('reasoning', '') + got.get('content', ''))[:90]!r}\n   ref  : {refs[name].get('content', '')[:90]!r}", flush=True)
+        for i in range(int(os.environ.get("VISION_REPEAT", "0") or 0)):
+            again = request(a.url, model, durl, q, a.tokens)
+            print(f"   loom repeat {i + 1}: {(again.get('reasoning', '') + again.get('content', ''))[:90]!r} (prompt tokens {again.get('prompt_tokens')})", flush=True)
         rows.append({"case": name, "status": st, "detail": detail, "loom": got.get("reasoning", "") + got.get("content", ""),
                      "llama": refs[name].get("content", "")})
         if st == "FAIL":
