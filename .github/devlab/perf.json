@@ -1,47 +1,200 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
+ "_comment": "mxfp4st decode: per-step profile by doubling (verify head/gdn/attention/small/weights, propose, warm) and DFlash2 vs MTP on the Quark MXFP4 card, R9700. Evidence: not for merge as is.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
+ "kit": null,
+ "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "name": "mxfp4-decode-prof",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
    "kit": null,
    "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
+   "repeat_rows": 3,
    "variants": [
     {
      "name": "card",
-     "build": {}
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
     },
     {
-     "name": "nodraft",
+     "name": "dhead",
      "build": {},
-     "execution": {
-      "draft_depth": 0
-     }
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304,
+     "double": [
+      "llm_verify:g_head_mv|g_head_select"
+     ]
+    },
+    {
+     "name": "dgdn",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304,
+     "double": [
+      "llm_verify:g_gdn_"
+     ]
+    },
+    {
+     "name": "dattn",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304,
+     "double": [
+      "llm_verify:attention|g_qk_rope|g_split_qgate|g_token_info"
+     ]
+    },
+    {
+     "name": "dsmall",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304,
+     "double": [
+      "llm_verify:g_quant_q8|g_post_add|g_row_scale|g_silu_mul|g_embed|g_spec_"
+     ]
+    },
+    {
+     "name": "dwmv",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304,
+     "double": [
+      "llm_verify:g_mv_mxfp4s|g_gemm_mxfp4s"
+     ]
+    },
+    {
+     "name": "dprop",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304,
+     "double": [
+      "llm_mtp_propose:g_"
+     ]
+    },
+    {
+     "name": "dwarm",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304,
+     "double": [
+      "llm_mtp_warm:g_"
+     ]
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
+    "perf:card:1",
+    "perf:dhead:1",
+    "perf:dgdn:1",
+    "perf:dattn:1",
+    "perf:dsmall:1",
+    "perf:dwmv:1",
+    "perf:card:1",
+    "perf:dprop:1",
+    "perf:dwarm:1",
+    "perf:card:1"
+   ]
+  },
+  {
+   "name": "mxfp4-decode-df",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
+   "kit": null,
+   "llamacpp": "b1375",
+   "repeat_rows": 3,
+   "variants": [
+    {
+     "name": "card",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "df3",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+      "--draft",
+      "dflash",
+      "--drafter",
+      "{hf:z-lab/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf}",
+      "--draft-depth",
+      "3"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "df4",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+      "--draft",
+      "dflash",
+      "--drafter",
+      "{hf:z-lab/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf}",
+      "--draft-depth",
+      "4"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "df5",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+      "--draft",
+      "dflash",
+      "--drafter",
+      "{hf:z-lab/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf}",
+      "--draft-depth",
+      "5"
+     ],
+     "context": 98304
+    }
+   ],
+   "steps": [
+    "perf:card:1",
+    "perf:df3:1",
+    "perf:df4:1",
+    "perf:df5:1",
+    "perf:df5:1",
+    "perf:df4:1",
+    "perf:df3:1",
+    "perf:card:1",
+    "perf:card:1:long",
+    "perf:df3:1:long",
+    "perf:df5:1:long"
    ]
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
