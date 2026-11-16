@@ -276,17 +276,12 @@ command.program.def public @llm_advance() launch(%weights: buffer) {{
         self.assertIn("@g_gemm_mxfp4s_swiglu_f8_f16s_m256_rdna4[", text)
         self.assertRegex(text, r"@g_row_scale_f16_live_lv_f8_rdna4\[%t\]\(%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8, %w16_\w+, %fz_huge\)")
         self.assertRegex(text, r"@g_post_add_norm_rs_live_lv_f8_rdna4\[%t\]\(%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_\w+, %fz_zero\)")
-        self.assertNotIn("radd", text)   # the residual add in the projections is opt-in (X_RADD=1): slower than the plain GEMM + producer
+        self.assertNotIn("radd", text)   # the residual add in the projections is opt-in (radd=True): a tie with the plain GEMM + producer
         self.assertIn("%fz_huge = scf.select %huge, %fz_one, %fz_zero : index", text)
         self.assertIn("%fl: index) {", text)   # the twins take the flag
 
     def test_fuse_with_radd_adds_the_output_projection_into_the_residual(self):
-        old = os.environ.get("X_RADD")
-        os.environ["X_RADD"] = "1"
-        try:
-            text, n = R.fuse_mxfp4s_f8(self.program_with_next_layer(), fuse=True)
-        finally:
-            os.environ.pop("X_RADD") if old is None else os.environ.__setitem__("X_RADD", old)
+        text, n = R.fuse_mxfp4s_f8(self.program_with_next_layer(), fuse=True, radd=True)
         self.assertEqual(n, 3)
         # the down projection accumulates into %x (its gfx11 provider still writes %y), the producer after it skips the add
         self.assertIn("rdna4 kernel.launch @g_gemm_mxfp4s_store_f8_radd_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8, %wd, %wd_sc, %x)", text)
@@ -294,12 +289,10 @@ command.program.def public @llm_advance() launch(%weights: buffer) {{
         self.assertRegex(text, r"@g_post_add_norm_rs_live_lv_f8_rdna4\[%t\]\(%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_\w+, %fz_zero\)")
 
     def test_a_reader_of_y_between_the_projection_and_the_producer_keeps_the_plain_gemm(self):
-        os.environ["X_RADD"] = "1"
-        self.addCleanup(os.environ.pop, "X_RADD", None)
         prog = self.program_with_next_layer().replace("  scf.if %mm {\n    kernel.launch @g_post_add_norm_rs_live_lv[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16) : [index](index, buffer, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer, buffer, buffer)\n  } else {\n    kernel.launch @g_post_add_norm[%t](%t, %y, %wn, %x, %wn, %h) : [index](index, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer)\n  }\n  command.return",
                                                       "  kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)\n  command.return")
         self.assertIn("g_other", prog)   # (the replacement only applies to the appended producer; the fixture's own producer stays)
-        text, _ = R.fuse_mxfp4s_f8(prog.replace("kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)", "kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)\n  scf.if %mm {\n    kernel.launch @g_post_add_norm_rs_live_lv[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16) : [index](index, buffer, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer, buffer, buffer)\n  }"), fuse=True)
+        text, _ = R.fuse_mxfp4s_f8(prog.replace("kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)", "kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)\n  scf.if %mm {\n    kernel.launch @g_post_add_norm_rs_live_lv[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16) : [index](index, buffer, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer, buffer, buffer)\n  }"), fuse=True, radd=True)
         self.assertNotIn("g_gemm_mxfp4s_store_f8_radd_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8, %wd, %wd_sc, %x)", text)
 
     def test_the_flagged_twins_compile_for_gfx1201(self):

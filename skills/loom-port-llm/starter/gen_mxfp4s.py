@@ -597,11 +597,11 @@ def _kernel_def(text, name):
 
 
 def fuse_enabled():
-    """MXFP4S_FUSE (choice prefill.mxfp4s.fuse) on, with the fp8 GEMMs on: the SwiGLU output as f16 x 2^-4 (and, with X_RADD=1, the residual add in the output projections' epilogue)."""
+    """MXFP4S_FUSE (choice prefill.mxfp4s.fuse) on, with the fp8 GEMMs on: the SwiGLU output as f16 x 2^-4 (and, with fuse_mxfp4s_f8(radd=True), the residual add in the output projections' epilogue: not wired, a tie)."""
     return f8_enabled() and os.environ.get("MXFP4S_FUSE", "0").lower() not in ("", "0", "false", "no", "off")
 
 
-def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
+def fuse_mxfp4s_f8(text, prefix="g", fuse=None, radd=False):
     """gfx12: the prefill MXFP4 GEMMs of @llm_advance run on fp8 WMMA when the epoch's rows are a multiple of 256 (%huge).
     Every producer of an f16 GEMM operand buffer (%h16 / %o16 / %f16: g_row_scale_f16*, g_post_add_norm_rs*) also writes its fp8 copy
     (%h8 / %o8 / %f8 and scales %s_h8 / %s_o8 / %s_f8) in a dual-group whose gfx12 provider is the `_f8_rdna4` twin of the producer;
@@ -610,7 +610,7 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
     pass does not know stays as it is (f16 path). Returns (text, number of fp8 GEMM groups).
     fuse (default fuse_enabled()): (1) an output projection (store leaf) whose y is read next by a g_post_add_norm_rs producer adds its tile to the residual
     (`_radd` kernel writing %x) and the producer's twin skips the add (trailing flag); (2) the SwiGLU pair writes f16 x 2^-4 and the row-scale producer of its
-    output reads it (trailing flag; (1) only with X_RADD=1: measured slower). Both only in the %huge epochs; every other epoch and the gfx11 programs are unchanged."""
+    output reads it (trailing flag; (1) only with radd=True: a tie). Both only in the %huge epochs; every other epoch and the gfx11 programs are unchanged."""
     if fuse is None:
         fuse = fuse_enabled()
     a = text.find("command.program.def public @llm_advance(")
@@ -681,7 +681,7 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
         converted[leaf_at[g]] += 4   # gate and up leaves
     f16_optional = {x: converted[x] == len(readers[x]) for x in used}
     radd_leaf, fl_prod = {}, set()   # store leaf line -> the residual buffer it accumulates into; producer lines whose trailing flag is the %huge epoch flag
-    if fuse and os.environ.get("X_RADD", "0") == "1":   # the residual add in the output projections: measured slower than the plain GEMM + producer (-0.8 %), off
+    if fuse and radd:   # the residual add in the output projections (`radd`, default off: a tie with the plain GEMM + producer, -0.8 % alone; run 43861211593)
         for pi, l in enumerate(lines):
             m = _LAUNCH.match(l)
             if not (m and m.group("k").startswith("g_post_add_norm_rs") and _PRODUCER.match(m.group("k"))):

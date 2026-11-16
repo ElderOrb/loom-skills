@@ -271,11 +271,11 @@ CHOICE("prefill.gemm.mxfp4s_f8", "bool", False, "GEMM_MXFP4S_F8", kernels=["g_ge
        doc="gfx12: MXFP4 split-plane (mxfp4s) prefill GEMMs on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): the nibble and scale planes are read as stored, weights decoded to bf8 "
            "exactly in LDS, activations fp8 e4m3 with a per-row power-of-two scale written by the row-scale producers' _f8_rdna4 twins (lossy activations, gated against the "
            "golden reference). Opt-in per model; every block exponent of the checkpoint must be in 107..132 (scan_mxfp4s_exponents.py). The gfx11 programs are unchanged.")
-CHOICE("prefill.mxfp4s.fuse", "bool", False, "MXFP4S_FUSE", kernels=["g_gemm_mxfp4s_*_f8_radd_*", "g_gemm_mxfp4s_*_f8_bf16_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
+CHOICE("prefill.mxfp4s.fuse", "bool", False, "MXFP4S_FUSE", kernels=["g_gemm_mxfp4s_swiglu_f8_f16s_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
        devices=["rdna4"], from_pr="mxfp4st-fprod",
-       doc="gfx12 fp8 prefill of an MXFP4 split-plane model (needs prefill.gemm.mxfp4s_f8), fewer bytes between the kernels: the output projections (attention out, GDN out, FFN down) add "
-           "their tile into the f32 residual stream in the GEMM epilogue (the next post-add-norm producer reads no y, adds nothing, rewrites no x), and the SwiGLU GEMM writes bf16 (the down "
-           "projection's row-scale producer reads bf16). Only the %huge epochs (256-row multiples); other epoch shapes and the gfx11 programs are unchanged. Opt-in per model.")
+       doc="gfx12 fp8 prefill of an MXFP4 split-plane model (needs prefill.gemm.mxfp4s_f8), fewer bytes between the kernels: the SwiGLU GEMM writes its output as f16 times 2^-4 "
+           "(half the bytes of the f32 intermediate; exact power-of-two scaling, range 1e6) and the down projection's row-scale producer reads it (trailing flag argument of the fp8 twins). "
+           "Only the %huge epochs (256-row multiples); other epoch shapes and the gfx11 programs are unchanged. bf16 instead of f16 moved two prompts of the compare gate (fail). Opt-in per model.")
 CHOICE("prefill.attn.no_flash2", "bool", False, "NO_FLASH2", kernels=["*_attention_flash2*"], rows=ROWS_PREFILL, enc=("1", "0"),
        doc="No prefill flash attention (every token takes the listed split-K path).")
 CHOICE("prefill.gemm.off", "bool", False, "NO_GEMM", kernels=["g_gemm_*"], rows=ROWS_PREFILL, enc=("1", None), experiment=True,
