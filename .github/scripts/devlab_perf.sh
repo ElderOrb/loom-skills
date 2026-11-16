@@ -75,6 +75,9 @@
 #          gufo:V               Gufo conformance on V's package served with --loom-logits=on (validation/devlab/run_conformance.sh: conformance.py
 #                               --logits + gufo's logits_check.py); conformance_V.json (gate `gufo`), the raw files in out/gufo_V/
 #          ktest:V              make_kernel_tests.py + run_kernel_tests.sh with V's kit
+#          vtest:V[:HxW]        the image tower (a package with image input): starter/vision/tests (encoder kernels vs NumPy), then the whole encoder
+#                               at HxW pixels (default 320x224) on the package's weights (a safetensors package: the checkpoint's own tensors) vs
+#                               ref_vit.py, every output within 1.0 + 3 % of the reference; vtest_V.log, vtest_encoder_V.log
 #          gates:V:LEVEL        gates.sh against llama.cpp
 #            "elastic": true: on the R9700 serve with --memory_bytes (the elastic state backing) instead of the card's --pool_backing=fixed
 # Runner: "runner": "strix" (default) | "r9700" on the experiment or a job picks the DevLab runner (workflow runs-on). On the
@@ -206,7 +209,11 @@ par = lambda f: os.path.join(card, "parameter", os.path.basename(f))
 if (c.get("source") or {}).get("kind") == "safetensors":   # an HF safetensors checkpoint: the tensor table from its header (HTTP range reads), the weights as fetched
     import inspect_safetensors
     src = inspect_safetensors.load_hf(c["source"]["repo"], c["source"]["revision"])
-    c["tensors"] = inspect_safetensors.build_config(src, drop_chat=True)["tensors"]
+    bc = inspect_safetensors.build_config(src, drop_chat=True)
+    c["tensors"] = bc["tensors"]
+    for k in ("vision", "mrope"):   # the image tower is part of the config the branch's starter derives from the checkpoint
+        if bc.get(k):
+            c[k] = bc[k]
     c["weights"] = {"format": "safetensors", "files": [par(f) for f in c["source"]["files"]]}
 else:
     c["gguf"] = par(c["gguf"])
@@ -283,7 +290,7 @@ if (c.get("source") or {}).get("kind") == "safetensors":
     c["weights"] = {"format": "safetensors", "files": [par(f) for f in c["source"]["files"]]}
 else:
     c["gguf"] = par(c["gguf"])
-if c.get("vision"):
+if c.get("vision") and c["vision"].get("mmproj"):   # a safetensors tower has no projector file
     c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
 for k in ("draft", "drafter", "assistant"):
     if isinstance(c.get(k), dict) and c[k].get("gguf"):
@@ -527,6 +534,18 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       grep -v "^PASS" "$out/ktest_$p1.log" | tail -15
       tot=$(grep -oE "^[0-9]+/[0-9]+ passed" "$out/ktest_$p1.log" | tail -1)
       res[$s]="$([ $rc = 0 ] && [ -n "$tot" ] && [ "${tot%%/*}" = "$(echo "${tot#*/}" | cut -d' ' -f1)" ] && echo PASS || echo FAIL) ($tot; $(grep -c '^SKIP' "$out/ktest_$p1.log") skipped)";;
+    vtest)   # vtest:V[:HxW]  the image tower on this GPU: the encoder kernel cases vs NumPy, then the whole encoder on the package's own weights vs ref_vit.py
+      python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('vision') else 1)" "$D/$p1/pkg/llm_config.json" || { res[$s]="SKIP (no image input)"; continue; }
+      for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
+      step "vision tests $p1"; vt=$D/$p1/vtest; rm -rf "$vt"; mkdir -p "$vt"; vh=${p2:-320x224}
+      export VISION_TEST_DIR=$vt VENV=${VENV:-$root/.venv} PY=$T; [ -n "$RDEV" ] && export VISION_TEST_RDNA4=1   # gfx12: the kernel cases launch the K_rdna4 twins
+      ( cd "${KIT[$p1]}/vision/tests" && bash run_tests.sh ) > "$out/vtest_$p1.log" 2>&1; rc=$?
+      # the whole encoder: a safetensors package reads the checkpoint's tensors (CFG.json CHECKPOINT), a GGUF package its mmproj
+      eargs=$("$T" -c "import json,sys; c=json.load(open(sys.argv[1])); v=c['vision']; print(sys.argv[1] + ' ' + c['weights']['files'][0] if v.get('source') == 'safetensors' else v['mmproj'])" "$D/$p1/pkg/llm_config.json")
+      ( cd "${KIT[$p1]}/vision" && "$T" test_encoder.py --nowrite $eargs "${vh%x*}" "${vh#*x}" ) > "$out/vtest_encoder_$p1.log" 2>&1
+      tail -3 "$out/vtest_encoder_$p1.log"
+      grep -q "^ENCODER PASS" "$out/vtest_encoder_$p1.log" || rc=1
+      res[$s]="$([ $rc = 0 ] && echo PASS || echo FAIL) ($(grep -c '^PASS' "$out/vtest_$p1.log") kernel cases passed, $(grep -c '^FAIL\|^COMPILE' "$out/vtest_$p1.log") failed; encoder $vh: $(grep -o '^ENCODER [A-Z]*' "$out/vtest_encoder_$p1.log" | tail -1))";;
     logits)   # logits:V[:N_PROMPTS]  (loom-skills#736): V's package through the Gufo bundle with the logits capability on, checked on this GPU
       free_gpu   # the GPU is the bundle's (and the undrafted llama.cpp reference's) alone
       gufo_bundle || { echo '{"verdict": "NOT_SUPPORTED", "note": "no gufo bundle on this job (set bundle or GUFO_BUNDLE)", "gates": {}}' > "$out/logits_$p1.json"; res[$s]="not supported (no gufo bundle)"; continue; }
@@ -550,7 +569,7 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "functional checks $p1"
       curl -fsSL --retry 2 "$base/info.json" -o "$out/info_card.json" 2>/dev/null || rm -f "$out/info_card.json"
-      fa=(); grep -q '"vision"' "$card/llm_config.json" && fa+=(--vision)
+      fa=(); { grep -q '"vision"' "$card/llm_config.json" || grep -q '"vision"' "$D/$p1/pkg/llm_config.json"; } 2>/dev/null && fa+=(--vision)   # the card's, or the rebuilt package's image input
       "$T" "$here/.github/scripts/r9700_func.py" "$url" "$cardid" "$out/func_$p1.json" ${fa[@]+"${fa[@]}"} $([ -f "$out/info_card.json" ] && echo --info "$out/info_card.json") 2>&1 | tee "$out/func_$p1.log"
       res[$s]=$(tail -1 "$out/func_$p1.log");;
     gates)
