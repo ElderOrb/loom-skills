@@ -12,6 +12,10 @@ devlab_perf.sh `gates` restores the file of the card's checkpoint (or card) and 
 are all cached never starts vLLM ("references: N cached, 0 recorded"); a request not in the file (a new prompt set, a revision bump) is
 recorded by that job as before, and its gates_V/llama_cache.tgz is merged back with `merge`. A key hit is exact: nothing stale is served.
 
+The store holds two recordings of the golden / vision requests where the engine is not run-to-run deterministic (vLLM: ~28 % of the keys differ between
+jobs): the first, and a second under another salt (bench_common.ALT_SALT_TEXT / ALT_SALT_VISION) taken by a different job (REFERENCE_ALT=record in gates.sh).
+compare.py and vision_golden.py read the second as their --alt / re-recording rule; `merge` adds keys only, so neither recording replaces the other.
+
   reference_cache.py restore --repo ORG/REPO --engine ENGINE --into BENCH_DIR [--store DIR]   -> prints the number of entries restored (0: none)
   reference_cache.py merge   --repo ORG/REPO --engine ENGINE  JOB_llama_cache.tgz ...          -> adds the entries (and reference.json) to the store file
   reference_cache.py count   TGZ_OR_DIR                                                         -> entries
