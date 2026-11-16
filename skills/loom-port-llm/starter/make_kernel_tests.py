@@ -1137,6 +1137,107 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _fold_on(gdn_geometry(cf
   check.return
 }}
 """)
+# 4e. decode.spec.gdn_fold_defer (gen_gdn.defer_kernels): two drafted verifications of three speculative spans in a row (the first at a
+# fork: reader != writer), once with the eager fold (g_gdn_fold after each acceptance; g_gdn_pend + g_gdn_pend_clear also run so the
+# pending blocks hold the same bytes) and once deferred (g_gdn_pend only; the second verification's recurrence applies the first's
+# pending fold, a publishing epoch's g_gdn_flush + g_gdn_pend_clear the second's). The second verification's outputs and the final
+# arena must be EQUAL (bit-exact); the deferred outputs are also checked against numpy (the first round's accepted steps in the state).
+from gen_gdn import defer_enabled as _defer_on  # noqa: E402
+if cfg.get("recurrent_layers") and cfg.get("draft") and _defer_on(gdn_geometry(cfg)):
+    LBd = gdn_geometry(cfg)["layer_bytes"]
+    r1 = [(4, 10, 2, True), (4, 20, 4, False), (3, 30, 1, False)]   # (length, start, accepted, at the fork)
+    r2 = [(4, 3), (3, 1), (4, 4)]                                      # (length, accepted) of the second verification
+    ns = len(r1); t = sum(L for L, _, _, _ in r1); assert t == sum(L for L, _ in r2)
+    qkv1 = rng.standard_normal((t, C)).astype(np.float32); qkv2 = rng.standard_normal((t, C)).astype(np.float32)
+    al1, be1, al2, be2 = (rng.standard_normal((t, HV)).astype(np.float32) for _ in range(4))
+    arena = np.zeros(2 * ns * LBd // 4, np.float32); origins = np.zeros((ns, 5), np.int64)
+    mk = lambda: np.zeros(4 + 9 * ns, np.int32)
+    m1, c1, m2, c2, m2p, m3 = mk(), mk(), mk(), mk(), mk(), mk()
+    for m in (m1, c1, m2, c2, m2p, m3):
+        m[0] = ns
+    i1 = np.zeros((t, 4), np.int32); i2 = np.zeros((t, 4), np.int32)
+    raw2 = np.zeros((t, HV, DV)); f1 = f2 = 0
+    for si, ((L1, p0, a1, fork), (L2, a2)) in enumerate(zip(r1, r2)):
+        rd, wr = 2 * si * LBd, (2 * si + 1) * LBd
+        origins[si] = [rd, wr, 0, p0, 0] if fork else [rd, rd, 0, 0, 0]
+        S0 = (0.3 * rng.standard_normal((HV, DV, DK))).astype(np.float32); h0 = rng.standard_normal((K - 1, C)).astype(np.float32)
+        arena[rd // 4:rd // 4 + SB // 4] = S0.reshape(-1); arena[rd // 4 + SB // 4:rd // 4 + SB // 4 + (K - 1) * C] = h0.reshape(-1)
+        p1 = p0 + a1
+        m1[4 + 9 * si:4 + 9 * si + 9] = [L1, p0, 0, si, f1, 0, 4, 0, 0]; c1[4 + 9 * si:4 + 9 * si + 9] = [a1, p0, 0, si, f1, 0, 0, 0, 0]
+        m2[4 + 9 * si:4 + 9 * si + 9] = [L2, p1, 0, si, f2, 0, 4, 0, 0]; c2[4 + 9 * si:4 + 9 * si + 9] = [a2, p1, 0, si, f2, 0, 0, 0, 0]
+        m2p[4 + 9 * si:4 + 9 * si + 9] = [1, p1, 0, si, 0, 0, 0, 0, 0]; m3[4 + 9 * si:4 + 9 * si + 9] = [1, p1 + a2, 0, si, 0, 0, 0, 0, 0]
+        i1[f1:f1 + L1] = [[0, p0 + i, 1, si] for i in range(L1)]; i2[f2:f2 + L2] = [[0, p1 + i, 1, si] for i in range(L2)]
+        # numpy: the second verification's outputs from the state after the first one's accepted steps
+        full = np.concatenate([h0, qkv1[f1:f1 + a1], qkv2[f2:f2 + L2]], 0).astype(np.float64)
+        rows = [(qkv1, al1, be1, f1 + i) for i in range(a1)] + [(qkv2, al2, be2, f2 + i) for i in range(L2)]
+        S = S0.astype(np.float64)
+        for n, (_, al, be, ti) in enumerate(rows):
+            cv = (full[n:n + K] * conv_w.T).sum(0); sv = cv / (1 + np.exp(-cv))
+            qs_, ks_, vs_ = sv[:HK * DK].reshape(HK, DK), sv[HK * DK:2 * HK * DK].reshape(HK, DK), sv[2 * HK * DK:].reshape(HV, DV)
+            qs_ = qs_ / np.sqrt((qs_ ** 2).sum(-1, keepdims=True) + eps) / np.sqrt(DK); ks_ = ks_ / np.sqrt((ks_ ** 2).sum(-1, keepdims=True) + eps)
+            for h in range(HV):
+                kh = (h // (HV // HK) if G_GROUPED else h % HK)
+                St = S[h] * np.exp(np.log1p(np.exp(float(al[ti, h]) + dt[h])) * a_log[h])
+                d = (vs_[h] - St @ ks_[kh]) / (1 + np.exp(-float(be[ti, h])))
+                S[h] = St + np.outer(d, ks_[kh])
+                if n >= a1:
+                    raw2[ti, h] = S[h] @ qs_[kh]
+        f1 += L1; f2 += L2
+    for n, a in [("gd_m1", m1), ("gd_c1", c1), ("gd_m2", m2), ("gd_c2", c2), ("gd_m2p", m2p), ("gd_m3", m3), ("gd_orig", origins.reshape(-1).view(np.int32)),
+                 ("gd_i1", i1), ("gd_i2", i2), ("gd_arena", arena), ("gd_q1", qkv1), ("gd_q2", qkv2), ("gd_al1", al1), ("gd_be1", be1),
+                 ("gd_al2", al2), ("gd_be2", be2), ("gd_raw2", raw2.reshape(t, VD).astype(np.float32))]:
+        save(n, a)
+    from gen_gdn import FOLD_W as _FW
+    AT = f"tensor<{2 * ns * LBd // 4}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * ns}xi32>"; IT = f"tensor<{t}x4xi32>"
+    XT, ST, VT, HT = f"tensor<{t}x{C}xf32>", f"tensor<{t}x{2 * HK}xf32>", f"tensor<{t}x{VD}xf32>", f"tensor<{t}x{HV}xf32>"
+    BX, BK, BD = (f"tensor<{ns * _FW}x{w}xf32>" for w in (C, HK * DK, VD + HV))
+    REC = f"[index](index, index, index, {MT}, {OT}, {AT}, {XT}, {ST}, {HT}, {HT}, tensor<{HV}xf32>, tensor<{HV}xf32>, {VT}, {BD})"
+    TWO = "[index, index](index, index"
+
+    def rnd(ar, m, c, inf, q, al, be, tag, eager, clear_m):
+        s = f"""  %s{tag} = check.generate.fill value(0.0) : {XT}
+  %i{tag} = check.generate.fill value(0.0) : {ST}
+  %r{tag} = check.generate.fill value(0.0) : {VT}
+  %bx{tag} = check.generate.fill value(0.0) : {BX}
+  %bk{tag} = check.generate.fill value(0.0) : {BK}
+  %bd{tag} = check.generate.fill value(0.0) : {BD}
+  kernel.launch @g_gdn_conv_bank[%t](%t, %spans, %layer, {m}, {inf}, %orig, {ar}, {q}, %w, %s{tag}, %bx{tag}, %bk{tag}) : [index](index, index, index, {MT}, {IT}, {OT}, {AT}, {XT}, tensor<{C * K}xf32>, {XT}, {BX}, {BK})
+  kernel.launch @g_gdn_conv_commit[%spans](%t, %spans, %layer, {m}, %orig, {ar}, {q}) : [index](index, index, index, {MT}, {OT}, {AT}, {XT})
+  kernel.launch @g_gdn_qk_norm[%t](%t, %s{tag}, %i{tag}) : [index](index, {XT}, {ST})
+  kernel.launch @g_gdn_recurrence_rec[%spans](%t, %spans, %layer, {m}, %orig, {ar}, %s{tag}, %i{tag}, {al}, {be}, %a, %dt, %r{tag}, %bd{tag}) : {REC}
+"""
+        if eager:
+            s += f"  kernel.launch @g_gdn_fold[%spans, %layers](%t, %spans, {m}, {c}, %orig, {ar}, %bk{tag}, %bd{tag}) : {TWO}, {MT}, {MT}, {OT}, {AT}, {BK}, {BD})\n"
+        s += f"""  kernel.launch @g_gdn_fold_hist[%spans, %layers](%t, %spans, {m}, {c}, %orig, {ar}, %bx{tag}) : {TWO}, {MT}, {MT}, {OT}, {AT}, {BX})
+  kernel.launch @g_gdn_pend[%spans, %layers](%t, %spans, {m}, {c}, %orig, {ar}, %bk{tag}, %bd{tag}) : {TWO}, {MT}, {MT}, {OT}, {AT}, {BK}, {BD})
+"""
+        if eager:
+            s += f"  kernel.launch @g_gdn_pend_clear[%spans, %layers](%t, %spans, {clear_m}, %orig, {ar}) : {TWO}, {MT}, {OT}, {AT})\n"
+        return s
+    fin = lambda ar: (f"  kernel.launch @g_gdn_flush[%spans, %layers](%t, %spans, %m3, %orig, {ar}) : {TWO}, {MT}, {OT}, {AT})\n"
+                      f"  kernel.launch @g_gdn_pend_clear[%spans, %layers](%t, %spans, %m3, %orig, {ar}) : {TWO}, {MT}, {OT}, {AT})\n")
+    cases.append(f"""check.case public @gdn_fold_defer {{
+  %t = check.literal value({t}) : index
+  %spans = check.literal value({ns}) : index
+  %layer = check.literal value(0) : index
+  %layers = check.literal value(1) : index
+{"".join(f'  %{n} = check.file.read.npy path("gd_{n}.npy") : {MT}{chr(10)}' for n in ("m1", "c1", "m2", "c2", "m2p", "m3"))}  %orig = check.file.read.npy path("gd_orig.npy") : {OT}
+  %i1 = check.file.read.npy path("gd_i1.npy") : {IT}
+  %i2 = check.file.read.npy path("gd_i2.npy") : {IT}
+  %ae = check.file.read.npy path("gd_arena.npy") : {AT}
+  %ad = check.file.read.npy path("gd_arena.npy") : {AT}
+  %q1 = check.file.read.npy path("gd_q1.npy") : {XT}
+  %q2 = check.file.read.npy path("gd_q2.npy") : {XT}
+{"".join(f'  %{n} = check.file.read.npy path("gd_{n}.npy") : {HT}{chr(10)}' for n in ("al1", "be1", "al2", "be2"))}  %eraw2 = check.file.read.npy path("gd_raw2.npy") : {VT}
+  %w = check.file.read.npy path("g_conv_w.npy") : tensor<{C * K}xf32>
+  %a = check.file.read.npy path("g_a.npy") : tensor<{HV}xf32>
+  %dt = check.file.read.npy path("g_dt.npy") : tensor<{HV}xf32>
+{rnd("%ae", "%m1", "%c1", "%i1", "%q1", "%al1", "%be1", "e1", True, "%m2p")}{rnd("%ae", "%m2", "%c2", "%i2", "%q2", "%al2", "%be2", "e2", True, "%m3")}{fin("%ae")}{rnd("%ad", "%m1", "%c1", "%i1", "%q1", "%al1", "%be1", "d1", False, None)}{rnd("%ad", "%m2", "%c2", "%i2", "%q2", "%al2", "%be2", "d2", False, None)}{fin("%ad")}  check.expect.equal actual(%rd2) expected(%re2) : {VT}
+  check.expect.equal actual(%ad) expected(%ae) : {AT}
+  check.expect.close actual(%rd2) expected(%eraw2) atol(1.0e-4) rtol(2.0e-3) nan(different) : {VT}
+  check.return
+}}
+""")
 # 4c. g_gdn_chunk_rdna4 (gfx12 chunked prefill, gen_gdn_chunk.py) alone on three spans of 64+ tokens: a fresh 130-token span (two full chunks and a
 # 2-token tail), a 64-token span that continues a stored state (one full chunk) and a fresh 97-token span; f16 WMMA products with f32 state, so the
 # tolerances are those of f16 operands (about 1e-3 of the largest value), not of the f32 sequential kernel.

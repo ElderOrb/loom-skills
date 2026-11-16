@@ -812,10 +812,27 @@ def _with_taps(program, g):
     return program
 
 
+def _defer_flush(program, g):
+    """decode.spec.gdn_fold_defer: before the trunk, every live publishing span's reader slot gets its pending fold applied and the
+    pending counts of its reader and writer are cleared (gen_gdn.defer_kernels). @llm_verify inherits it from the advance body; its
+    speculative spans apply the pending fold in their recurrence instead."""
+    from gen_gdn import defer_enabled
+    if not (g and g.get("GDN") and defer_enabled(g["GDN"])):
+        return program
+    anchor = "  kernel.launch @g_token_info[%t](%t, %spans, %metadata, %info)"
+    at = program.index(anchor, program.index(ADVANCE_SIG))
+    flush = (f"  // ---- gated delta-net: pending folds of the publishing spans' reader slots applied (decode.spec.gdn_fold_defer)\n"
+             f"  %gflush_layers = index.constant {g['NG']} : index\n"
+             "  kernel.launch @g_gdn_flush[%spans, %gflush_layers](%t, %spans, %metadata, %origins, %arena) : [index, index](index, index, buffer, buffer, buffer)\n"
+             "  kernel.launch @g_gdn_pend_clear[%spans, %gflush_layers](%t, %spans, %metadata, %origins, %arena) : [index, index](index, index, buffer, buffer, buffer)\n")
+    return program[:at] + flush + program[at:]
+
+
 def advance_program(program, g=None):
     """Ordinary epochs. MTP: the final normalized hidden rows stay in the `residual` allocation. DFlash: the
     trunk keeps its own hidden rows and captures the drafter's feature taps into that allocation."""
     assert ADVANCE_SIG in program and H_ALLOCA in program
+    program = _defer_flush(program, g)
     if first_binding() == "%features":
         return _with_taps(program.replace(ADVANCE_SIG, ADVANCE_SIG.replace("%residual: buffer", "%features: buffer")), g)
     return program.replace(ADVANCE_SIG, ADVANCE_SIG.replace("%residual: buffer", "%h: buffer")).replace(H_ALLOCA, "", 1)
@@ -863,7 +880,7 @@ def verify_program(program, g):
     # every drafted token feeds the head: no last-layer output-row selection (gen_llm.last_out_select)
     body = body.replace("%outsel_on = scalar.constant true : i1", "%outsel_on = scalar.constant false : i1")
     GDN = g["GDN"]
-    from gen_gdn import fold_enabled, FOLD_W, FOLD_SPANS
+    from gen_gdn import fold_enabled, defer_enabled, FOLD_W, FOLD_SPANS
     fold = bool(GDN) and fold_enabled(GDN)
     if fold:
         # decode.spec.gdn_fold: no capture / restore / replay. The verification's conv keeps each speculative step's raw input and key
@@ -969,7 +986,8 @@ def verify_program(program, g):
     if fold:
         tail += "  // ---- gated delta-net fold: the accepted steps of the speculative spans into every layer's state and conv history\n"
         tail += f"  %gfold_layers = index.constant {g['NG']} : index\n"
-        tail += "  kernel.launch @g_gdn_fold[%spans, %gfold_layers](%t, %spans, %metadata, %committed, %origins, %arena, %gbankk, %gbankd) : [index, index](index, index, buffer, buffer, buffer, buffer, buffer, buffer)\n"
+        fk = "g_gdn_pend" if defer_enabled(GDN) else "g_gdn_fold"   # deferred: the accepted factors become the writer slot's pending fold
+        tail += f"  kernel.launch @{fk}[%spans, %gfold_layers](%t, %spans, %metadata, %committed, %origins, %arena, %gbankk, %gbankd) : [index, index](index, index, buffer, buffer, buffer, buffer, buffer, buffer)\n"
         tail += "  kernel.launch @g_gdn_fold_hist[%spans, %gfold_layers](%t, %spans, %metadata, %committed, %origins, %arena, %gbankx) : [index, index](index, index, buffer, buffer, buffer, buffer, buffer)\n"
     elif GDN:
         tail += "  // ---- gated delta-net replay: conv + recurrence over the accepted speculative inputs, published\n"
