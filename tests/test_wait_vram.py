@@ -14,6 +14,7 @@ def run(files, *args, timeout=60):
     return subprocess.run(["bash", SCRIPT, *args], capture_output=True, text=True, timeout=timeout, env=dict(os.environ, VRAM_FILES=files))
 
 
+@unittest.skipIf(os.name == "nt", "a bash script over a sysfs path: DevLab runners are Linux")
 class WaitVram(unittest.TestCase):
     def test_free_gpu_returns_at_once_and_logs(self):
         with tempfile.TemporaryDirectory() as t:
