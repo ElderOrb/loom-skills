@@ -77,12 +77,13 @@ GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf
        "a2pfa": {"rf": 2, "swp": True, "pfa": 2}, "p0": {"pad": 0}, "p32": {"pad": 32}, "p64": {"pad": 64}, "p80": {"pad": 80}, "p112": {"pad": 112},
        # ogemm round 1: lane-vector operand loads (one 16-byte load per lane = two K substeps, A from global with immediate offsets, B ds_load_b128), swiglu at rf 4
        "lv": {"lv": True, "sw": {"rf": 4}}, "lvpf1": {"lv": True, "lvpf": 1, "sw": {"rf": 4}}, "lvpf2": {"lv": True, "lvpf": 2, "sw": {"rf": 4}},
-       "lvk2": {"lv": True, "kmult": 2, "sw": {"rf": 4}}, "lvsw2": {"lv": True, "lvpf": 1, "sw": {"rf": 4, "lvpf": 2}}}   # variants that are generator parameters (the levers), not text ablations
+       "lvk2": {"lv": True, "kmult": 2, "sw": {"rf": 4}}, "lvsw2": {"lv": True, "lvpf": 1, "sw": {"rf": 4, "lvpf": 2}},
+       "lvs": {"lv": True, "lvs": True, "sw": {"rf": 4}}, "lvk2s": {"lv": True, "lvs": True, "kmult": 2, "sw": {"rf": 4}}}   # variants that are generator parameters (the levers), not text ablations
 
 
 # the variants whose results are checked against float64 (the others are timing-only levers that lost or tied; hrx-loom 0.1.0 fails to verify a module of ~65k lines
 # ("view type references encoding value ... not defined at this point", notes/sdk_blockers.md), so the checked set stays at ~60 cases)
-TESTED = ["staged", "adirect", "adr2", "adn128", "t128x256", "swp", "pfa2", "yf16", "lv", "lvpf1", "lvpf2", "lvk2"]
+TESTED = ["staged", "adirect", "adr2", "adn128", "t128x256", "swp", "pfa2", "yf16", "lv", "lvpf1", "lvs", "lvk2s"]
 
 
 def ytype(variant):
@@ -112,17 +113,18 @@ def build(variant=""):
     global ROWS
     toks = variant.split("+") if variant else []
     ROWS = 2048
+    zd = "zd" in toks   # zero operands (activations and weight nibbles 0): the power / toggle sensitivity of the kernel (timing only)
     for t in toks:
         if re.fullmatch(r"r\d+", t):
             ROWS = int(t[1:])
-    variant = "+".join(t for t in toks if not re.fullmatch(r"r\d+", t))
+    variant = "+".join(t for t in toks if not re.fullmatch(r"r\d+", t) and t != "zd")
     out = []
     for mode, K, N in SHAPES:
         kn = f"k_{mode}_{K}x{N}_{ROWS}"
         out.append(kernel(mode, kn, variant))
         YT = ytype(variant)
         planes = ["w"] + (["u"] if mode == "swiglu" else [])
-        decl = "".join(f"  %{p} = check.generate.random.uniform seed(%seed) range(-128 to 127) : tensor<{N * K // 2}xi8>\n"
+        decl = "".join((f"  %{p} = check.generate.fill value(0) : tensor<{N * K // 2}xi8>\n" if zd else f"  %{p} = check.generate.random.uniform seed(%seed) range(-128 to 127) : tensor<{N * K // 2}xi8>\n")
                        f"  %{p}s = check.generate.random.uniform seed(%seed) range(116 to 126) : tensor<{N * K // 32}xi8>\n" for p in planes)
         args = ", ".join(f"%{p}, %{p}s" for p in planes)
         tys = ", ".join(f"tensor<{N * K // 2}xi8>, tensor<{N * K // 32}xi8>" for _ in planes)
@@ -131,7 +133,7 @@ def build(variant=""):
   %rows = check.literal value({ROWS}) : index
   %k = check.literal value({K}) : index
   %n = check.literal value({N}) : index
-  %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<{ROWS}x{K}xi8>
+  %x = {f"check.generate.fill value(0) : tensor<{ROWS}x{K}xi8>" if zd else f"check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<{ROWS}x{K}xi8>"}
   %s = check.generate.fill value(1.0) : tensor<{ROWS}x2xf32>
 {decl}  %y = check.generate.fill value(0.0) : tensor<{ROWS}x{N}x{YT}>
   kernel.launch @{kn}[%rows, %n](%rows, %k, %n, %x, %s, {args}, %y) : [index, index](index, index, index, tensor<{ROWS}x{K}xi8>, tensor<{ROWS}x2xf32>, {tys}, tensor<{ROWS}x{N}x{YT}>)
@@ -334,7 +336,7 @@ if __name__ == "__main__" and len(sys.argv) > 2:
     d = sys.argv[2]
     os.makedirs(d, exist_ok=True)
     for v in (sys.argv[3:] or ["base"]):
-        if v != "base" and not all(x in VARIANTS or x in GEN or re.fullmatch(r"r\d+", x) for x in v.split("+")): raise SystemExit("unknown variant " + v)
+        if v != "base" and not all(x in VARIANTS or x in GEN or x == "zd" or re.fullmatch(r"r\d+", x) for x in v.split("+")): raise SystemExit("unknown variant " + v)
         v = "" if v == "base" else v
         open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)) + ("\n" + PEAK8 + "\n" + PEAK8R if not v else ""))
     # hrx-loom 0.1.0: float comparison is check.expect.approximate with the actual and expected types (as make_kernel_tests.py does)
