@@ -5298,17 +5298,21 @@ def hf_rename(text):
     if not names:
         return text
     # the scale plane of a split-plane weight: a second parameter beside it, <var>_sc, under the internal name "<name>#scale"
+    DRAFTER_ROOTS = ("%w_enc", "%w_ctx", "%w_draft")   # a DFlash drafter's own checkpoint (GGUF names that may equal the target's internal names)
+
     def scale_line(m):
         t = TENS.get(m.group(4))
-        if not (t and t["type"] in SPLIT):
+        if m.group(3) in DRAFTER_ROOTS or not (t and t["type"] in SPLIT):
             return m.group(0)
         return m.group(0) + f'\n{m.group(1)}{m.group(2)}_sc = command.parameter {m.group(3)}, "{m.group(4)}#scale" : view<{int(m.group(5)) // SCALE_DIV[t["type"]]}xi8>'
     text = _re.sub(r'^([ \t]*)(%\w+) = command\.parameter (%\w+), "([^"]+)" : view<(\d+)xi8>$', scale_line, text, flags=_re.M)
     unmapped = set()
-    assert not (gen_draft.enabled() and gen_draft.DRAFT["kind"] in ("dflash", "assist")), \
-        "a safetensors target with a separate drafter checkpoint: the drafter's parameter names would collide with the map"
+    assert not (gen_draft.enabled() and gen_draft.DRAFT["kind"] == "assist"), \
+        "a safetensors target with a separate assistant checkpoint: the assistant's parameter names would collide with the map"
 
     def sub(m):
+        if m.group(2) in DRAFTER_ROOTS:
+            return m.group(0)
         if m.group(3) in names:
             return m.group(1) + names[m.group(3)] + m.group(4)
         if m.group(2) == "%weights":
@@ -5742,6 +5746,15 @@ if __name__ == "__main__":
     if os.environ.get("POST_ADD_ROW_SCALE", "1") != "0":   # after live_row_scale; =0 A/B it off
         program, _fused = fuse_post_add_row_scale(program)
         COMMON += _fused
+    if os.environ.get("VERIFY_FUSE", "") in ("swq", "swqn", "full") and spec_kernels and USED_MVQ:   # choice decode.verify.fuse (gen_pstep.py): fused layers for 2-4 token epochs
+        import gen_pstep
+        def _pz_src(name):
+            f, k, r = re.match(r"g_mv_(\w+?)_k(\d+)_t4_q8_r(\d+)$", name).groups()
+            return mv(f, int(k), R=int(r), TG=4, suffix=f"_r{r}" if int(r) != 16 else "", iq=True)
+        program, _pk = gen_pstep.fuse_verify(program, _pz_src, EPS, H, G=int(os.environ.get("MV_PERSIST", "0") or 0),
+                                             n_of=lambda vt, k: int(re.search(r"\d+", vt).group(0)) * 2 // k, mode="swq" if os.environ["VERIFY_FUSE"] == "swqn" else os.environ["VERIFY_FUSE"],
+                                             norm_src=_re.search(r'^kernel\.def export\("g_post_add_norm"\)(?:.|\n)*?^\}\n', NORMS, _re.M).group(0) if os.environ["VERIFY_FUSE"] == "swqn" else None)
+        COMMON += "".join(_pk[n] for n in sorted(_pk))
     if any(f == "f32" for f, *_ in USED_MV | USED_MV_R) or "f32" in USED_GEMM:
         COMMON += F32_VALUES
     if any(f == "f16" for f, *_ in USED_MV | USED_MV_R) or "f16" in USED_GEMM:
@@ -5816,6 +5829,10 @@ if __name__ == "__main__":
         text = re.sub(r"^( *)kernel\.launch @(\w+)_attention_flash2(_h\d+)?\[(.*)$",
                       r"\g<0>\n\1kernel.launch @\2_attention_flash2_deep\3[\4",
                       text, flags=re.M)
+    if FUSED_Q and os.environ.get("ROPE_QG") == "1" and "g_qk_rope_store_h" not in text and "g_qk_rope_store_swa" not in text:   # choice prefill.attn.rope_qg (rope_qg.py)
+        from rope_qg import fuse as _rope_qg
+        text, _nqg = _rope_qg(text)
+        print("rope_qg launches:", _nqg)
     if os.environ.get("LIVE_ROW_SKIP", "1") != "0":   # =0 A/B it off
         text = live_row_skip(text)
     from gen_gemm_rdna4 import f16o_swiglu as _f16o_on

@@ -257,6 +257,15 @@ CHOICE("prefill.gemm.f16o_swiglu", "bool", False, "GEMM_F16O", kernels=["g_gemm_
 CHOICE("decode.mxfp4s.act_q8", "bool", False, "MXFP4S_Q8", kernels=["g_mv_mxfp4s_*_q8*", "g_mxfp4s_icodes"], rows=ROWS_DECODE + ROWS_STREAMS, from_pr="mxfp4st-kern",
        doc="MXFP4 split-plane dense matvecs take int8 activations (ACT_Q8's dot4 path, as Q8_0 / the K-quants) instead of f32 conversions and fused multiply-adds: the 4-token verify "
            "matvec of a drafted decode is ALU-bound on the f32 path (the GGUF MXFP4 Qwen3.8-27B measured 47 tok/s drafted vs 74 with int8 activations). Opt-in per model.")
+CHOICE("decode.verify.fuse", "str", None, "VERIFY_FUSE", kernels=["g_pmv_*"], rows=ROWS_DECODE, from_pr="mxfp4st-ostep",
+       doc="Drafted verify epochs of 2-4 tokens on the int8 matvec path run fused layers (starter gen_pstep.py; the layer as generated stays "
+           "for every other epoch, every value is the launch chain's: kernel tests compare with equality). swq: gate + up + g_silu_mul + "
+           "g_quant_q8 of the FFN in one launch (32-row workgroups whose epilogue writes the down projection's int8 input; kbench pstep_r9700 "
+           "43811425655: FFN block 262 -> 251 us; in the model, R9700 run 43812485595: 157.3 us vs 2 x 78.9, decode tie). swqn: swq and every g_post_add_norm + g_quant_q8(h) pair as one g_post_add_norm_q8 launch (7.2 us vs 2.9 + 2.7: a loss). full: every projection takes its producer as a prologue (rmsnorm / f32 / silu + quant) and "
+           "the out / down projections accumulate into the residual (7 launches -> 2 per FFN, but 261 -> 335+ us: the prologue is paid per workgroup).")
+CHOICE("decode.verify.persist", "int", 0, "MV_PERSIST", kernels=["g_pmv_*"], rows=ROWS_DECODE, from_pr="mxfp4st-ostep",
+       doc="decode.verify.fuse's matvecs as persistent row loops: min(G, row groups) workgroups each walk row groups id, id + G, ... "
+           "(the prologue runs once per workgroup instead of once per row group); 0: one workgroup per row group.")
 CHOICE("prefill.gemm.mxfp4s_f8", "bool", False, "GEMM_MXFP4S_F8", kernels=["g_gemm_mxfp4s_*_f8_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
        devices=["rdna4"], from_pr="mxfp4st-kern",
        doc="gfx12: MXFP4 split-plane (mxfp4s) prefill GEMMs on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): the nibble and scale planes are read as stored, weights decoded to bf8 "
@@ -307,7 +316,11 @@ CHOICE("prefill.attn.flash2_swa_twin", "str", None, "FLASH2_SWA_TWIN", dynamic=T
 CHOICE("prefill.attn.flash2_trim", "bool", False, "FLASH2_TRIM", derive=_trim, from_pr="#656",
        doc="gfx12 flash twin trims (flash2_trim.py) as one switch; the per-trim switches below default to it.", **_FLR4)
 CHOICE("prefill.attn.flash2_b2", "str", None, "FLASH2_B", derive=_flash_b, from_pr="#656", generator_defaults=("2", None),
-       doc="2: key-split two-heads-per-wave global-layer flash twin at head_dim 512 / G 8 (gemma4 E2B) on gfx12.", **_FLR4)
+       doc="2: key-split two-heads-per-wave global-layer flash twin on gfx12 (flash2_b2.py): head_dim 512 / 8 query heads per KV head (gemma4 E2B) or head_dim 256 / 6 "
+           "(Qwen3.5-class 27B, three head pairs per KV head). 3: three heads per wave at head_dim 256 / 6 (256 VGPRs: measured slower than 2).", **_FLR4)
+CHOICE("prefill.attn.rope_qg", "bool", False, "ROPE_QG", kernels=["g_qk_rope_store*", "g_split_qgate"], rows=ROWS_ALL,
+       doc="Gated attention with a fused q|gate projection (qwen35 family): the norm + RoPE kernel reads the query heads from the projection's rows and copies the gate half "
+           "(g_qk_rope_store_qg), so g_split_qgate and a pass over q disappear. Full-attention layers only; no projection biases, no sliding layers.")
 for _k, _env, _what in (("sx", "FLASH2_SX", "S partials exchanged as the lanes' own vectors"),
                         ("lazy", "FLASH2_LAZY", "O^T rescale only when a column's max changed"),
                         ("kvh", "FLASH2_KVH", "loop-invariant half of the paged-KV lookup hoisted"),
