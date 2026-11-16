@@ -74,8 +74,7 @@ GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf
        "t128x256": {"bm": 128, "tn": 256, "sw": {"bm": 128, "tn": 128}}, "t256x256": {"bm": 256, "tn": 256, "sw": {"bm": 256, "tn": 128}},
        "swp": {"swp": True}, "swz": {"swz": True}, "pfa2": {"pfa": 2}, "pfa1": {"pfa": 1},
        "a2swp": {"rf": 2, "swp": True}, "yf16": {"yf16": True},
-       "a2pfa": {"rf": 2, "swp": True, "pfa": 2}, "a2p32": {"rf": 2, "swp": True, "pad": 32}, "a2p8": {"rf": 2, "swp": True, "pad": 8}, "a2p48": {"rf": 2, "swp": True, "pad": 48},
-       "t128a2": {"bm": 128, "tn": 128, "rf": 2, "swp": True, "sw": {"bm": 128, "tn": 64}}}   # variants that are generator parameters (the levers), not text ablations
+       "a2pfa": {"rf": 2, "swp": True, "pfa": 2}, "p0": {"pad": 0}, "p32": {"pad": 32}, "p64": {"pad": 64}, "p80": {"pad": 80}, "p112": {"pad": 112}}}   # variants that are generator parameters (the levers), not text ablations
 
 
 def ytype(variant):
