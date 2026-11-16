@@ -896,9 +896,8 @@ def package_one(st, slug, canon, sha, dry, env):
     if not want:
         raise RuntimeError("the canonical build has no programs")
     W = os.path.join(st.work, "package", slug)
-    # the snapshot is the repo's head, not the manifest's staging.revision: that revision is the A/B's old side (the card the job's "fun" variant
-    # served), and the head carries the card commits made since (model.json, Quick start); the package replaces the programs, so the head's own are
-    # of no interest, and --parent-commit = the head makes a concurrent publish fail the upload instead of being overwritten
+    # the snapshot is the repo's head (the plan pinned the A/B's old side to the head at plan time; card commits may have landed since): the
+    # package replaces the programs, and --parent-commit = the head makes a concurrent publish fail the upload instead of being overwritten
     rev = hf_head(repo)
     snap, out = os.path.join(W, "snap"), os.path.join(W, "pkg")
     hf_snapshot_small(repo, rev, snap)
