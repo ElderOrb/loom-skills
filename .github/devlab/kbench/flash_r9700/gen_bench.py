@@ -44,8 +44,10 @@ VARIANTS = {   # name -> flash2_g6.py options (FLASH2_G6_OPTS)
     "e2": {"B": "2", "e2": 1},
     "wg3qs": {"B": "2", "wg": 3, "qshare": 1},   # timing only (the three pairs read one Q^T region)
     "sacc2": {"B": "2", "sacc": 2},
+    "fm": {"B": "2", "fmax": 1, "vpf": "top2", "e2": 1},   # fixed reference m0 (first + diagonal page), running-max fallback above m0 + 15
+    "fmt": {"B": "2", "fmax": 1, "vpf": "top", "e2": 1},
 }
-TESTED = []
+TESTED = ["fm", "fmt"]
 
 
 def opts_of(v):
