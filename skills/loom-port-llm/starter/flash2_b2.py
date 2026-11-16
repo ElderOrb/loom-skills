@@ -34,7 +34,8 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     NO = d // 64                   # output fragments of a wave per head (8 / 4)
     NKW = NF // 8                  # 64-dim K loads per lane for one 16-key S tile (4 / 2)
     FPW = NF // waves              # Q^T fragments each wave stages (8 / 4)
-    QP = NF * 8 + 8
+    opts = opts or {}
+    QP = NF * 8 + 8 - 8 * int(opts.get("qreg", 0))
     pos_bytes = int(re.search(r"%pos_bytes = index\.constant (\d+) : offset", text).group(1))
     marker = "  // Partial tile: O^T / l" if partial else "  // O^T / l, gate, store through"
     text = re.sub(r"^ *%k_bytes = .*\n *%k_tile = .*\n *%k_view = .*\n", "", text, flags=re.M)
@@ -66,6 +67,8 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
            "  %fb_dh8 = index.mul %dim_half, " + cfpw + " : index\n  %fb_dh64 = index.mul %dim_half, %fb_c64 : index\n"
            "  %fb_h256 = index.mul %lane_half, %fb_c256 : index\n  %fb_qb = index.add %fb_h256, %fb_dh64 : index\n"
            + "".join(f"  %head{hh}_v = index.add %head, %c{hh} : index\n  %head{hh} = index.assume %head{hh}_v [range(%head{hh}_v, {hh}, {qh - 1})] : index\n" for hh in range(1, nh)))
+    if opts.get("qreg"):   # the wave(s) owning row elements 0 .. 8 NQR - 1 stage nothing: every wave loads those fragments into registers
+        qst += f"  %fb_nz = index.cmp ne, %dim_half, %c0 : index\n  %fb_cnqr = index.constant {8 * int(opts['qreg'])} : index\n  scf.if %fb_nz {{\n"
     for hh, hn in enumerate(HV):
         for c in range(FPW):
             qst += (f"  %fqs{hh}_{c}_v = index.add %fb_dh8, %e{c} : index\n  %fqs{hh}_{c} = index.assume %fqs{hh}_{c}_v [range(%fqs{hh}_{c}_v, 0, {NF - 1})] : index\n"
@@ -75,6 +78,16 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
                     f"  %fqraw{hh}_{c} = vector.load %q_view[%q_token, {hn}, %fqn{hh}_{c}] : view<[%tokens]x{qh}x{d}xf32> -> vector<8xf32>\n"
                     f"  %fqh{hh}_{c} = vector.fptrunc %fqraw{hh}_{c} : vector<8xf32> to vector<8xf16>\n"
                     f"  vector.store %fqh{hh}_{c}, %ql_view[%c{hh}_i, %lane, %fqe{hh}_{c}] : vector<8xf16>, view<{nh}x32x{QP}xf16>\n")
+    if opts.get("qreg"):
+        qst = re.sub(r"(%fqe\w+)_v = index\.mul (%fqs\w+), %fb_c8 : index", r"\1_w = index.mul \2, %fb_c8 : index\n  \1_v = index.sub \1_w, %fb_cnqr : index", qst)
+        qst += "  }\n"
+        for hh, hn in enumerate(HV):
+            for r in range(int(opts["qreg"])):
+                qst += (f"  %fqnR{hh}_{r}_o = index.constant {8 * r} : index\n  %fqnR{hh}_{r}_v = index.add %fb_h256, %fqnR{hh}_{r}_o : index\n"
+                        f"  %fqnR{hh}_{r} = index.assume %fqnR{hh}_{r}_v [range(%fqnR{hh}_{r}_v, 0, {d - 8})] : index\n"
+                        f"  %fqrawR{hh}_{r} = vector.load %q_view[%q_token, {hn}, %fqnR{hh}_{r}] : view<[%tokens]x{qh}x{d}xf32> -> vector<8xf32>\n"
+                        f"  %fqhR{hh}_{r} = vector.fptrunc %fqrawR{hh}_{r} : vector<8xf32> to vector<8xf16>\n"
+                        f"  %qgf{hh}_{r} = vector.fragment<rhs> %fqhR{hh}_{r} shape [%c16, %c16] : vector<8xf16>\n")
     qst += "  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
     alloc = (f"  %c0_i = index.constant 0 : index\n  %c1_i = index.constant 1 : index\n" + ("  %c2_i = index.constant 2 : index\n" if nh == 3 else "") +
              f"  %ql_bytes = index.constant {nh * 32 * QP * 2} : offset\n  %ql_tile = buffer.alloca<workgroup> align(16) %ql_bytes : buffer\n"
@@ -153,7 +166,6 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     %rw{j}_v = index.mul %ph{j}_i, %c16 : index
     %rw{j} = index.assume %rw{j}_v [range(%rw{j}_v, 0, 1048560), lt(%rw{j}_v, %pl_rows_m)] : index""")
     A("    %rk_a = scf.select %fb_is2, %rw2, %rw3 : index\n    %rk_b = scf.select %fb_is1, %rw1, %rk_a : index\n    %rk_c = scf.select %fb_is0, %rw0, %rk_b : index\n    %rk = index.assume %rk_c [range(%rk_c, 0, 1048560), lt(%rk_c, %pl_rows_m)] : index")
-    opts = opts or {}
     VPF = opts.get("vpf", "")      # "" = the V^T loads inside the PV loop; "top" / "mid" / "top2": issued at the block start / after the QK loop / half each
 
     def vloads(jjs):
@@ -168,11 +180,41 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
         A(vloads(range(4) if VPF == "top" else (0, 1)))
     A("    %kw_lr_v = index.add %rk, %lane_col : index\n    %kw_lr = index.assume %kw_lr_v [range(%kw_lr_v, 0, 1048575), lt(%kw_lr_v, %pool)] : index\n"
       f"    %kw_c256 = index.constant {d // 2} : index\n    %kw_h = index.mul %lane_half, %kw_c256 : index\n    %c64k = index.constant 64 : index\n    %fq8c = index.constant 8 : index")
-    sinit = ", ".join(f"%s{x} = %init : vector<8xf32>" for x in ABC)
-    sres = ", ".join(f"%s{x}_f" for x in ABC)
-    sty = ", ".join(["vector<8xf32>"] * nh)
-    A(f"    {sres} = scf.for %kw = [%c0 to %c{NKW} step %c1]({sinit}) -> ({sty}){' unroll' if opts.get('kwu') else ''}{{")
-    A(f"""      %kw_a = index.assume %kw [range(%kw, 0, {NKW - 1})] : index
+    NQR = int(opts.get("qreg", 0))   # Q^T fragments per head held in registers (row elements 0 .. 8 NQR - 1; the rest in workgroup memory)
+    if NQR:
+        assert NKW == 2 and NQR == FPW
+        cur = ["%init"] * nh
+        for kw in range(NKW):
+            A(f"""    %kwc{kw}_o = index.constant {64 * kw} : index
+    %kwc{kw}_v = index.add %kw_h, %kwc{kw}_o : index
+    %kwc{kw} = index.assume %kwc{kw}_v [range(%kwc{kw}_v, 0, {d - 64})] : index
+    %kwv{kw} = vector.load %k_pv[%kw_lr, %kwc{kw}] : view<[%pool]x{d}xf16, %k_g_layout> -> vector<64xf16>""")
+            nl = 64 - 8 * NQR if kw == 0 else 64
+            qoff = "%c0" if kw == 0 else f"%kqo{kw}"
+            if kw:
+                A(f"    %kqo{kw} = index.constant {64 * kw - 8 * NQR} : index")
+            for hh, x in enumerate(ABC):
+                A(f"    %qrw{x}{kw} = vector.load %ql_view[%c{hh}_i, %lane, {qoff}] : view<{nh}x32x{QP}xf16> -> vector<{nl}xf16>")
+            for sl in range(8):
+                A(f"    %kfs{kw}_{sl} = vector.slice %kwv{kw}[{8 * sl}] : vector<64xf16> -> vector<8xf16>\n"
+                  f"    %kf{kw}_{sl} = vector.fragment<lhs> %kfs{kw}_{sl} shape [%c16, %c16] : vector<8xf16>")
+                for hh, x in enumerate(ABC):
+                    if kw == 0 and sl < NQR:
+                        qb = f"%qgf{hh}_{sl}"
+                    else:
+                        o = 8 * sl - (8 * NQR if kw == 0 else 0)
+                        A(f"    %qr{x}{kw}_{sl} = vector.slice %qrw{x}{kw}[{o}] : vector<{nl}xf16> -> vector<8xf16>\n"
+                          f"    %qb{x}{kw}_{sl} = vector.fragment<rhs> %qr{x}{kw}_{sl} shape [%c16, %c16] : vector<8xf16>")
+                        qb = f"%qb{x}{kw}_{sl}"
+                    nm = f"%s{x}_f" if (kw, sl) == (NKW - 1, 7) else f"%sq{x}{kw}_{sl}"
+                    A(f"    {nm} = vector.mma %kf{kw}_{sl}, {qb}, {cur[hh]} : vector<8xf16>, vector<8xf16>, vector<8xf32>")
+                    cur[hh] = nm
+    else:
+        sinit = ", ".join(f"%s{x} = %init : vector<8xf32>" for x in ABC)
+        sres = ", ".join(f"%s{x}_f" for x in ABC)
+        sty = ", ".join(["vector<8xf32>"] * nh)
+        A(f"    {sres} = scf.for %kw = [%c0 to %c{NKW} step %c1]({sinit}) -> ({sty}){' unroll' if opts.get('kwu') else ''}{{")
+        A(f"""      %kw_a = index.assume %kw [range(%kw, 0, {NKW - 1})] : index
       %kw_o = index.mul %kw_a, %c64k : index
       %kw_c = index.add %kw_h, %kw_o : index
       %kw_ci = index.assume %kw_c [range(%kw_c, 0, {d - 64})] : index
@@ -181,15 +223,15 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
       %kqo_v = index.mul %kw_f0, %fq8c : index
       %kqo = index.assume %kqo_v [range(%kqo_v, 0, {QP - 64})] : index""" + "".join(f"""
       %qrw{x} = vector.load %ql_view[%c{hh}_i, %lane, %kqo] : view<{nh}x32x{QP}xf16> -> vector<64xf16>""" for hh, x in enumerate(ABC)))
-    cur = [f"%s{x}" for x in ABC]
-    for sl in range(8):
-        A(f"""      %kfs{sl} = vector.slice %kwv[{8 * sl}] : vector<64xf16> -> vector<8xf16>
+        cur = [f"%s{x}" for x in ABC]
+        for sl in range(8):
+            A(f"""      %kfs{sl} = vector.slice %kwv[{8 * sl}] : vector<64xf16> -> vector<8xf16>
       %kf{sl} = vector.fragment<lhs> %kfs{sl} shape [%c16, %c16] : vector<8xf16>
 """ + "".join(f"      %qr{x}{sl} = vector.slice %qrw{x}[{8 * sl}] : vector<64xf16> -> vector<8xf16>\n" for x in ABC)
-          + "".join(f"      %qb{x}{sl} = vector.fragment<rhs> %qr{x}{sl} shape [%c16, %c16] : vector<8xf16>\n" for x in ABC)
-          + "\n".join(f"      %sq{x}{sl} = vector.mma %kf{sl}, %qb{x}{sl}, {cur[hh]} : vector<8xf16>, vector<8xf16>, vector<8xf32>" for hh, x in enumerate(ABC)))
-        cur = [f"%sq{x}{sl}" for x in ABC]
-    A(f"      scf.yield {', '.join(cur)} : {sty}\n    }}")
+              + "".join(f"      %qb{x}{sl} = vector.fragment<rhs> %qr{x}{sl} shape [%c16, %c16] : vector<8xf16>\n" for x in ABC)
+              + "\n".join(f"      %sq{x}{sl} = vector.mma %kf{sl}, %qb{x}{sl}, {cur[hh]} : vector<8xf16>, vector<8xf16>, vector<8xf32>" for hh, x in enumerate(ABC)))
+            cur = [f"%sq{x}{sl}" for x in ABC]
+        A(f"      scf.yield {', '.join(cur)} : {sty}\n    }}")
     if VPF in ("mid", "top2"):
         A(vloads(range(4) if VPF == "mid" else (2, 3)))
     A(f"""    %tf32 = index.cast %blk_first : index to i32
@@ -346,9 +388,14 @@ def _ablate(loop, abl):
             loop = re.sub(r"lt\(%rw\d_v, %pl_rows_m\)", "lt(%c0, %pl_rows_m)", loop)
         elif a in ("noqk", "nopv"):
             pat = r"^ *(%sq\w+) = vector\.mma \S+, \S+, (%\w+) :.*\n" if a == "noqk" else r"^ *(%(?:bn|on)\w+) = vector\.mma \S+, \S+, (%\w+) :.*\n"
-            for m in list(re.finditer(pat, loop, flags=re.M)):
-                loop = loop.replace(m.group(0), "")
+            while (m := re.search(pat, loop, flags=re.M)):   # one at a time: a rename rewrites the later MMAs of a chain
+                loop = loop.replace(m.group(0), "", 1)
                 loop = re.sub(re.escape(m.group(1)) + r"\b(?!\w)", m.group(2), loop)
+        elif a == "k0":   # K rows of page 0 only (V as is)
+            loop = loop.replace("%kw_lr_v = index.add %rk, %lane_col", "%kw_lr_v = index.add %c0, %lane_col")
+        elif a == "v0":   # V^T rows of page 0 only (K as is)
+            assert "%vj0_ro" in loop, "v0: V^T prefetch variants only"   # page jj -> row 16 jj: four distinct cache-resident pages
+            loop = re.sub(r"(%vj(\d)_ro) = index\.scale %rw\d,", r"\1 = index.scale %kcol\2,", loop)
         elif a == "nobar":
             loop = re.sub(r"^ *kernel\.barrier.*\n", "", loop, flags=re.M)
         elif a == "noexp":
