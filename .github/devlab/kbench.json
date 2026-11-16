@@ -80,39 +80,22 @@
       "repeats": 3
     },
     {
-<<<<<<< HEAD
-      "suite": "pstep_r9700",
-      "runner": "r9700",
-      "dir": "pstep_r9700",
-      "gen": "pstep_r9700/gen_bench.py",
-=======
       "suite": "prof_counters_r9700",
       "runner": "r9700",
       "dir": "gemm_mxfp4s",
       "gen": "gemm_mxfp4s/gen_bench.py",
->>>>>>> origin/mxfp4st
       "gen_variants": [
         "base"
       ],
       "files": [
         "bench.loom"
       ],
-<<<<<<< HEAD
-      "tests": [
-        "test.loom"
-      ],
-      "case_timing": true,
-=======
->>>>>>> origin/mxfp4st
       "config": [],
       "args": [
         "--measure=dispatch_complete",
         "--batch-size=8",
         "--profile-final-batch=true"
       ],
-<<<<<<< HEAD
-      "repeats": 3
-=======
       "repeats": 1,
       "probes": [
         {
@@ -153,7 +136,29 @@
           ]
         }
       ]
->>>>>>> origin/mxfp4st
+    },
+    {
+      "suite": "pstep_r9700",
+      "runner": "r9700",
+      "dir": "pstep_r9700",
+      "gen": "pstep_r9700/gen_bench.py",
+      "gen_variants": [
+        "base"
+      ],
+      "files": [
+        "bench.loom"
+      ],
+      "tests": [
+        "test.loom"
+      ],
+      "case_timing": true,
+      "config": [],
+      "args": [
+        "--measure=dispatch_complete",
+        "--batch-size=8",
+        "--profile-final-batch=true"
+      ],
+      "repeats": 3
     }
   ]
 }
