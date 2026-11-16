@@ -666,12 +666,15 @@ def ingest_full(st, name, e, W):
     perf = [f"{S}/make_info.py", "perf", "--gpu", dev, "--loom-jsonl", f"{d}/perf_{V}.jsonl", "--c4-loom", f"{d}/c4_{ND}.txt", "--package", out, *src,
             "--device", "dev.json", "--hrx-loom", "hrx.json", "--fetched-programs", rd("programs_sha256.txt"), "-o", "ev_perf.json"]
     if st_card:   # no llama.cpp: the baseline column is vLLM ROCm on the same runner when the job measured it, else none (the card says so)
+        c4vl = [f for f in c4vl if "agg_tps" in open(f).read()]   # a c4 file without a rate (the engine served too few streams) is not a baseline
         if vl:
             perf += ["--llama-jsonl", *vl, *(["--c4-llama", c4vl[0]] if c4vl else []), "--baseline-name", "vLLM",
-                     "--baseline-version", "vllm/" + rd("vllm_version.txt").strip(), "--baseline-args", rd("vllm_args.txt")]
+                     "--baseline-version", "vllm/" + rd("vllm_version.txt").strip(), "--baseline-args", rd("vllm_args_on.txt")]
             if os.path.exists(os.path.join(d, "vllm_note.txt")):   # rows vLLM could not serve on this GPU (never silent)
-                kv = (" (vLLM reports: " + "; ".join(rd("vllm_kv.txt").split("\n")) .strip("; ") + ")") if os.path.exists(os.path.join(d, "vllm_kv.txt")) else ""
+                kv = (" (vLLM reports: " + "; ".join(x for x in rd("vllm_kv_on.txt").split("\n") if x.strip()) + ")") if os.path.exists(os.path.join(d, "vllm_kv_on.txt")) else ""
                 perf += ["--differs", rd("vllm_note.txt").strip().rstrip(".") + kv]
+            if os.path.exists(os.path.join(d, "vllm_note_c4.txt")):
+                perf += ["--differs", rd("vllm_note_c4.txt").strip()]
         else:
             why = ("the job's vLLM step failed: " + rd("vllm_error.txt").strip()[:300]) if os.path.exists(os.path.join(d, "vllm_error.txt")) \
                 else "not measured on this card yet (llama.cpp cannot read the safetensors checkpoint)"
