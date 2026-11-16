@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st decode experiment 2: clean doubling of pure kernels (head, propose parts, small kernels) and DFlash2 at context 65536. Evidence, not for merge.",
+ "_comment": "mxfp4st decode experiment 3: single-kernel doublings, Q4_0 MTP block, DFlash2 d5 at 40960. Evidence.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
@@ -7,7 +7,7 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "mxfp4-decode-prof2",
+   "name": "mxfp4-decode-prof3",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
    "kit": null,
    "llamacpp": "b1375",
@@ -23,7 +23,18 @@
      "context": 98304
     },
     {
-     "name": "dhead",
+     "name": "q4blk",
+     "build": {
+      "MTP_BLOCK_PREP": "q4_0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "dq8",
      "build": {},
      "build_args": [
       "--slug",
@@ -31,11 +42,11 @@
      ],
      "context": 98304,
      "double": [
-      "llm_verify:g_head_mv"
+      "llm_verify:g_quant_q8"
      ]
     },
     {
-     "name": "dphead",
+     "name": "drs",
      "build": {},
      "build_args": [
       "--slug",
@@ -43,11 +54,11 @@
      ],
      "context": 98304,
      "double": [
-      "llm_mtp_propose:g_head_mv"
+      "llm_verify:g_row_scale_f16"
      ]
     },
     {
-     "name": "dpmv",
+     "name": "dsilu",
      "build": {},
      "build_args": [
       "--slug",
@@ -55,11 +66,11 @@
      ],
      "context": 98304,
      "double": [
-      "llm_mtp_propose:g_mv_q8_0"
+      "llm_verify:g_silu_mul"
      ]
     },
     {
-     "name": "dpsm",
+     "name": "dqkn",
      "build": {},
      "build_args": [
       "--slug",
@@ -67,11 +78,11 @@
      ],
      "context": 98304,
      "double": [
-      "llm_mtp_propose:g_quant_q8|g_row_scale|g_post_add|g_spec_rmsnorm|g_mtp_"
+      "llm_verify:g_gdn_qk_norm"
      ]
     },
     {
-     "name": "dpatt",
+     "name": "dng",
      "build": {},
      "build_args": [
       "--slug",
@@ -79,11 +90,11 @@
      ],
      "context": 98304,
      "double": [
-      "llm_mtp_propose:attention|g_qk_rope|g_split_qgate"
+      "llm_verify:g_gdn_norm_gate"
      ]
     },
     {
-     "name": "dsm",
+     "name": "dcap",
      "build": {},
      "build_args": [
       "--slug",
@@ -91,11 +102,11 @@
      ],
      "context": 98304,
      "double": [
-      "llm_verify:g_quant_q8|g_post_add|g_row_scale|g_silu_mul"
+      "llm_verify:g_gdn_capture|g_gdn_restore"
      ]
     },
     {
-     "name": "dacc",
+     "name": "dsel",
      "build": {},
      "build_args": [
       "--slug",
@@ -103,24 +114,39 @@
      ],
      "context": 98304,
      "double": [
-      "llm_verify:g_spec_accept"
+      "llm_verify:g_head_select"
+     ]
+    },
+    {
+     "name": "dpad",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304,
+     "double": [
+      "llm_verify:g_post_add_norm"
      ]
     }
    ],
    "steps": [
     "perf:card:1",
-    "perf:dhead:1",
-    "perf:dphead:1",
-    "perf:dpmv:1",
-    "perf:dpsm:1",
-    "perf:dpatt:1",
-    "perf:dsm:1",
-    "perf:dacc:1",
+    "perf:q4blk:1",
+    "perf:dq8:1",
+    "perf:drs:1",
+    "perf:dsilu:1",
+    "perf:dqkn:1",
+    "perf:dng:1",
+    "perf:dcap:1",
+    "perf:dsel:1",
+    "perf:dpad:1",
+    "perf:q4blk:1",
     "perf:card:1"
    ]
   },
   {
-   "name": "mxfp4-decode-df2",
+   "name": "mxfp4-decode-q4",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
    "kit": null,
    "llamacpp": "b1375",
@@ -136,34 +162,15 @@
      "context": 98304
     },
     {
-     "name": "df3",
-     "build": {},
+     "name": "q4blk",
+     "build": {
+      "MTP_BLOCK_PREP": "q4_0"
+     },
      "build_args": [
       "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-      "--draft",
-      "dflash",
-      "--drafter",
-      "{hf:z-lab/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf}",
-      "--draft-depth",
-      "3"
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 65536
-    },
-    {
-     "name": "df4",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-      "--draft",
-      "dflash",
-      "--drafter",
-      "{hf:z-lab/Qwen3.8-27B-DFlash2-GGUF/Qwen3.8-27B-DFlash2-Q4_K_M.gguf}",
-      "--draft-depth",
-      "4"
-     ],
-     "context": 65536
+     "context": 98304
     },
     {
      "name": "df5",
@@ -178,21 +185,21 @@
       "--draft-depth",
       "5"
      ],
-     "context": 65536
+     "context": 40960
     }
    ],
    "steps": [
     "perf:card:1",
-    "perf:df3:1",
-    "perf:df4:1",
+    "perf:q4blk:1",
     "perf:df5:1",
     "perf:df5:1",
-    "perf:df4:1",
-    "perf:df3:1",
+    "perf:q4blk:1",
     "perf:card:1",
     "perf:card:1:long",
-    "perf:df3:1:long",
-    "perf:df5:1:long"
+    "perf:q4blk:1:long",
+    "perf:df5:1:long",
+    "perf:q4blk:1:long",
+    "perf:card:1:long"
    ]
   }
  ]
