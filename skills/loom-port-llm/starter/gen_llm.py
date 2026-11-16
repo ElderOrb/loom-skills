@@ -5824,7 +5824,7 @@ if __name__ == "__main__":
     from gen_mxfp4s import f8_enabled as _f8s_on
     if _f8s_on():   # gfx12: the split-plane MXFP4 prefill GEMMs on fp8 WMMA (choice prefill.gemm.mxfp4s_f8; gen_mxfp4s.fuse_mxfp4s_f8)
         from gen_mxfp4s import fuse_mxfp4s_f8 as _f8s_fuse
-        text, _nf8s = _f8s_fuse(text)
+        text, _nf8s = _f8s_fuse(text)   # choice prefill.mxfp4s.fuse (MXFP4S_FUSE): fuse_enabled() inside
         print("mxfp4s fp8 groups:", _nf8s)
     if seg_tokens():
         text = seg_attention(text)

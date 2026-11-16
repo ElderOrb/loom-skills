@@ -1217,6 +1217,9 @@ if __name__ == "__main__":
                     if _mx.f8_enabled():
                         out.append(post(_mx.gemm_mxfp4s_f8_m256("store", PREFIX)))
                         out.append(post(_mx.gemm_mxfp4s_f8_m256("swiglu", PREFIX)))
+                        if _mx.fuse_enabled():   # choice prefill.mxfp4s.fuse: the output projections add into the residual, the SwiGLU output is bf16
+                            out.append(post(_mx.gemm_mxfp4s_f8_m256("store", PREFIX, radd=True)))
+                            out.append(post(_mx.gemm_mxfp4s_f8_m256("swiglu", PREFIX, ybf16=True)))
             else:
                 out.append(_rdna4.with_twins(post(gemm_big(fmt, mode))))
                 if on256:

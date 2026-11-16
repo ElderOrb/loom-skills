@@ -104,7 +104,7 @@ def list_launch(tv, t, info, sfx=""):
             f"  %fcount{sfx} = check.generate.fill value(0) : tensor<64xi32>\n"
             f"  kernel.launch @g_attention_fallback_list[{tv}]({tv}, {info}, %tiles{sfx}, %flist{sfx}, %fcount{sfx}) : "
             f"[index](index, tensor<{t}x4xi32>, tensor<{t}xi32>, tensor<{t}xi32>, tensor<64xi32>)\n")
-def ty(a): return "tensor<" + "x".join(map(str, a.shape)) + "x" + {"float32": "f32", "int8": "i8", "int32": "i32", "float16": "f16"}[str(a.dtype)] + ">"
+def ty(a): return "tensor<" + "x".join(map(str, a.shape)) + "x" + {"float32": "f32", "int8": "i8", "int16": "i16", "int32": "i32", "float16": "f16"}[str(a.dtype)] + ">"
 # 1. embed
 ids = np.array([0, cfg['vocab'] - 1, cfg['vocab'] // 2, 1000], dtype=np.int32); t = len(ids)
 # M-RoPE (cfg "mrope"): the rope kernel also reads the epoch metadata (one span, offset 0: rotary position =
@@ -1217,7 +1217,7 @@ def e4m3_bytes(v):
     ef = np.where(sub, 0, e + 7); mant = np.where(sub, np.rint(a / 2.0 ** -9), np.rint((a / 2.0 ** e - 1) * 8)).astype(np.int64)
     b = np.where(a == 0, 0, (ef << 3) | mant) | np.where(v < 0, 0x80, 0)
     return b.astype(np.uint8).view(np.int8)
-from gen_mxfp4s import f8_enabled as _f8_on  # noqa: E402
+from gen_mxfp4s import f8_enabled as _f8_on, fuse_enabled as _fuse_on  # noqa: E402
 if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gemm.mxfp4s_f8: the fp8 twins of the row-scale producers (ktest_select skips them when the build has none)
     # the fp8 GEMM on the model's own split-plane weights (real nibbles and scales; the kbench suite gemm_mxfp4s tests it on synthetic planes): the exactly
     # dequantized weights times the e4m3 activations it is given, one case per (K, plain / SwiGLU pair)
@@ -1292,7 +1292,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %h = check.generate.fill value(0.0) : tensor<3x{rs_k}xf16>
   %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
   %q8 = check.generate.fill value(0) : tensor<3x{rs_k}xi8>
-  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %k, %x, %s, %h, %q8, %s8) : [index](index, tensor<3x4xi32>, index, tensor<3x{rs_k}xf32>, tensor<3x2xf32>, tensor<3x{rs_k}xf16>, tensor<3x{rs_k}xi8>, tensor<3x2xf32>)
+{"  %fl = check.literal value(0) : index" + chr(10) if _fuse_on() else ""}  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %k, %x, %s, %h, %q8, %s8{", %fl" if _fuse_on() else ""}) : [index](index, tensor<3x4xi32>, index, tensor<3x{rs_k}xf32>, tensor<3x2xf32>, tensor<3x{rs_k}xf16>, tensor<3x{rs_k}xi8>, tensor<3x2xf32>{", index" if _fuse_on() else ""})
   check.expect.close actual(%s) expected(%es16) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
   check.expect.close actual(%h) expected(%eh) atol(0.0) rtol(1.0e-3) nan(different) : tensor<3x{rs_k}xf16>
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
@@ -1320,9 +1320,142 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %h16 = check.generate.fill value(0.0) : tensor<3x{H}xf16>
   %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
   %q8 = check.generate.fill value(0) : tensor<3x{H}xi8>
-  kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>)
+{"  %fl = check.literal value(0) : index" + chr(10) if _fuse_on() else ""}  kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8{", %fl" if _fuse_on() else ""}) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>{", index" if _fuse_on() else ""})
   check.expect.close actual(%h16) expected(%eh16) atol(1.0e-3) rtol(1.0e-3) nan(different) : tensor<3x{H}xf16>
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
+  check.return
+}}
+""")
+    if _fuse_on():   # choice prefill.mxfp4s.fuse: the flagged producer twins, the residual-adding output projection, the bf16 SwiGLU output
+        def bf16_bits(a):
+            u = np.asarray(a, np.float32).view(np.uint32).astype(np.uint64)
+            return ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16).view(np.int16)
+        def bf16_vals(a):
+            return (bf16_bits(a).view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+        # row-scale twin reading a bf16 row (flag 1): the same fp8 row and scales as numpy's from the bf16-rounded values
+        xb = bf16_vals(f8_x)
+        b_mx = np.abs(xb).max(1); b_e = np.frexp(b_mx)[1] - 1
+        b_sc = np.where(f8_live, 2.0 ** (7 - b_e), 0.0); b_iv = np.where(f8_live, 2.0 ** (b_e - 7 - 8.0), 0.0)
+        save("rs8b_x", bf16_bits(f8_x)); save("rs8b_s", np.stack([b_sc, b_iv], 1).astype(np.float32))
+        save("rs8b_q", np.where(f8_live[:, None], e4m3_bytes(e4m3_round(xb * b_sc[:, None])), 0).astype(np.int8))
+        cases.append(f"""check.case public @row_scale_f16_live_lv_f8_bf16in {{
+  %rows = check.literal value(3) : index
+  %k = check.literal value({rs_k}) : index
+  %fl = check.literal value(1) : index
+  %info = check.file.read.npy path("rs8_info.npy") : tensor<3x4xi32>
+  %x = check.file.read.npy path("rs8b_x.npy") : tensor<3x{rs_k}xi16>
+  %es8 = check.file.read.npy path("rs8b_s.npy") : tensor<3x2xf32>
+  %eq8 = check.file.read.npy path("rs8b_q.npy") : tensor<3x{rs_k}xi8>
+  %s = check.generate.fill value(0.0) : tensor<3x2xf32>
+  %h = check.generate.fill value(0.0) : tensor<3x{rs_k}xf16>
+  %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
+  %q8 = check.generate.fill value(0) : tensor<3x{rs_k}xi8>
+  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %k, %x, %s, %h, %q8, %s8, %fl) : [index](index, tensor<3x4xi32>, index, tensor<3x{rs_k}xi16>, tensor<3x2xf32>, tensor<3x{rs_k}xf16>, tensor<3x{rs_k}xi8>, tensor<3x2xf32>, index)
+  check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
+  check.expect.equal actual(%q8) expected(%eq8) : tensor<3x{rs_k}xi8>
+  check.return
+}}
+""")
+        # post-add-norm twin with the residual already added (flag 1): x holds x + y, y is garbage that must not be read; same fp8 row and scales, x untouched
+        if not cfg.get("post_norms"):
+            save("pa8r_g", (rng.standard_normal((3, H)) * 1e4).astype(np.float32))
+            cases.append(f"""check.case public @post_add_norm_rs_live_lv_f8_radd {{
+  %rows = check.literal value(3) : index
+  %fl = check.literal value(1) : index
+  %info = check.file.read.npy path("pa_info.npy") : tensor<3x4xi32>
+  %y = check.file.read.npy path("pa8r_g.npy") : tensor<3x{H}xf32>
+  %x = check.file.read.npy path("pa_xe_live_lv.npy") : tensor<3x{H}xf32>
+  %ex = check.file.read.npy path("pa_xe_live_lv.npy") : tensor<3x{H}xf32>
+  %wp = check.file.read.npy path("pa_wp.npy") : tensor<{H}xf32>
+  %wn = check.file.read.npy path("pa_wn.npy") : tensor<{H}xf32>
+  %es8 = check.file.read.npy path("pa8_s.npy") : tensor<3x2xf32>
+  %eq8 = check.file.read.npy path("pa8_q.npy") : tensor<3x{H}xi8>
+  %h = check.generate.fill value(0.0) : tensor<3x{H}xf32>
+  %s = check.generate.fill value(0.0) : tensor<3x2xf32>
+  %h16 = check.generate.fill value(0.0) : tensor<3x{H}xf16>
+  %s8 = check.generate.fill value(7.0) : tensor<3x2xf32>
+  %q8 = check.generate.fill value(0) : tensor<3x{H}xi8>
+  kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%rows](%rows, %info, %y, %wp, %x, %wn, %h, %s, %h16, %q8, %s8, %fl) : [index](index, tensor<3x4xi32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<{H}xf32>, tensor<3x{H}xf32>, tensor<3x2xf32>, tensor<3x{H}xf16>, tensor<3x{H}xi8>, tensor<3x2xf32>, index)
+  check.expect.close actual(%x) expected(%ex) atol(0.0) rtol(0.0) nan(different) : tensor<3x{H}xf32>
+  check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<3x2xf32>
+  check.expect.equal actual(%q8) expected(%eq8) : tensor<3x{H}xi8>
+  check.return
+}}
+""")
+        # the output projection that adds into the residual (store, radd): y0 + the exactly dequantized product, one case per K of the plain GEMMs picked above
+        for name, swiglu in _f8s_pick.values():
+            W = deq(name); n, K = W.shape
+            if K % 128 or swiglu:
+                continue
+            n_use = min(n, 1024 + n % 128) // 128 * 128
+            Wr = raw(name).reshape(n, -1)[:n_use].reshape(-1); Ws_ = raw_scale(name).reshape(n, -1)[:n_use].reshape(-1); Wd = W[:n_use].astype(np.float64)
+            rows = 512
+            xf = e4m3_round(np.clip(rng.standard_normal((rows, K)) * 30.0, -440, 440))
+            inv = rng.uniform(0.25, 2.0, rows).astype(np.float32)
+            sc = np.stack([np.ones(rows, np.float32), inv * np.float32(2.0 ** -8)], 1)
+            y0 = (rng.standard_normal((rows, n_use)) * 50.0).astype(np.float32)
+            yv = y0.astype(np.float64) + (xf @ Wd.T) * inv[:, None].astype(np.float64)
+            tag = f"gm8s_radd_{K}_{n_use}"
+            save(tag + "_x", e4m3_bytes(xf)); save(tag + "_s", sc); save(tag + "_y", yv.astype(np.float32)); save(tag + "_y0", y0); save(tag + "_w", Wr); save(tag + "_ws", Ws_)
+            tol = 1.0e-3 * float(np.abs(yv - y0).std() + 1e-6)
+            cases.append(f"""check.case public @{tag} {{
+  %rows = check.literal value({rows}) : index
+  %k = check.literal value({K}) : index
+  %n = check.literal value({n_use}) : index
+  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{rows}x{K}xi8>
+  %s = check.file.read.npy path("{tag}_s.npy") : tensor<{rows}x2xf32>
+  %w = check.file.read.npy path("{tag}_w.npy") : {ty(Wr)}
+  %ws = check.file.read.npy path("{tag}_ws.npy") : {ty(Ws_)}
+  %e = check.file.read.npy path("{tag}_y.npy") : tensor<{rows}x{n_use}xf32>
+  %y = check.file.read.npy path("{tag}_y0.npy") : tensor<{rows}x{n_use}xf32>
+  kernel.launch @g_gemm_mxfp4s_store_f8_radd_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %w, %ws, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {ty(Wr)}, {ty(Ws_)}, tensor<{rows}x{n_use}xf32>)
+  check.expect.close actual(%y) expected(%e) atol({tol:.3e}) rtol(2.0e-3) nan(different) : tensor<{rows}x{n_use}xf32>
+  check.return
+}}
+""")
+        # the SwiGLU pair writing bf16: followed by the bf16-reading row-scale twin, the row scales (row-max exponents, insensitive to a bf16 rounding of the products) must match
+        for name, swiglu in _f8s_pick.values():
+            if not swiglu:
+                continue
+            W = deq(name); n, K = W.shape
+            if K % 128:
+                continue
+            n_use = min(n, 1024 + n % 128) // 64 * 64
+            if n_use % 256:
+                continue
+            sel = lambda nm: (raw(nm).reshape(n, -1)[:n_use].reshape(-1), raw_scale(nm).reshape(n, -1)[:n_use].reshape(-1))
+            Wr, Ws_ = sel(name); Wd = W[:n_use].astype(np.float64)
+            up = name.replace("ffn_gate", "ffn_up"); U = deq(up)[:n_use].astype(np.float64); Ur, Us_ = sel(up)
+            rows = 512
+            xf = e4m3_round(np.clip(rng.standard_normal((rows, K)) * 30.0, -440, 440))
+            inv = rng.uniform(0.25, 2.0, rows).astype(np.float32)
+            sc = np.stack([np.ones(rows, np.float32), inv * np.float32(2.0 ** -8)], 1)
+            yv = ffn_act((xf @ Wd.T) * inv[:, None].astype(np.float64)) * ((xf @ U.T) * inv[:, None].astype(np.float64))
+            ye = np.frexp(np.abs(yv).max(1))[1] - 1
+            tag = f"gm8s_swbf_{K}_{n_use}"
+            save(tag + "_x", e4m3_bytes(xf)); save(tag + "_s", sc); save(tag + "_w", Wr); save(tag + "_ws", Ws_); save(tag + "_u", Ur); save(tag + "_us", Us_)
+            save(tag + "_s8", np.stack([2.0 ** (7 - ye), 2.0 ** (ye - 7 - 8.0)], 1).astype(np.float32)); save(tag + "_inf", np.tile(np.array([0, 0, 1, 0], np.int32), (rows, 1)))
+            cases.append(f"""check.case public @{tag} {{
+  %rows = check.literal value({rows}) : index
+  %k = check.literal value({K}) : index
+  %n = check.literal value({n_use}) : index
+  %fl = check.literal value(1) : index
+  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{rows}x{K}xi8>
+  %s = check.file.read.npy path("{tag}_s.npy") : tensor<{rows}x2xf32>
+  %w = check.file.read.npy path("{tag}_w.npy") : {ty(Wr)}
+  %ws = check.file.read.npy path("{tag}_ws.npy") : {ty(Ws_)}
+  %u = check.file.read.npy path("{tag}_u.npy") : {ty(Ur)}
+  %us = check.file.read.npy path("{tag}_us.npy") : {ty(Us_)}
+  %info = check.file.read.npy path("{tag}_inf.npy") : tensor<{rows}x4xi32>
+  %es8 = check.file.read.npy path("{tag}_s8.npy") : tensor<{rows}x2xf32>
+  %y = check.generate.fill value(0) : tensor<{rows}x{n_use}xi16>
+  %s16 = check.generate.fill value(0.0) : tensor<{rows}x2xf32>
+  %h16 = check.generate.fill value(0.0) : tensor<{rows}x{n_use}xf16>
+  %s8 = check.generate.fill value(7.0) : tensor<{rows}x2xf32>
+  %q8 = check.generate.fill value(0) : tensor<{rows}x{n_use}xi8>
+  kernel.launch @g_gemm_mxfp4s_swiglu_f8_bf16_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %w, %ws, %u, %us, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {ty(Wr)}, {ty(Ws_)}, {ty(Ur)}, {ty(Us_)}, tensor<{rows}x{n_use}xi16>)
+  kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %n, %y, %s16, %h16, %q8, %s8, %fl) : [index](index, tensor<{rows}x4xi32>, index, tensor<{rows}x{n_use}xi16>, tensor<{rows}x2xf32>, tensor<{rows}x{n_use}xf16>, tensor<{rows}x{n_use}xi8>, tensor<{rows}x2xf32>, index)
+  check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<{rows}x2xf32>
   check.return
 }}
 """)
