@@ -65,16 +65,32 @@
         "r1024",
         "a2swp",
         "a2swp+r1024",
-        "yf16",
-        "yf16+r1024"
+        "a2pfa",
+        "a2pfa+r1024",
+        "a2p32",
+        "a2p32+r1024",
+        "a2p8",
+        "a2p8+r1024",
+        "a2p48",
+        "a2p48+r1024",
+        "t128a2",
+        "t128a2+r1024"
       ],
       "files": [
         "bench.loom",
         "bench_r1024.loom",
         "bench_a2swp.loom",
         "bench_a2swp+r1024.loom",
-        "bench_yf16.loom",
-        "bench_yf16+r1024.loom"
+        "bench_a2pfa.loom",
+        "bench_a2pfa+r1024.loom",
+        "bench_a2p32.loom",
+        "bench_a2p32+r1024.loom",
+        "bench_a2p8.loom",
+        "bench_a2p8+r1024.loom",
+        "bench_a2p48.loom",
+        "bench_a2p48+r1024.loom",
+        "bench_t128a2.loom",
+        "bench_t128a2+r1024.loom"
       ],
       "tests": [
         "test.loom"
