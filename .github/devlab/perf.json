@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st integ exp2: the AMD node with decode.spec.gdn_fold + prefill.gdn.fused2/ab_q8/ab_f8 (node, PR #942 head) vs origin/mxfp4st (base: fold on, fused off): ktest node (gdn_fold_serve + the e4m3 -0 reference fix), warm-up func, func node, ABBA prefill 1k-32k + decode (+ long), dev gates vs vLLM on node (vLLM references cached so Loom is never restarted after a vLLM load). Evidence branch: not for merge.",
+ "_comment": "mxfp4st integ exp2: the AMD node with decode.spec.gdn_fold + prefill.gdn.fused2/ab_q8/ab_f8 (node, PR #942 head) vs origin/mxfp4st (base: fold on, fused off): warm-up func, func node, ABBA prefill 1k-32k + decode (+ long), dev gates vs vLLM on node (vLLM references cached so Loom is never restarted after a vLLM load). Evidence branch: not for merge. Served context 110592 (the card).",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
@@ -20,7 +20,8 @@
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ]
+     ],
+     "context": 110592
     },
     {
      "name": "node",
@@ -28,11 +29,11 @@
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ]
+     ],
+     "context": 110592
     }
    ],
    "steps": [
-    "ktest:node",
     "func:base",
     "func:node",
     "perf:base:1",
