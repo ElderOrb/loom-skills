@@ -1,31 +1,47 @@
 {
- "_comment": "job cold: warm-up fix check; job coldoff: same with the #911 proposal copies off (rebuilt package), first serve outcome in warm_c104.try1.log",
+ "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
  "runner": "r9700",
  "memory_bytes": 34000000000,
- "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
- "kit": null,
+ "llama_spec": "matched",
  "jobs": [
   {
-   "name": "coldon",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "require_preset_r9700": true,
+   "name": "unsloth-qwen3-0-6b-loom",
+   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
    "kit": null,
-   "memory_bytes_r9700": 34000000000,
-   "runner": "r9700",
+   "llamacpp": "b1375",
+   "llamacpp_vulkan": "b12211",
+   "memory_bytes_r9700": 17000000000,
    "variants": [
     {
-     "name": "c104",
-     "context": 98304,
+     "name": "card",
+     "build": {}
+    },
+    {
+     "name": "nodraft",
+     "build": {},
      "execution": {
-      "context_capacity": 98304,
-      "pool_capacity": 98304
-     },
-     "require_preset_r9700": true
+      "draft_depth": 0
+     }
     }
    ],
    "steps": [
-    "cold:c104:plain1"
+    "func:card",
+    "ktest:card",
+    "gates:card:dev",
+    "perf:card:3",
+    "perf:card:3:long",
+    "c4:nodraft",
+    "llama@rocm.np1:3",
+    "llama@rocm.np1:3:long",
+    "llamac4@rocm.nodraft",
+    "llama@vulkan.np1:3",
+    "llama@vulkan.np1:3:long",
+    "llamac4@vulkan.perslot.nodraft"
    ]
   }
- ]
+ ],
+ "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+ "kit": null,
+ "llamacpp": "b1375",
+ "llamacpp_vulkan": "b12211"
 }
