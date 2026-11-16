@@ -28,13 +28,27 @@ def f8_enabled():
     return enabled() and os.environ.get("GEMM_MXFP4S_F8", "0").lower() not in ("", "0", "false", "no", "off")
 
 
+# kernel designs of the fp8 GEMM (choice prefill.gemm.mxfp4s_f8_kernel, env GEMM_MXFP4S_F8_KERNEL): name -> (store kwargs, swiglu kwargs) of gemm_mxfp4s_f8_m256
+F8_KERNELS = {"v1": ({}, {}),
+              "lv": ({"lv": True}, {"lv": True, "rf": 4}),
+              "lvpf1": ({"lv": True, "lvpf": 1}, {"lv": True, "rf": 4, "lvpf": 1}),
+              "lvpf2": ({"lv": True, "lvpf": 2}, {"lv": True, "rf": 4, "lvpf": 2}),
+              "lvk2": ({"lv": True, "kmult": 2}, {"lv": True, "rf": 4, "kmult": 2})}
+
+
+def f8_kernel_kwargs(mode):
+    """the generator kwargs of the selected fp8 GEMM design for `mode` (store / swiglu)"""
+    name = os.environ.get("GEMM_MXFP4S_F8_KERNEL", "") or "v1"
+    return dict(F8_KERNELS[name][mode == "swiglu"])
+
+
 def mxfp4_f8_range(blocks_e):
     """(lowest, highest) block exponent byte of an iterable/ndarray of E8M0 bytes, and whether every block fits the kernel's exact range."""
     lo, hi = int(min(blocks_e)), int(max(blocks_e))
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, lv=False, lvpf=0):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, lv=False, lvpf=0, lvs=False):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -416,8 +430,13 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     if lv:
         if dbuf:
             A(f"    %w_cur_st = buffer.view %w_stage[%cur_off] : buffer -> view<{TW}x{PX}xi8>")
+        if lvs:   # software-pipelined: the loads of pair p + 1 are issued before the WMMAs of pair p
+            lv_loads(0)
         for p in range(KS // 32):
-            lv_loads(p)
+            if not lvs:
+                lv_loads(p)
+            elif p + 1 < KS // 32:
+                lv_loads(p + 1)
             frag_mma(2 * p)
             frag_mma(2 * p + 1)
         if lvpf:   # the next step's first activation pairs, before the barrier (carried)
