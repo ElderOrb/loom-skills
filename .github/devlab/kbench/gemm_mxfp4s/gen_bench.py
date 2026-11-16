@@ -86,6 +86,14 @@ def kernel(mode, kn, variant="", order="pairs"):
 
 
 def build(variant=""):
+    """a variant token `r1024` / `r4096` sets the row count of the benchmarks (the prefill chunk; default 2048)"""
+    global ROWS
+    toks = variant.split("+") if variant else []
+    ROWS = 2048
+    for t in toks:
+        if re.fullmatch(r"r\d+", t):
+            ROWS = int(t[1:])
+    variant = "+".join(t for t in toks if not re.fullmatch(r"r\d+", t))
     out = []
     for mode, K, N in SHAPES:
         kn = f"k_{mode}_{K}x{N}_{ROWS}"
@@ -302,7 +310,7 @@ if __name__ == "__main__" and len(sys.argv) > 2:
     d = sys.argv[2]
     os.makedirs(d, exist_ok=True)
     for v in (sys.argv[3:] or ["base"]):
-        if v != "base" and not all(x in VARIANTS or x in GEN for x in v.split("+")): raise SystemExit("unknown variant " + v)
+        if v != "base" and not all(x in VARIANTS or x in GEN or re.fullmatch(r"r\d+", x) for x in v.split("+")): raise SystemExit("unknown variant " + v)
         v = "" if v == "base" else v
         open(os.path.join(d, "bench%s.loom" % ("_" + v if v else "")), "w").write(HEAD + "\n".join(build(v)) + ("\n" + PEAK8 + "\n" + PEAK8R if not v else ""))
     # hrx-loom 0.1.0: float comparison is check.expect.approximate with the actual and expected types (as make_kernel_tests.py does)

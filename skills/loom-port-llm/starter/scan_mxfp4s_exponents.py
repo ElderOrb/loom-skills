@@ -6,7 +6,10 @@ usage: scan_mxfp4s_exponents.py SRC [--json OUT]
 SRC: a local .safetensors file, or HF_REPO[@REV] (reads the header and every scale plane by HTTP range, ~0.8 GB for a 27B model).
 Prints per-range statistics; the exit code is 1 when a block is outside the exact range (the rows / tensors that need the exact fallback are listed)."""
 import json, struct, sys, os, urllib.request
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gen_mxfp4s import MXFP4_F8_E_MIN, MXFP4_F8_E_MAX
 

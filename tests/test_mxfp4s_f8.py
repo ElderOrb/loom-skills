@@ -8,7 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:   # the decode checks need numpy (CI without it skips them)
+    np = None
 
 ROOT = Path(__file__).resolve().parents[1]
 STARTER = ROOT / "skills/loom-port-llm/starter"
@@ -16,7 +19,7 @@ sys.path.insert(0, str(STARTER))
 import gen_mxfp4s as R  # noqa: E402
 
 HEADER = "target.decl @device\namdgpu.target<gfx11-generic> @rdna3\namdgpu.target<gfx12-generic> @rdna4\n\n"
-FP4 = np.array([0, .5, 1, 1.5, 2, 3, 4, 6], np.float64)
+FP4 = np.array([0, .5, 1, 1.5, 2, 3, 4, 6], np.float64) if np is not None else None
 
 
 def loom_compile():
@@ -45,6 +48,7 @@ def decode(e, q):
     return np.concatenate([lo, hi], 1)
 
 
+@unittest.skipIf(np is None, "numpy not installed")
 class DecodeTests(unittest.TestCase):
     def test_every_exponent_of_the_exact_range_decodes_exactly(self):
         rng = np.random.default_rng(3)
