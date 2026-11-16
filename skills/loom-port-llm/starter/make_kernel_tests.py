@@ -2683,6 +2683,43 @@ def _pmv_planes(n, K):
     v = np.empty((n, K), np.float32); v[:, 0::2] = _FP4[nib & 15]; v[:, 1::2] = _FP4[nib >> 4]
     return nib.view(np.int8).reshape(-1), e.view(np.int8).reshape(-1), v * np.repeat(np.exp2(e.astype(np.float32) - 127), 32, 1)
 for _pk in sorted(set(re.findall(r'^kernel\.def export\("(g_pmv_mxfp4s_[^"]+)"\)', _pkg_llm_text() or "", re.M))):
+    _sw = re.match(r"g_pmv_mxfp4s_k(\d+)_t4_swq_r32$", _pk)
+    _dn = _sw and re.search(r'^kernel\.def export\("(g_mv_mxfp4s_k%d_t4_q8_r(\d+))"\)' % cfg["ffn"], _pkg_llm_text(), re.M)
+    if _sw and _dn:   # gate + up + silu + q8 (swiglu_q8) of the full FFN width, read back through the package's down matvec (64 rows)
+        K, FF, t, tag = int(_sw.group(1)), cfg["ffn"], 4, _pk
+        x = rng.standard_normal((t, K)).astype(np.float32)
+        gq, gs, gv = _pmv_planes(FF, K); uq, us, uv = _pmv_planes(FF, K); dq, ds, dv = _pmv_planes(64, FF)
+        xq = q8_ref(x).astype(np.float64); g = xq @ gv.T.astype(np.float64); u = xq @ uv.T.astype(np.float64)
+        a = (g / (1 + np.exp(-g)) * u).astype(np.float32)
+        ref = q8_ref(a).astype(np.float64) @ dv.T.astype(np.float64)
+        for n_, a_ in (("x", x), ("g", gq), ("gs", gs), ("u", uq), ("us", us), ("d", dq), ("ds", ds), ("e", ref.astype(np.float32))):
+            save(f"{tag}_{n_}", a_)
+        tol = 5e-3 * float(np.abs(ref).mean())
+        cases.append(f"""check.case public @pmv_{tag} {{
+  %t = check.literal value({t}) : index
+  %k = check.literal value({K}) : index
+  %nf = check.literal value({FF}) : index
+  %nd = check.literal value(64) : index
+  %acc = check.literal value(0) : i32
+  %x = check.file.read.npy path("{tag}_x.npy") : {ty(x)}
+  %g = check.file.read.npy path("{tag}_g.npy") : {ty(gq)}
+  %gs = check.file.read.npy path("{tag}_gs.npy") : {ty(gs)}
+  %u = check.file.read.npy path("{tag}_u.npy") : {ty(uq)}
+  %us = check.file.read.npy path("{tag}_us.npy") : {ty(us)}
+  %d = check.file.read.npy path("{tag}_d.npy") : {ty(dq)}
+  %ds = check.file.read.npy path("{tag}_ds.npy") : {ty(ds)}
+  %e = check.file.read.npy path("{tag}_e.npy") : tensor<{t}x64xf32>
+  %xq = check.generate.fill value(0) : tensor<{t}x{2 * K}xi8>
+  %fq = check.generate.fill value(0) : tensor<{t}x{2 * FF}xi8>
+  %y = check.generate.fill value(0.0) : tensor<{t}x64xf32>
+  kernel.launch @g_quant_q8[%t, %k](%t, %k, %x, %xq) : [index, index](index, index, {ty(x)}, tensor<{t}x{2 * K}xi8>)
+  kernel.launch @{_pk}[%nf, %t](%nf, %t, %acc, %xq, %g, %gs, %u, %us, %fq) : [index, index](index, index, i32, tensor<{t}x{2 * K}xi8>, {ty(gq)}, {ty(gs)}, {ty(uq)}, {ty(us)}, tensor<{t}x{2 * FF}xi8>)
+  kernel.launch @{_dn.group(1)}[%nd, %t](%nd, %t, %acc, %fq, %d, %ds, %y) : [index, index](index, index, i32, tensor<{t}x{2 * FF}xi8>, {ty(dq)}, {ty(ds)}, tensor<{t}x64xf32>)
+  check.expect.close actual(%y) expected(%e) atol({tol:.3g}) rtol(5.0e-3) nan(different) : tensor<{t}x64xf32>
+  check.return
+}}
+""")
+        continue
     _m = re.match(r"g_pmv_mxfp4s_k(\d+)_t4_(f32|silu|norm|q8)_r(\d+)(?:_m(\d+))?(_h)?(?:_p(\d+))?$", _pk)
     if not _m or _m.group(2) == "q8":
         continue

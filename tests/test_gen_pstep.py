@@ -56,7 +56,9 @@ class FuseVerify(unittest.TestCase):
             raise unittest.SkipTest("numpy")
         os.makedirs(os.path.join(cls.tmp, "off")); os.makedirs(os.path.join(cls.tmp, "on"))
         cls.off = build(os.path.join(cls.tmp, "off"), {})
-        cls.on = build(os.path.join(cls.tmp, "on"), {"VERIFY_FUSE": "1", "MV_PERSIST": "256"})
+        cls.on = build(os.path.join(cls.tmp, "on"), {"VERIFY_FUSE": "full", "MV_PERSIST": "256"})
+        os.makedirs(os.path.join(cls.tmp, "swq"))
+        cls.swq = build(os.path.join(cls.tmp, "swq"), {"VERIFY_FUSE": "swq"})
 
     @classmethod
     def tearDownClass(cls):
@@ -88,6 +90,17 @@ class FuseVerify(unittest.TestCase):
             self.assertIn(", %y) :" if i == 63 else ", %x) :", down, f"layer {i}: down accumulates into x (the last layer stores y)")
         # the else branches are the layers as generated
         self.assertEqual(verify(self.off).count("@g_post_add_norm["), verify(self.on).count("@g_post_add_norm["))
+
+    def test_swq(self):
+        """swq: only the FFN's gate + up + silu + quant change, into one swiglu_q8 launch writing the down projection's input"""
+        v = verify(self.swq)
+        fused = re.findall(r"^  scf\.if %pz \{\n(.*?)^  \} else \{\n(.*?)^  \}\n", v, re.M | re.S)
+        self.assertEqual(len(fused), 64)
+        for i, (f, orig) in enumerate(fused):
+            self.assertNotIn("@g_silu_mul", f)
+            self.assertEqual(f.count("@g_pmv_mxfp4s_k5120_t4_swq_r32["), 1, i)
+            self.assertEqual(len(re.findall(r"kernel\.launch", orig)) - len(re.findall(r"kernel\.launch", f)), 1 + 1 + 1 + 4 - 1 + 4, i)
+        self.assertIn('export("g_pmv_mxfp4s_k5120_t4_swq_r32")', self.swq)
 
     def test_hout_where_f32_projections_read_h(self):
         for f in re.findall(r"^  scf\.if %pz \{\n(.*?)^  \} else \{\n", verify(self.on), re.M | re.S):

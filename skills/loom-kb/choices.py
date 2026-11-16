@@ -257,11 +257,12 @@ CHOICE("prefill.gemm.f16o_swiglu", "bool", False, "GEMM_F16O", kernels=["g_gemm_
 CHOICE("decode.mxfp4s.act_q8", "bool", False, "MXFP4S_Q8", kernels=["g_mv_mxfp4s_*_q8*", "g_mxfp4s_icodes"], rows=ROWS_DECODE + ROWS_STREAMS, from_pr="mxfp4st-kern",
        doc="MXFP4 split-plane dense matvecs take int8 activations (ACT_Q8's dot4 path, as Q8_0 / the K-quants) instead of f32 conversions and fused multiply-adds: the 4-token verify "
            "matvec of a drafted decode is ALU-bound on the f32 path (the GGUF MXFP4 Qwen3.8-27B measured 47 tok/s drafted vs 74 with int8 activations). Opt-in per model.")
-CHOICE("decode.verify.fuse", "bool", False, "VERIFY_FUSE", kernels=["g_pmv_*"], rows=ROWS_DECODE, from_pr="mxfp4st-ostep",
-       doc="Drafted verify epochs of 2-4 tokens on the int8 matvec path run fused layers (starter gen_pstep.py): the projections that read one "
-           "normalized row are one launch whose prologue computes rmsnorm + the int8 quant (no g_post_add_norm / g_quant_q8 launches), the "
-           "out / down projections quantize their own input (f32 / silu(gate) * up) and accumulate into the residual (no g_silu_mul). "
-           "Every value is the launch chain's (kernel tests: equality). The layer as generated stays for every other epoch.")
+CHOICE("decode.verify.fuse", "str", None, "VERIFY_FUSE", kernels=["g_pmv_*"], rows=ROWS_DECODE, from_pr="mxfp4st-ostep",
+       doc="Drafted verify epochs of 2-4 tokens on the int8 matvec path run fused layers (starter gen_pstep.py; the layer as generated stays "
+           "for every other epoch, every value is the launch chain's: kernel tests compare with equality). swq: gate + up + g_silu_mul + "
+           "g_quant_q8 of the FFN in one launch (32-row workgroups whose epilogue writes the down projection's int8 input; kbench pstep_r9700 "
+           "43811425655: FFN block 262 -> 251 us). full: every projection takes its producer as a prologue (rmsnorm / f32 / silu + quant) and "
+           "the out / down projections accumulate into the residual (7 launches -> 2 per FFN, but 261 -> 335+ us: the prologue is paid per workgroup).")
 CHOICE("decode.verify.persist", "int", 0, "MV_PERSIST", kernels=["g_pmv_*"], rows=ROWS_DECODE, from_pr="mxfp4st-ostep",
        doc="decode.verify.fuse's matvecs as persistent row loops: min(G, row groups) workgroups each walk row groups id, id + G, ... "
            "(the prologue runs once per workgroup instead of once per row group); 0: one workgroup per row group.")

@@ -260,7 +260,7 @@ def _statements(lines):
     return out
 
 
-def fuse_verify(program, src, eps, hidden, G=0, n_of=None):
+def fuse_verify(program, src, eps, hidden, G=0, n_of=None, mode="full"):
     """llm_verify with every layer duplicated: scf.if %pz {fused} else {as generated}, %pz = an epoch of at most 4 tokens
     off the GEMM path and not a single token. The fused layer:
       input projections that read the int8 rows of h (qkv + z, q|gate + k + v, gate + up): one g_pmv_*_norm_* launch whose
@@ -270,6 +270,8 @@ def fuse_verify(program, src, eps, hidden, G=0, n_of=None):
           g_post_add_norm's x += y with the same f32 add);
       the down projection: the silu prologue (g_silu_mul + g_quant_q8 gone), accumulate into x; the last layer stores y
           (the program's final g_post_add_norm adds it).
+    mode "swq": the layer stays as generated except gate + up + g_silu_mul + g_quant_q8 of the FFN, which become one
+    swiglu_q8 launch (src must also give the 32-row kernel) writing the down projection's int8 input.
     src(name) -> kernel text of the int8 matvec `name` (gen_llm.mv). n_of(view type, K) -> rows. Returns (program, kernels)."""
     start = program.index("@llm_verify()")
     end = program.index("\n}\n", start)
@@ -293,6 +295,11 @@ def fuse_verify(program, src, eps, hidden, G=0, n_of=None):
         stmts = _statements(text.splitlines(True))
         hoist = [s for s in stmts if "\n" == s[-1] and s.count("\n") == 1 and _DEF.match(s)]
         rest = [s for s in stmts if s not in hoist]
+        if mode == "swq":
+            new = _swq_layer(rest, src, kernels, li)
+            ind = lambda s: "".join("  " + ln if ln.strip() else ln for ln in s.splitlines(True))
+            out.append(mk.group(0) + "".join(hoist) + "  scf.if %pz {\n" + ind("".join(new)) + "  } else {\n" + ind("".join(rest)) + "  }\n")
+            continue
         norm_w, quant_of, silu, fused, groups = (first_norm.group(1) if li == 0 else None), {}, None, [], {}
         reads_h = any(re.search(r"%zero_i32, %h, ", s) for s in rest)
         for s in rest:
@@ -447,3 +454,30 @@ def swiglu_q8(text):
 }}
 """
     return head + ROW_LOOP + loop + ROW_LOOP + loop2 + bar + epi_new
+
+
+def _swq_layer(rest, src, kernels, li):
+    """mode swq of fuse_verify: the FFN's gate + up + silu + quant statements -> one swiglu_q8 launch; the rest verbatim."""
+    sil = [_SILU.search(s) for s in rest]
+    si = [i for i, m in enumerate(sil) if m]
+    assert len(si) == 1, f"layer {li}: {len(si)} g_silu_mul launches"
+    _, f, fu = sil[si[0]].groups()
+    projs = {}
+    for i, s in enumerate(rest):
+        m = _PROJ.search(s)
+        if m and m.group(8) in (f, fu):
+            projs[m.group(8)] = (i, m)
+    qi = [i for i, s in enumerate(rest) if (q := _QUANT.search(s)) and "g_mv_" not in s and q.group(2) == f]
+    assert set(projs) == {f, fu} and len(qi) == 1, f"layer {li}: the FFN's gate / up / quant statements"
+    (gi, g), (ui, u) = projs[f], projs[fu]
+    assert g.group(5) == u.group(5) and g.group(4) == u.group(4), f"layer {li}: gate and up read different inputs"
+    fq = _QUANT.search(rest[qi[0]]).group(3)
+    fmt, K = g.group(1), int(g.group(2))
+    t = swiglu_q8(src(f"g_mv_{fmt}_k{K}_t4_q8_r32"))
+    kname = re.search(r'export\("([^"]+)"', t).group(1)
+    kernels[kname] = t
+    n, xin = g.group(4), g.group(5)
+    launch = (f"  kernel.launch @{kname}[{n}, %t]({n}, %t, %zero_i32, {xin}, {g.group(6)}, {g.group(7)}, {u.group(6)}, {u.group(7)}, {fq}) : "
+              f"[index, index](index, index, i32, buffer, {g.group(9)}, {g.group(10)}, {u.group(9)}, {u.group(10)}, buffer)\n")
+    drop = {ui, si[0], qi[0]}
+    return [launch if i == gi else s for i, s in enumerate(rest) if i not in drop]
