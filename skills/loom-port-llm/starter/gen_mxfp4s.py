@@ -440,11 +440,17 @@ def _sub1(t, old, new, name):
     return t.replace(old, new, 1)
 
 
+def _w16_guard(store):
+    """The f16 operand store of a producer twin, only when the launch's %w16 flag is set."""
+    return ("    %w16_zero = index.constant 0 : index\n    %w16_on = index.cmp ne, %w16, %w16_zero : index\n    scf.if %w16_on {\n  "
+            + store + "    }\n")
+
+
 def f8_producer(text):
     """The `<K>_f8_rdna4` kernel of a row-scale producer K (g_row_scale_f16[_live][_lv], g_post_add_norm_rs[_live][_lv]; text: one
     kernel.def .. kernel.return block): K plus two outputs, x8 (the row as fp8 e4m3, scaled by F8_SCALE's scale) and s8 ((scale, inverse)
-    of it): launch(..., %x16: buffer) -> launch(..., %x16: buffer, %x8: buffer, %s8: buffer). x16 and the scales stay as K writes them
-    (the Q8_0 attention GEMMs read them)."""
+    of it): launch(..., %x16: buffer) -> launch(..., %x16: buffer, %x8: buffer, %s8: buffer, %w16: index). The scales stay as K writes them;
+    x16 is written only when %w16 != 0 (the epochs that do not take the fp8 GEMM, whose f16 GEMMs read it)."""
     m = re.search(r'kernel\.def export\("(\w+)"\) @(\w+)\(', text)
     old = m.group(1)
     assert _PRODUCER.match(old), old
@@ -452,14 +458,14 @@ def f8_producer(text):
     t = text.replace(f'kernel.def export("{old}") @{old}(', f'kernel.def target(@rdna4) export("{new}") @{new}(', 1)
     row_scale = "%x16: buffer) {" in t
     t = _sub1(t, "%x16: buffer) {" if row_scale else "%h16: buffer) {",
-              "%x16: buffer, %x8: buffer, %s8: buffer) {" if row_scale else "%h16: buffer, %x8: buffer, %s8: buffer) {", old)
+              "%x16: buffer, %x8: buffer, %s8: buffer, %w16: index) {" if row_scale else "%h16: buffer, %x8: buffer, %s8: buffer, %w16: index) {", old)
     if row_scale:
         view = re.search(r"  %h4_view = buffer\.view %x16\[%zero\] : buffer -> view<\[%rows\]x\[%k4\]x4xf16>\n", t)
         t = _sub1(t, view.group(0), view.group(0) + "  %x8_view = buffer.view %x8[%zero] : buffer -> view<[%rows]x[%k4]x4xf8E4M3>\n", old)
         t = _sub1(t, "  %scale4 = vector.splat %scale : vector<4xf32>\n",
                   F8_SCALE + "  %scale4 = vector.splat %scale : vector<4xf32>\n  %f8_scale4 = vector.splat %f8_scale : vector<4xf32>\n", old)
         st = "    vector.store %hv, %h4_view[%row, %bc, %c0] : vector<4xf16>, view<[%rows]x[%k4]x4xf16>\n"
-        t = _sub1(t, st, st + """    %sv8 = vector.mulf %v, %f8_scale4 : vector<4xf32>
+        t = _sub1(t, st, _w16_guard(st) + """    %sv8 = vector.mulf %v, %f8_scale4 : vector<4xf32>
     %q8 = vector.fptrunc %sv8 : vector<4xf32> to vector<4xf8E4M3>
     vector.store %q8, %x8_view[%row, %bc, %c0] : vector<4xf8E4M3>, view<[%rows]x[%k4]x4xf8E4M3>
 """, old)
@@ -472,7 +478,7 @@ def f8_producer(text):
         hval = re.search(r"%hsv = vector\.mulf (%\w+), %scale32 : vector<32xf32>\n", t).group(1)
         hg = re.search(r"%h16_view = buffer\.view %h16\[%zero\] : buffer -> view<\[%tokens\]x(\d+)x32xf16>", t).group(1)
         st = re.search(r"    vector\.store %h16v, %h16_view\[%token, %bl16, %c0\] : vector<32xf16>, view<\[%tokens\]x\d+x32xf16>\n", t).group(0)
-        t = _sub1(t, st, st + f"""    %hsv8 = vector.mulf {hval}, %f8_scale32 : vector<32xf32>
+        t = _sub1(t, st, _w16_guard(st) + f"""    %hsv8 = vector.mulf {hval}, %f8_scale32 : vector<32xf32>
     %h8v = vector.fptrunc %hsv8 : vector<32xf32> to vector<32xf8E4M3>
     %h8_view = buffer.view %x8[%zero] : buffer -> view<[%tokens]x{hg}x32xf8E4M3>
     vector.store %h8v, %h8_view[%token, %bl16, %c0] : vector<32xf8E4M3>, view<[%tokens]x{hg}x32xf8E4M3>
@@ -589,6 +595,13 @@ def fuse_mxfp4s_f8(text, prefix="g"):
     in_triple = {i for g, u, _, _ in triples for i in (g, u)}
     leaves = [(i, x) for i, x in leaves if i not in in_triple]
     used = sorted({x for _, x in leaves} | {leaf_at[g] for g, _, _, _ in triples})
+    # an operand whose every reader launch is replaced by an fp8 group needs its f16 copy only in the epochs that do not take the fp8 GEMM
+    converted = {x: 0 for x in used}
+    for _, x in leaves:
+        converted[x] += 2   # the m128 launch and its else-branch twin
+    for g, _, _, _ in triples:
+        converted[leaf_at[g]] += 4   # gate and up leaves
+    f16_optional = {x: converted[x] == len(readers[x]) for x in used}
     kernels = {}
     for x in used:
         for i in producers[x]:
@@ -602,8 +615,9 @@ def fuse_mxfp4s_f8(text, prefix="g"):
             m = _LAUNCH.match(lines[i])
             args, at = _split(m.group("args")), _split(m.group("at"))
             ind = m.group("ind")
-            repl[i] = (f"{ind}// dual-group: rdna4 kernel.launch @{m.group('k')}_f8_rdna4[{m.group('grid')}]({', '.join(args + [x8, s8])}) "
-                       f": [{m.group('gt')}]({', '.join(at + ['buffer', 'buffer'])})\n{lines[i]}\n{ind}// dual-group: end")
+            w16 = "%w16_flag" if f16_optional[x] else "%w16_one"
+            repl[i] = (f"{ind}// dual-group: rdna4 kernel.launch @{m.group('k')}_f8_rdna4[{m.group('grid')}]({', '.join(args + [x8, s8, w16])}) "
+                       f": [{m.group('gt')}]({', '.join(at + ['buffer', 'buffer', 'index'])})\n{lines[i]}\n{ind}// dual-group: end")
     for i, x in leaves:
         m = _LAUNCH.match(lines[i])
         x8, s8, _ = _F8_OPERANDS[x]
@@ -646,6 +660,7 @@ def fuse_mxfp4s_f8(text, prefix="g"):
         x8, s8, _ = _F8_OPERANDS[x]
         alloc += [f"  {x8}_row = index.constant {widths[x]} : offset", f"  {x8}_size = index.scale %t, {x8}_row : index, offset -> offset",
                   f"  {x8} = buffer.alloca<global> align(256) {x8}_size : buffer", f"  {s8} = buffer.alloca<global> align(256) %scale_size : buffer"]
+    alloc += ["  %w16_zero = index.constant 0 : index", "  %w16_one = index.constant 1 : index", "  %w16_flag = scf.select %huge, %w16_zero, %w16_one : index"]
     repl[j] = lines[j] + "\n" + "\n".join(alloc)
     body = "\n".join(repl.get(i, l) for i, l in enumerate(lines) if i not in drop)
     text = text[:a] + body + text[b:]
