@@ -10,17 +10,13 @@
         "base",
         "vtop2+e2",
         "fm",
-        "fmt",
-        "fm+noqk",
-        "fm+nopv"
+        "fmt"
       ],
       "files": [
         "bench.loom",
         "bench_vtop2+e2.loom",
         "bench_fm.loom",
-        "bench_fmt.loom",
-        "bench_fm+noqk.loom",
-        "bench_fm+nopv.loom"
+        "bench_fmt.loom"
       ],
       "tests": [
         "test.loom"
