@@ -64,6 +64,11 @@
 #          textmatch:V          text_match.py: first 50 tokens of perf.py's prompts on V, then on llama.cpp
 #          consistency:V:N      consistency.py N times (NOT DETERMINISTIC / concurrent mismatch counts)
 #          determinism:V:C:R    determinism.py (issue #39's script, when present)
+#          admit:V[:TOKENS]     ctx_admit.py on V served alone: a prompt of TOKENS (default: its context minus the answer) is admitted or refused (admit_V*.txt)
+#          vllm:N[:long]        vLLM ROCm (vllm_server.sh --install) serving the card's checkpoint, the card's drafting (job "vllm_spec" = the --speculative-config JSON), perf.py --kind vllm N times
+#                               (job "vllm_max_len": --max-model-len, default the served context); perf_vllm_nN.jsonl, vllm_args.txt, vllm_version.txt (a card with no llama.cpp baseline)
+#          vllmc4[:N]           4 streams on vLLM without drafting, N (default 3) runs of c4_steady.py: c4_vllm_nN.txt
+#          fullctx:V[:TOKENS]   ctx_admit.py --complete: a request of ~the served context (or TOKENS) is prefilled to the end and answered (fullctx_V*.txt)
 #          func:V               V served alone: the functional checks the card claims (chat, tool calling, image input;
 #                               r9700_func.py: the same checks as the Windows red-team harness), out/func_V.json
 #          logits:V[:N]         host logits readback (loom-skills#736): V's package through the Gufo bundle (loom-gufo-extension
@@ -75,6 +80,9 @@
 #          gufo:V               Gufo conformance on V's package served with --loom-logits=on (validation/devlab/run_conformance.sh: conformance.py
 #                               --logits + gufo's logits_check.py); conformance_V.json (gate `gufo`), the raw files in out/gufo_V/
 #          ktest:V              make_kernel_tests.py + run_kernel_tests.sh with V's kit
+#          vtest:V[:HxW]        the image tower (a package with image input): starter/vision/tests (encoder kernels vs NumPy), then the whole encoder
+#                               at HxW pixels (default 320x224) on the package's weights (a safetensors package: the checkpoint's own tensors) vs
+#                               ref_vit.py, every output within 1.0 + 3 % of the reference; vtest_V.log, vtest_encoder_V.log
 #          gates:V:LEVEL        gates.sh against llama.cpp
 #            "elastic": true: on the R9700 serve with --memory_bytes (the elastic state backing) instead of the card's --pool_backing=fixed
 # Runner: "runner": "strix" (default) | "r9700" on the experiment or a job picks the DevLab runner (workflow runs-on). On the
@@ -139,7 +147,15 @@ BK=rocm; bkt=-   # the llama.cpp backend of the step running (set by the "@vulka
 echo "job $job: variants $variants; steps $steps; runner $RUNNER $(hostname); memory_bytes $mem"
 hostname > "$out/runner.txt"
 
+VPORT=${VLLM_PORT:-8132}; vurl=http://127.0.0.1:$VPORT; vpid=$D/vllm-$VPORT.pid
+vllm_down() {   # stop the vLLM OpenAI server this job started (its process group: the API server and its EngineCore child)
+  [ -f "$vpid" ] || return 0
+  local p; p=$(cat "$vpid"); kill -- -"$p" 2>/dev/null || kill "$p" 2>/dev/null
+  for _ in $(seq 120); do kill -0 "$p" 2>/dev/null || break; sleep 0.5; done
+  kill -9 -- -"$p" 2>/dev/null; rm -f "$vpid"
+}
 cleanup() {
+  vllm_down
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
   "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
   cp "$LOOM_SERVE_STATE"/*.log "$LLAMACPP_STATE"/*.log "$LLAMACPP_STATE"/*.mem "$out/" 2>/dev/null   # *.mem: MemAvailable/RssAnon of llama-server
@@ -206,7 +222,11 @@ par = lambda f: os.path.join(card, "parameter", os.path.basename(f))
 if (c.get("source") or {}).get("kind") == "safetensors":   # an HF safetensors checkpoint: the tensor table from its header (HTTP range reads), the weights as fetched
     import inspect_safetensors
     src = inspect_safetensors.load_hf(c["source"]["repo"], c["source"]["revision"])
-    c["tensors"] = inspect_safetensors.build_config(src, drop_chat=True)["tensors"]
+    bc = inspect_safetensors.build_config(src, drop_chat=True)
+    c["tensors"] = bc["tensors"]
+    for k in ("vision", "mrope"):   # the image tower is part of the config the branch's starter derives from the checkpoint
+        if bc.get(k):
+            c[k] = bc[k]
     c["weights"] = {"format": "safetensors", "files": [par(f) for f in c["source"]["files"]]}
 else:
     c["gguf"] = par(c["gguf"])
@@ -283,7 +303,7 @@ if (c.get("source") or {}).get("kind") == "safetensors":
     c["weights"] = {"format": "safetensors", "files": [par(f) for f in c["source"]["files"]]}
 else:
     c["gguf"] = par(c["gguf"])
-if c.get("vision"):
+if c.get("vision") and c["vision"].get("mmproj"):   # a safetensors tower has no projector file
     c["vision"]["mmproj"] = par(c["vision"]["mmproj"])
 for k in ("draft", "drafter", "assistant"):
     if isinstance(c.get(k), dict) and c[k].get("gguf"):
@@ -413,6 +433,34 @@ llama_up() {   # llama_up [N_MAX]: llama.cpp with the experiment's llama_spec (n
   sed -i -e "s#$WORK/hf/#hf:#g" -e "s#$card/#card:#g" "$out/llamacpp_args$bkt.txt" 2>/dev/null   # runner paths out of the recorded arguments
   [ "${PIPESTATUS[0]}" = 0 ] || { cp "$LLAMACPP_STATE/llamacpp-$LLAMA_PORT.log" "$out/llamacpp_start$bkt.log" 2>/dev/null; return 1; }
 }
+vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned wheel in a venv) serving the card's checkpoint as an OpenAI server, out of the box
+  # (--max-model-len and, for "on", the job's "vllm_spec" --speculative-config are the only arguments); one engine at a time on the GPU.
+  vllm_down
+  for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
+  "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
+  [ -x "$B/vllm_server.sh" ] || { echo "no vllm_server.sh in this checkout (vLLM reference engine, PR #875)"; return 1; }
+  export VLLM_STATE=$out
+  local vpy venv ml spec ck rev args
+  vpy=$("$B/vllm_server.sh" --install | tail -1) || return 1
+  [ -x "$vpy" ] || { echo "vLLM install failed: $vpy"; return 1; }
+  venv=${vpy%/bin/python}
+  export LD_LIBRARY_PATH=$(ls -d "$venv"/extra/usr/lib/*/ "$venv"/extra/usr/lib/*/openmpi/lib 2>/dev/null | tr '\n' ':')${LD_LIBRARY_PATH:-}
+  ml=$(q "print(j.get('vllm_max_len') or j.get('served_context') or 65536)")
+  spec=$(q "print(j.get('vllm_spec') or '')")
+  read -r ck rev < <("$T" -c "import json; s=json.load(open('$card/llm_config.json'))['source']; print(s['repo'], s.get('revision') or 'main')")
+  args="--max-model-len $ml"; [ "$1" = on ] && [ -n "$spec" ] && args="$args --speculative-config '$spec'"
+  echo "$args" > "$out/vllm_args.txt"; "$vpy" -c "import vllm; print(vllm.__version__.split('+')[0])" > "$out/vllm_version.txt" 2>/dev/null
+  step "vllm serve $ck@${rev:0:8}: $args"
+  eval env VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} ${VLLM_EXTRA_ENV:-} setsid nohup "$vpy" -m vllm.entrypoints.openai.api_server --model "$ck" --revision "$rev" \
+    --served-model-name vllm-card --port "$VPORT" $args > "$out/vllm_serve.log" 2>&1 &
+  echo $! > "$vpid"
+  for _ in $(seq 1800); do
+    curl -sf "$vurl/v1/models" >/dev/null 2>&1 && { echo "vLLM ready"; return 0; }
+    kill -0 "$(cat "$vpid")" 2>/dev/null || { echo "vLLM died:"; tail -15 "$out/vllm_serve.log" | cut -c1-250; return 1; }
+    sleep 1
+  done
+  echo "vLLM did not come up in 30 min"; return 1
+}
 TH=$(q "print(j.get('thinking') or 'off')")   # chat_template_kwargs.enable_thinking sent to both engines
 echo "thinking: $TH (sent to both engines)"
 declare -A res
@@ -482,6 +530,26 @@ print('$p1', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v),
 import json,statistics as st; r=[json.loads(l) for l in open('$out/$lf')]
 k='decode_tps_32k' if '${p2:-}' else 'decode_tps'
 print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v), 2) if (v := [x[k] for x in r if x.get(k)]) else 'n/a (no row served: beyond the served context)')");;
+    vllm)   # vllm:N[:long]: the vLLM baseline of a safetensors card, N serve-session-less runs on one server (the card's drafting config), perf.py --kind vllm
+      vllm_up on || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
+      step "vllm perf x $p1 ${p2:-} (thinking $TH)"
+      for i in $(seq 1 "$p1"); do
+        (cd "$out" && "$T" "$B/perf.py" "$vurl" vllm --kind vllm --model vllm-card --no-campaign --thinking "$TH" --repeat-rows "$rrows" --log "perf_vllm_n$p1.jsonl" ${p2:+--long} | tail -1)
+        echo "{\"session_end\": \"vllm\"}" >> "$out/perf_vllm_n$p1.jsonl"
+      done
+      vllm_down
+      res[$s]=$("$T" -c "
+import json,statistics as st; r=[json.loads(l) for l in open('$out/perf_vllm_n$p1.jsonl') if l.startswith('{\"label')]
+k='decode_tps_32k' if '${p2:-}' else 'decode_tps'
+print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v), 2) if (v := [x[k] for x in r if x.get(k)]) else 'n/a')");;
+    vllmc4)   # vllmc4:N: 4 streams on vLLM without drafting (the same load-time exception as Loom's c4), N runs of c4_steady.py
+      vllm_up off || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
+      step "vllm c4"
+      cn=${p1:-3}
+      for i in $(seq 1 "$cn"); do (cd "$out" && "$T" "$B/c4_steady.py" "$vurl" 4 --model vllm-card --thinking "$TH" | tail -1 | tee -a "c4_vllm_n$cn.txt"); done
+      echo "{\"session_end\": \"vllm\"}" >> "$out/c4_vllm_n$cn.txt"
+      vllm_down
+      res[$s]=$("$T" -c "import json,statistics as st; print('vllm c4 median', st.median(r['agg_tps'] for l in open('$out/c4_vllm_n$cn.txt') if 'agg_tps' in (r := json.loads(l))))");;
     llamac4)   # llamac4[:N_MAX]
       llama_up "${p1:-}" || { res[$s]=ERROR; continue; }
       nm=$(echo "$LSPEC" | grep -oE "n-max [0-9]+" | grep -oE "[0-9]+"); nm=${nm:-0}   # 0: no drafting
@@ -527,6 +595,18 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       grep -v "^PASS" "$out/ktest_$p1.log" | tail -15
       tot=$(grep -oE "^[0-9]+/[0-9]+ passed" "$out/ktest_$p1.log" | tail -1)
       res[$s]="$([ $rc = 0 ] && [ -n "$tot" ] && [ "${tot%%/*}" = "$(echo "${tot#*/}" | cut -d' ' -f1)" ] && echo PASS || echo FAIL) ($tot; $(grep -c '^SKIP' "$out/ktest_$p1.log") skipped)";;
+    vtest)   # vtest:V[:HxW]  the image tower on this GPU: the encoder kernel cases vs NumPy, then the whole encoder on the package's own weights vs ref_vit.py
+      python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('vision') else 1)" "$D/$p1/pkg/llm_config.json" || { res[$s]="SKIP (no image input)"; continue; }
+      for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
+      step "vision tests $p1"; vt=$D/$p1/vtest; rm -rf "$vt"; mkdir -p "$vt"; vh=${p2:-320x224}
+      export VISION_TEST_DIR=$vt VENV=${VENV:-$root/.venv} PY=$T; [ -n "$RDEV" ] && export VISION_TEST_RDNA4=1   # gfx12: the kernel cases launch the K_rdna4 twins
+      ( cd "${KIT[$p1]}/vision/tests" && bash run_tests.sh ) > "$out/vtest_$p1.log" 2>&1; rc=$?
+      # the whole encoder: a safetensors package reads the checkpoint's tensors (CFG.json CHECKPOINT), a GGUF package its mmproj
+      eargs=$("$T" -c "import json,sys; c=json.load(open(sys.argv[1])); v=c['vision']; print(sys.argv[1] + ' ' + c['weights']['files'][0] if v.get('source') == 'safetensors' else v['mmproj'])" "$D/$p1/pkg/llm_config.json")
+      ( cd "${KIT[$p1]}/vision" && "$T" test_encoder.py --nowrite $eargs "${vh%x*}" "${vh#*x}" ) > "$out/vtest_encoder_$p1.log" 2>&1
+      tail -3 "$out/vtest_encoder_$p1.log"
+      grep -q "^ENCODER PASS" "$out/vtest_encoder_$p1.log" || rc=1
+      res[$s]="$([ $rc = 0 ] && echo PASS || echo FAIL) ($(grep -c '^PASS' "$out/vtest_$p1.log") kernel cases passed, $(grep -c '^FAIL\|^COMPILE' "$out/vtest_$p1.log") failed; encoder $vh: $(grep -o '^ENCODER [A-Z]*' "$out/vtest_encoder_$p1.log" | tail -1))";;
     logits)   # logits:V[:N_PROMPTS]  (loom-skills#736): V's package through the Gufo bundle with the logits capability on, checked on this GPU
       free_gpu   # the GPU is the bundle's (and the undrafted llama.cpp reference's) alone
       gufo_bundle || { echo '{"verdict": "NOT_SUPPORTED", "note": "no gufo bundle on this job (set bundle or GUFO_BUNDLE)", "gates": {}}' > "$out/logits_$p1.json"; res[$s]="not supported (no gufo bundle)"; continue; }
@@ -550,9 +630,19 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "functional checks $p1"
       curl -fsSL --retry 2 "$base/info.json" -o "$out/info_card.json" 2>/dev/null || rm -f "$out/info_card.json"
-      fa=(); grep -q '"vision"' "$card/llm_config.json" && fa+=(--vision)
+      fa=(); { grep -q '"vision"' "$card/llm_config.json" || grep -q '"vision"' "$D/$p1/pkg/llm_config.json"; } 2>/dev/null && fa+=(--vision)   # the card's, or the rebuilt package's image input
       "$T" "$here/.github/scripts/r9700_func.py" "$url" "$cardid" "$out/func_$p1.json" ${fa[@]+"${fa[@]}"} $([ -f "$out/info_card.json" ] && echo --info "$out/info_card.json") 2>&1 | tee "$out/func_$p1.log"
       res[$s]=$(tail -1 "$out/func_$p1.log");;
+    admit)   # admit:V[:TOKENS]: ctx_admit.py on V served as configured (its execution context/pool): is a request of TOKENS (default ~ the served context) admitted? (the card's served context on the device)
+      serve_alone "$p1" || { res[$s]=ERROR; continue; }
+      step "context admission $p1 ${p2:-}"
+      (cd "$out" && "$T" "$B/ctx_admit.py" "$D/$p1/pkg" "$url" ${p2:+--tokens "$p2"} 2>&1 | tee "admit_${p1}${p2:+_$p2}.txt" | tail -3)
+      res[$s]=$(tail -1 "$out/admit_${p1}${p2:+_$p2}.txt" | cut -c1-200);;
+    fullctx)   # fullctx:V[:TOKENS]: one request of ~the served context that must finish (ctx_admit.py --complete): the card's context is a measured one
+      serve_alone "$p1" || { res[$s]=ERROR; continue; }
+      step "full-context request $p1 ${p2:-}"
+      (cd "$out" && "$T" "$B/ctx_admit.py" "$D/$p1/pkg" "$url" ${p2:+--tokens "$p2"} --complete 2>&1 | tee "fullctx_${p1}${p2:+_$p2}.txt" | tail -3)
+      res[$s]=$(tail -1 "$out/fullctx_${p1}${p2:+_$p2}.txt" | cut -c1-200);;
     gates)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
