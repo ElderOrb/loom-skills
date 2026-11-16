@@ -11,7 +11,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "skills", "loom-benchmark", "scripts"))
 import reference_cache as rc  # noqa: E402
 
-REPO, VER = "org/model", "0.18.0"
+REPO, VER = "org/model", "vllm-0.18.0"
 
 
 def make_tgz(path, entries, extra=()):
@@ -54,7 +54,13 @@ class Store(unittest.TestCase):
     def test_miss_is_zero_and_version_keyed(self):
         self.assertEqual(rc.restore(REPO, VER, os.path.join(self.d, "b"), self.store), 0)
         rc.merge(REPO, VER, [self.job("a.tgz", ["aa11"])], self.store)
-        self.assertEqual(rc.restore(REPO, "0.19.0", os.path.join(self.d, "b"), self.store), 0)
+        self.assertEqual(rc.restore(REPO, "vllm-0.19.0", os.path.join(self.d, "b"), self.store), 0)
+
+    def test_llama_engine_key(self):
+        rc.merge(REPO, "llama-b1375", [self.job("a.tgz", ["aa11"])], self.store)
+        self.assertTrue(rc.store_file(REPO, "llama-b1375", self.store).endswith("org__model__llama-b1375.tgz"))
+        self.assertEqual(rc.restore(REPO, "llama-b1375", os.path.join(self.d, "b"), self.store), 1)
+        self.assertEqual(rc.restore(REPO, "llama-b1376", os.path.join(self.d, "b2"), self.store), 0)
 
     def test_merge_is_deterministic(self):
         a = self.job("a.tgz", ["aa11", "bb22"])

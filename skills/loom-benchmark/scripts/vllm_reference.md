@@ -14,7 +14,7 @@ card with the evidence, never loosened.
 - **Cache**: references are cached like llama.cpp's (`llama_cache/`), keyed by `source.repo@revision`, the vLLM version (`LLAMA_CACHE_BUILD=vllm-VERSION`)
   and the request, so they do not depend on the machine running Loom: a gate job on another runner can restore the `llama_cache.tgz` a
   previous job uploaded.
-  **Committed store**: `.github/devlab/reference_cache/<org>__<repo>__vllm-<VERSION>.tgz` (`scripts/reference_cache.py`: restore / merge / count) holds the
+  **Committed store**: `.github/devlab/reference_cache/<org>__<repo>__vllm-<VERSION>.tgz` (`scripts/reference_cache.py`: restore / merge / count; GGUF cards use `__llama-<BUILD>` the same way) holds the
   recorded references of a checkpoint; `devlab_perf.sh` restores it before every safetensors `gates` step, so a run whose requests are all cached never loads
   vLLM (its job line: `references: N cached before gates, M recorded in this job, vLLM loaded: yes|no`). A miss is recorded by that job; merge its
   `gates_V/llama_cache.tgz` into the store. Job field `reference_cache: "none"` skips the restore.
