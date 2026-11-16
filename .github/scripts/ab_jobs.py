@@ -336,6 +336,11 @@ def sdk_ab(doc, old_sdk, new_sdk, key):
                 del n["execution"]
             n.pop("card", None)
             n["build"] = {}
+            if n.get("context"):
+                # the package must hold the context the old card serves on this device: build.py would otherwise refit the context to the
+                # runner's budget (R9700: 34 GiB, plus a 2 GiB capped-budget reserve) and the program's prepare() then rejects the served
+                # context ("... a context of at most N"). The budget only sizes context and the suggested pool, not the programs' shape.
+                n["build_args"] = list(n.get("build_args") or []) + ["--memory-gib", "1024"]
             n["sdk"] = new_sdk
             o["sdk"] = old_sdk
             if j.get(f"require_preset_{key}"):

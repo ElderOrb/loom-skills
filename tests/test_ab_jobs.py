@@ -138,6 +138,8 @@ class SdkAb(unittest.TestCase):
             self.assertEqual(v[new]["execution"], v[old]["execution"])
             self.assertEqual(v[new]["cap_pool"], v[old]["cap_pool"])
             self.assertIs(v[new]["require_preset_r9700"], False)   # a rebuilt package carries no <first>-r9700 preset
+            if v[new].get("context"):   # the build keeps the served context instead of refitting it to the runner's budget
+                self.assertEqual(v[new]["build_args"][-2:], ["--memory-gib", "1024"])
 
     def test_without_the_flag_nothing_changes(self):
         d = tempfile.mkdtemp()
