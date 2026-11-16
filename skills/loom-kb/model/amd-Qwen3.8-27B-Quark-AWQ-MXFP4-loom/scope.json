@@ -62,6 +62,13 @@
     "decode.spec.gdn_copy_split": 8
    },
    "evidence": "q38r9700 verify (devlab-perf 43763681525, Q4_K_M card): +1.9 %. This card (devlab-perf 43806245145, one job, ABBA, Q4_0 block both sides): decode 70.0 -> 71.4 (+2.0 %), decode_2k 71.7 -> 73.6 (+2.6 %), decode_32k 52.6 -> 55.5 (+5 %); spec gate (drafted == undrafted) PASS."
+  },
+  {
+   "when": {},
+   "set": {
+    "decode.spec.gdn_fold": true
+   },
+   "evidence": "ogdn (PR mxfp4st-ogdn): the drafted verification records fold factors and one g_gdn_fold + one g_gdn_fold_hist launch replace the GDN capture / restore / replay (289 launches per step -> 2). kbench gdn_fold (run 43820013544): fold path == replay path bit-exact on gfx1201, GDN part of a step 3.07 -> 1.54 ms. DevLab R9700, one job each, base = this node with gdn_copy_split 8 + Q4_0 block: drafted step 33.94 -> 33.45 ms device (GDN 2.00 -> 1.48 ms/step) (run 43830461301); decode 71.72 -> 73.15 tok/s (+2.0 %, 3 ABBA sessions each, run 43840095234; 71.77 -> 73.05 in 43830461301), decode_2k 73.4 -> 74.2, decode_32k 54.4 vs 54.0 (tie); ktest incl. gdn_fold_vs_replay PASS, spec gate PASS 6/6 (drafted == undrafted), consistency PASS; verify scratch at the largest packing shape 4.73 -> 3.68 GiB."
   }
  ]
 }
