@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st vhead round 0: kernel tests of the pieced heads (pv: full-vocab proposal pieces + verified Q8_0 head pieces; p60: proposal pieces with a straddling piece), then one functional smoke of pv",
+ "_comment": "mxfp4st vhead round 1: proposal head pieces (N 49152/65536/81920/full) and the verified Q8_0 head vs the node, ABBA in one job; cold:p49 first = a fresh VM's first load with pieces (#940 probe, VRAM timeline); func (a fresh VM's first load) and at 106496/114688; gates job: dev gates (vs vLLM) of v8 and base after a warm-up.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
@@ -7,16 +7,72 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "vhead-ktest",
+   "name": "vhead-perf",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
    "kit": null,
    "llamacpp": "b1375",
+   "repeat_rows": 3,
    "variants": [
     {
-     "name": "pv",
+     "name": "base",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "p49",
      "build": {
       "PROPOSE_HEAD_PIECES": "1",
-      "PROPOSE_HEAD_ROWS": "300000",
+      "PROPOSE_HEAD_ROWS": "49152"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "p65",
+     "build": {
+      "PROPOSE_HEAD_PIECES": "1",
+      "PROPOSE_HEAD_ROWS": "65536"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "p82",
+     "build": {
+      "PROPOSE_HEAD_PIECES": "1",
+      "PROPOSE_HEAD_ROWS": "81920"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "pfull",
+     "build": {
+      "PROPOSE_HEAD_PIECES": "1",
+      "PROPOSE_HEAD_ROWS": "248320"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "v8",
+     "build": {
       "VERIFY_HEAD_PREP": "q8_0"
      },
      "build_args": [
@@ -26,10 +82,94 @@
      "context": 98304
     },
     {
-     "name": "p60",
+     "name": "p49c106",
      "build": {
       "PROPOSE_HEAD_PIECES": "1",
-      "PROPOSE_HEAD_ROWS": "60000"
+      "PROPOSE_HEAD_ROWS": "49152"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 106496
+    },
+    {
+     "name": "p65c106",
+     "build": {
+      "PROPOSE_HEAD_PIECES": "1",
+      "PROPOSE_HEAD_ROWS": "65536"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 106496
+    },
+    {
+     "name": "v8c106",
+     "build": {
+      "VERIFY_HEAD_PREP": "q8_0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 106496
+    },
+    {
+     "name": "v8c114",
+     "build": {
+      "VERIFY_HEAD_PREP": "q8_0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 114688
+    }
+   ],
+   "steps": [
+    "cold:p49:plain",
+    "perf:base:1:long",
+    "perf:p49:1:long",
+    "perf:p65:1:long",
+    "perf:p82:1:long",
+    "perf:pfull:1:long",
+    "perf:v8:1:long",
+    "perf:v8:1:long",
+    "perf:pfull:1:long",
+    "perf:p82:1:long",
+    "perf:p65:1:long",
+    "perf:p49:1:long",
+    "perf:base:1:long",
+    "func:p49c106",
+    "func:p65c106",
+    "func:v8c106",
+    "func:v8c114",
+    "cold:base:plain",
+    "cold:v8:plain",
+    "cold:pfull:plain"
+   ]
+  },
+  {
+   "name": "vhead-gates",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "base",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    },
+    {
+     "name": "v8",
+     "build": {
+      "VERIFY_HEAD_PREP": "q8_0"
      },
      "build_args": [
       "--slug",
@@ -39,9 +179,10 @@
     }
    ],
    "steps": [
-    "ktest:pv",
-    "ktest:p60",
-    "func:pv"
+    "perf:v8:1",
+    "func:v8",
+    "gates:v8:dev",
+    "gates:base:dev"
    ]
   }
  ]
