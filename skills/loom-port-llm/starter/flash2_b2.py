@@ -372,7 +372,7 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
         A("    scf.yield " + ", ".join(f"%m{SUF[hh]}_new, %l{SUF[hh]}_new" for hh in range(nh)) + ", " + ", ".join(f"%{ON[hh]}{k}" for hh in range(nh) for k in range(NO)) + f" : {mlt}, {ty16}\n  }}\n")
         return L
 
-    FM = bool(opts.get("fmax")) and not partial
+    FM = bool(opts.get("fmax"))
     if not FM:
         L = gen_loop(False)
     else:
@@ -440,42 +440,52 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
   %fm_nmv{s_} = vector.splat %fm_nm{s_} : vector<8xf32>
   %sinit{x} = vector.fragment<init> %fm_nmv{s_} shape [%c16, %c16] : vector<8xf32>""")
         P.append("  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
-        fast = renamed(gen_loop(True), "_fa")
-        if opts.get("peel"):   # blocks wholly at or below the tile's first position need no mask: an unmasked loop, then the masked tail
-            un = renamed(gen_loop(True), "_fu")
-            un = un.replace("[%c0 to %nblk step %c1]", "[%c0 to %fm_nfull step %c1]", 1)
-            un = re.sub(r"(%masked\w*) = vector\.select %valid, (%s\w+_f), %neg_v : vector<8xf32>", r"\1 = vector.addf \2, %zero8 : vector<8xf32>", un)
-            mu, lu, ou = fres("_fu")
-            init = ", ".join(f"%m{SUF[hh]} = {mu[hh]} : f32, %l{SUF[hh]} = {lu[hh]} : f32" for hh in range(nh)) + ", " + ", ".join(
-                f"%{AP[hh]}{k} = {ou[hh * NO + k]} : vector<8xf32>" for hh in range(nh) for k in range(NO))
-            h, rest = fast.split("\n", 1)
-            h = h.replace("[%c0 to %nblk step %c1]", "[%fm_nfull to %nblk step %c1]").replace(f"({mli}, {acc})", f"({init})")
-            assert "%fm_nfull" in h and init in h
-            fast = (f"  %fm_span = index.sub %pos0, %key_low : index\n  %fm_span1 = index.add %fm_span, %c1 : index\n"
-                    f"  %fm_nf_v = index.div %fm_span1, %c64 : index\n  %fm_nfull = index.min %fm_nf_v, %nblk : index\n" + un + h + "\n" + rest)
-        mf, lf, of = fres("_fa")
-        C = []
-        for hh, s_ in enumerate(SUF):
-            C.append(f"""  %fl{s_}_o, %fl{s_}_u = kernel.subgroup.shuffle<xor> {lf[hh]}, %exchange, %width : f32, i32, i32
-  %fl{s_}_w = scalar.addf {lf[hh]}, %fl{s_}_o : f32
-  %fo{s_}_o, %fo{s_}_u = kernel.subgroup.shuffle<xor> {mf[hh]}, %exchange, %width : f32, i32, i32
-  %fo{s_}_w = scalar.maxnumf {mf[hh]}, %fo{s_}_o : f32
-  view.store %fl{s_}_w, %ls_view[%c0_i, %c{hh}_i, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>
-  view.store %fo{s_}_w, %mx_view[%c0_i, %c{hh}_i, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>""")
-        C.append("  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
-        for hh, s_ in enumerate(SUF):
-            for j in range(4):
-                C.append(f"  %fl{s_}{j} = view.load %ls_view[%c0_i, %c{hh}_i, %fq{j}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32\n"
-                         f"  %fo{s_}{j} = view.load %mx_view[%c0_i, %c{hh}_i, %fq{j}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32")
-            C.append(f"""  %fl{s_}01 = scalar.addf %fl{s_}0, %fl{s_}1 : f32
-  %fl{s_}23 = scalar.addf %fl{s_}2, %fl{s_}3 : f32
-  %fl{s_}_t = scalar.addf %fl{s_}01, %fl{s_}23 : f32
-  %fo{s_}01 = scalar.maxnumf %fo{s_}0, %fo{s_}1 : f32
-  %fo{s_}23 = scalar.maxnumf %fo{s_}2, %fo{s_}3 : f32
-  %fo{s_}_t = scalar.maxnumf %fo{s_}01, %fo{s_}23 : f32""")
-        NW = 12 if opts.get("wg") == 3 else 4   # waves of the workgroup: the fallback is taken by all of them or none
-        C.append(f"""  %c0_f = index.constant 0 : index
-  %fm_lim = scalar.constant {32768.0 if opts.get("ovl") else 15.0} : f32
+        def fast_loops(sa, su, si):
+            """The fixed-reference loops with result suffixes SA (masked / only loop) and SU (unmasked loop), S^T initialised from %sinit{SI}x."""
+            fast = renamed(gen_loop(True), sa)
+            if opts.get("peel"):   # blocks wholly at or below the tile's first position need no mask: an unmasked loop, then the masked tail
+                un = renamed(gen_loop(True), su)
+                un = un.replace("[%c0 to %nblk step %c1]", "[%c0 to %fm_nfull step %c1]", 1)
+                un = re.sub(r"(%masked\w*) = vector\.select %valid, (%s\w+_f), %neg_v : vector<8xf32>", r"\1 = vector.addf \2, %zero8 : vector<8xf32>", un)
+                mu, lu, ou = fres(su)
+                init = ", ".join(f"%m{SUF[hh]} = {mu[hh]} : f32, %l{SUF[hh]} = {lu[hh]} : f32" for hh in range(nh)) + ", " + ", ".join(
+                    f"%{AP[hh]}{k} = {ou[hh * NO + k]} : vector<8xf32>" for hh in range(nh) for k in range(NO))
+                h, rest = fast.split("\n", 1)
+                h = h.replace("[%c0 to %nblk step %c1]", "[%fm_nfull to %nblk step %c1]").replace(f"({mli}, {acc})", f"({init})")
+                assert "%fm_nfull" in h and init in h
+                fast = un + h + "\n" + rest
+            return fast.replace("%sinitA", f"%sinit{si}A").replace("%sinitB", f"%sinit{si}B")
+
+        def comb(sa, q):
+            """Per head: l summed and the overflow (max S^T - m0) maxed over the lane pair and the four waves: %fl{q}{h}_t, %fo{q}{h}_t."""
+            mf, lf, _ = fres(sa)
+            C = ["  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)"] if q else []
+            for hh, s_ in enumerate(SUF):
+                C.append(f"""  %fl{q}{s_}_o, %fl{q}{s_}_u = kernel.subgroup.shuffle<xor> {lf[hh]}, %exchange, %width : f32, i32, i32
+  %fl{q}{s_}_w = scalar.addf {lf[hh]}, %fl{q}{s_}_o : f32
+  %fo{q}{s_}_o, %fo{q}{s_}_u = kernel.subgroup.shuffle<xor> {mf[hh]}, %exchange, %width : f32, i32, i32
+  %fo{q}{s_}_w = scalar.maxnumf {mf[hh]}, %fo{q}{s_}_o : f32
+  view.store %fl{q}{s_}_w, %ls_view[%c0_i, %c{hh}_i, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>
+  view.store %fo{q}{s_}_w, %mx_view[%c0_i, %c{hh}_i, %fb_wv, %lane] : f32, view<1x{nh}x{waves}x32xf32>""")
+            C.append("  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+            for hh, s_ in enumerate(SUF):
+                for j in range(4):
+                    C.append(f"  %fl{q}{s_}{j} = view.load %ls_view[%c0_i, %c{hh}_i, %fq{j}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32\n"
+                             f"  %fo{q}{s_}{j} = view.load %mx_view[%c0_i, %c{hh}_i, %fq{j}, %lane] : view<1x{nh}x{waves}x32xf32> -> f32")
+                C.append(f"""  %fl{q}{s_}01 = scalar.addf %fl{q}{s_}0, %fl{q}{s_}1 : f32
+  %fl{q}{s_}23 = scalar.addf %fl{q}{s_}2, %fl{q}{s_}3 : f32
+  %fl{q}{s_}_t = scalar.addf %fl{q}{s_}01, %fl{q}{s_}23 : f32
+  %fo{q}{s_}01 = scalar.maxnumf %fo{q}{s_}0, %fo{q}{s_}1 : f32
+  %fo{q}{s_}23 = scalar.maxnumf %fo{q}{s_}2, %fo{q}{s_}3 : f32
+  %fo{q}{s_}_t = scalar.maxnumf %fo{q}{s_}01, %fo{q}{s_}23 : f32""")
+            return "\n".join(C) + "\n"
+
+        assert not opts.get("ovl"), "fmax: the second pass needs the true score max"
+        prel = (f"  %fm_span = index.sub %pos0, %key_low : index\n  %fm_span1 = index.add %fm_span, %c1 : index\n"
+                f"  %fm_nf_v = index.div %fm_span1, %c64 : index\n  %fm_nfull = index.min %fm_nf_v, %nblk : index\n") if opts.get("peel") else ""
+        NW = 12 if opts.get("wg") == 3 else 4   # waves of the workgroup: the second pass is taken by all of them or none
+        flag = f"""  %c0_f = index.constant 0 : index
+  %fm_lim = scalar.constant 15.0 : f32
   %fm_ol = scalar.maxnumf %fo_t, %foB_t : f32
   %fm_svf = kernel.subgroup.reduce<maxnumf> %fm_ol : f32
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -487,12 +497,27 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
   %fm_vm = scalar.addf %fm_vm{NW - 1}, %zero_f : f32
   %fm_any = scalar.cmpf ogt, %fm_vm, %fm_lim : f32
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-  {mls}, {outs} = scf.if %fm_any -> ({mlt}, {ty16}) {{""")
-        slow = renamed(gen_loop(False), "_sl")
-        ms, ls_, os_ = fres("_sl")
-        tail_if = (f"    scf.yield {', '.join(f'{ms[hh]}, {ls_[hh]}' for hh in range(nh))}, {', '.join(os_)} : {mlt}, {ty16}\n  }} else {{\n"
+  {mls}, {outs} = scf.if %fm_any -> ({mlt}, {ty16}) {{
+"""
+        # second pass (some lane of the workgroup had a score above its m0 + 15): every lane reruns the same loops, a lane that overflowed
+        # with m0 raised to its true max, every other lane with its m0 unchanged (bit-identical to the first pass: the result of a token
+        # depends on that token only, so a prefill cut anywhere gives the same bits)
+        p2 = ""
+        for hh, x in enumerate(ABC):
+            s_ = SUF[hh]
+            p2 += f"""  %fm2_ov{s_} = scalar.cmpf ogt, %fo{s_}_t, %fm_lim : f32
+  %fm2_up{s_} = scalar.addf %fm_m{s_}, %fo{s_}_t : f32
+  %fm2_m{s_} = scf.select %fm2_ov{s_}, %fm2_up{s_}, %fm_m{s_} : f32
+  %fm2_nm{s_} = scalar.subf %zero_f, %fm2_m{s_} : f32
+  %fm2_nmv{s_} = vector.splat %fm2_nm{s_} : vector<8xf32>
+  %sinit2{x} = vector.fragment<init> %fm2_nmv{s_} shape [%c16, %c16] : vector<8xf32>
+"""
+        p2 += fast_loops("_fb", "_fv", "2") + comb("_fb", "2")
+        _, _, o2 = fres("_fb")
+        _, _, of = fres("_fa")
+        tail_if = (f"    scf.yield {', '.join(f'%fo2{SUF[hh]}_t, %fl2{SUF[hh]}_t' for hh in range(nh))}, {', '.join(o2)} : {mlt}, {ty16}\n  }} else {{\n"
                    f"    scf.yield {', '.join(f'%fo{SUF[hh]}_t, %fl{SUF[hh]}_t' for hh in range(nh))}, {', '.join(of)} : {mlt}, {ty16}\n  }}\n")
-        L = ["\n".join(P) + "\n" + fast + "\n".join(C) + "\n" + slow + tail_if]
+        L = ["\n".join(P) + "\n" + prel + fast_loops("_fa", "_fu", "") + comb("_fa", "") + flag + p2 + tail_if]
     loop = "".join(x if x.endswith("\n") else x + "\n" for x in L)
     loop = _ablate(loop, (opts or {}).get("abl", ""))
     if opts.get("e2"):   # exp2 domain: Q^T staged pre-scaled by scale * log2(e); S^T comes out in log2 units, P = exp2(S - m)

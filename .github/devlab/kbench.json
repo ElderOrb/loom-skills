@@ -8,15 +8,11 @@
       "gen": "flash_r9700/gen_bench.py",
       "gen_variants": [
         "base",
-        "fmp",
-        "fmp+ovl",
-        "fmp+wg3qs"
+        "fmp"
       ],
       "files": [
         "bench.loom",
-        "bench_fmp.loom",
-        "bench_fmp+ovl.loom",
-        "bench_fmp+wg3qs.loom"
+        "bench_fmp.loom"
       ],
       "tests": [
         "test.loom"

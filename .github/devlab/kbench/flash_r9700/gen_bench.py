@@ -49,7 +49,7 @@ VARIANTS = {   # name -> flash2_g6.py options (FLASH2_G6_OPTS)
     "fmp": {"B": "2", "fmax": 1, "vpf": "top2", "e2": 1, "peel": 1},   # + unmasked loop below the diagonal
     "ovl": {"B": "2", "ovl": 1},   # with fmax: overflow tracked by the per-lane block sum
 }
-TESTED = ["fmp", "fmp+ovl"]
+TESTED = ["fmp"]
 
 
 def opts_of(v):
