@@ -72,7 +72,13 @@ def _nox(t, mode):
 GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf": 4}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}, "adr8": {"a_direct": True, "rf": 8}, "adr2": {"a_direct": True, "rf": 2}, "adr2pf": {"a_direct": True, "rf": 2, "a_pf": True}, "adn128": {"a_direct": True, "nt": 128}, "adn128r2": {"a_direct": True, "nt": 128, "rf": 2}, "adr2k2": {"a_direct": True, "rf": 2, "kmult": 2},
        # pfgemm round 1 (a swiglu entry in "sw" overrides the lever for the swiglu kernels: tn there is per weight)
        "t128x256": {"bm": 128, "tn": 256, "sw": {"bm": 128, "tn": 128}}, "t256x256": {"bm": 256, "tn": 256, "sw": {"bm": 256, "tn": 128}},
-       "swp": {"swp": True}, "swz": {"swz": True}, "pfa2": {"pfa": 2}, "pfa1": {"pfa": 1}}   # variants that are generator parameters (the levers), not text ablations
+       "swp": {"swp": True}, "swz": {"swz": True}, "pfa2": {"pfa": 2}, "pfa1": {"pfa": 1},
+       "a2swp": {"rf": 2, "swp": True}, "yf16": {"yf16": True}}   # variants that are generator parameters (the levers), not text ablations
+
+
+def ytype(variant):
+    """the output element type of a variant's kernels"""
+    return "f16" if GEN.get(variant.split("+")[0] if variant else "", {}).get("yf16") else "f32"
 
 
 def kernel(mode, kn, variant="", order="pairs"):
@@ -105,6 +111,7 @@ def build(variant=""):
     for mode, K, N in SHAPES:
         kn = f"k_{mode}_{K}x{N}_{ROWS}"
         out.append(kernel(mode, kn, variant))
+        YT = ytype(variant)
         planes = ["w"] + (["u"] if mode == "swiglu" else [])
         decl = "".join(f"  %{p} = check.generate.random.uniform seed(%seed) range(-128 to 127) : tensor<{N * K // 2}xi8>\n"
                        f"  %{p}s = check.generate.random.uniform seed(%seed) range(116 to 126) : tensor<{N * K // 32}xi8>\n" for p in planes)
@@ -117,8 +124,8 @@ def build(variant=""):
   %n = check.literal value({N}) : index
   %x = check.generate.random.uniform seed(%seed) range(-100 to 100) : tensor<{ROWS}x{K}xi8>
   %s = check.generate.fill value(1.0) : tensor<{ROWS}x2xf32>
-{decl}  %y = check.generate.fill value(0.0) : tensor<{ROWS}x{N}xf32>
-  kernel.launch @{kn}[%rows, %n](%rows, %k, %n, %x, %s, {args}, %y) : [index, index](index, index, index, tensor<{ROWS}x{K}xi8>, tensor<{ROWS}x2xf32>, {tys}, tensor<{ROWS}x{N}xf32>)
+{decl}  %y = check.generate.fill value(0.0) : tensor<{ROWS}x{N}x{YT}>
+  kernel.launch @{kn}[%rows, %n](%rows, %k, %n, %x, %s, {args}, %y) : [index, index](index, index, index, tensor<{ROWS}x{K}xi8>, tensor<{ROWS}x2xf32>, {tys}, tensor<{ROWS}x{N}x{YT}>)
   check.return
 }}
 check.benchmark<@{kn}_case> @{kn}_bm
@@ -276,10 +283,11 @@ def tests(outdir):
         for mode, K, n in (("store", 5120, 1024), ("swiglu", 5120, 512), ("store", 17408, 256)):
             rows = 512
             kn = f"t_{mode}_{order}{'_' + variant if variant else ''}_{K}"
+            YT = ytype(variant)
             nib = [rng.integers(0, 256, (n, K // 2)).astype(np.uint8) for _ in range(2 if mode == "swiglu" else 1)]
             sc = [rng.integers(108, 127, (n, K // 32)).astype(np.uint8) for _ in nib]
             W = [dequant(a, b, order) for a, b in zip(nib, sc)]
-            xf = e4m3_round(np.clip(rng.standard_normal((rows, K)) * 30.0, -440, 440))
+            xf = e4m3_round(np.clip(rng.standard_normal((rows, K)) * (3.0 if YT == "f16" else 30.0), -440, 440))
             inv = rng.uniform(0.25, 2.0, rows).astype(np.float32)
             s = np.stack([np.ones(rows, np.float32), inv * np.float32(2.0 ** -8)], 1)
             g = (xf @ W[0].T) * inv[:, None].astype(np.float64)
@@ -288,7 +296,7 @@ def tests(outdir):
                 y = g / (1 + np.exp(np.clip(-g, -80, 80))) * u
             else:
                 y = g
-            save(outdir, kn + "_x", e4m3_bytes(xf)); save(outdir, kn + "_s", s); save(outdir, kn + "_y", y.astype(np.float32))
+            save(outdir, kn + "_x", e4m3_bytes(xf)); save(outdir, kn + "_s", s); save(outdir, kn + "_y", y.astype(np.float16 if YT == "f16" else np.float32))
             decl, args, tys = "", [], []
             for i, (a, b) in enumerate(zip(nib, sc)):
                 save(outdir, f"{kn}_w{i}", a.reshape(-1).view(np.int8)); save(outdir, f"{kn}_ws{i}", b.reshape(-1).view(np.int8))
@@ -303,10 +311,10 @@ def tests(outdir):
   %n = check.literal value({n}) : index
   %x = check.file.read.npy path("{kn}_x.npy") : tensor<{rows}x{K}xi8>
   %s = check.file.read.npy path("{kn}_s.npy") : tensor<{rows}x2xf32>
-{decl}  %e = check.file.read.npy path("{kn}_y.npy") : tensor<{rows}x{n}xf32>
-  %y = check.generate.fill value(0.0) : tensor<{rows}x{n}xf32>
-  kernel.launch @{kn}[%rows, %n](%rows, %k, %n, %x, %s, {", ".join(args)}, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {", ".join(tys)}, tensor<{rows}x{n}xf32>)
-  check.expect.close actual(%y) expected(%e) atol({tol:.3e}) rtol(2.0e-3) nan(different) : tensor<{rows}x{n}xf32>
+{decl}  %e = check.file.read.npy path("{kn}_y.npy") : tensor<{rows}x{n}x{YT}>
+  %y = check.generate.fill value(0.0) : tensor<{rows}x{n}x{YT}>
+  kernel.launch @{kn}[%rows, %n](%rows, %k, %n, %x, %s, {", ".join(args)}, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {", ".join(tys)}, tensor<{rows}x{n}x{YT}>)
+  check.expect.close actual(%y) expected(%e) atol({tol:.3e}) rtol(2.0e-3) nan(different) : tensor<{rows}x{n}x{YT}>
   check.return
 }}
 """)

@@ -34,7 +34,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -59,6 +59,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     assert RF in (2, 4, 8) and WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2) and NT <= 1024
     assert a_direct or (NT == BM == 256 and TW == 128)
     wave_cols = 16 * cfr
+    YT = 'f16' if yf16 else 'f32'   # the output element type (f16: a measured option for the SwiGLU output, whose consumer is the down projection's row-scale producer)
     # the workgroup's thread index folded onto the BM rows of the tile (when the workgroup has more threads than the tile has rows)
     BMI, BMDEF = ("%workitem", "") if NT == BM else ("%bm_item", f"  %bm_item = index.rem %workitem, %{CBM} : index\n")
     KS = 128 * kmult              # K per step: 4 * kmult 32-value blocks (kmult > 1 needs a_direct)
@@ -389,8 +390,8 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
         A(f"  %inv{r} = vector.fragment.load<result> %inv_view[{rowv[r]}, %c0] shape [%c16, %c16] : view<{BM}x16xf32> -> vector<8xf32>")
     A(f'''  %y_layout = encoding.layout.strided [%n, %c1] : encoding<layout>
   %tile_first = index.madd %row_origin, %n, %out_origin : index
-  %tile_offset = index.scale %tile_first, %four : index, offset -> offset
-  %y_view = buffer.view %y[%tile_offset] : buffer -> view<{BM}x{TN}xf32, %y_layout>''')
+  %tile_offset = index.scale %tile_first, {'%two' if yf16 else '%four'} : index, offset -> offset
+  %y_view = buffer.view %y[%tile_offset] : buffer -> view<{BM}x{TN}x{YT}, %y_layout>''')
     for r in range(RF):
         for c in range(cfr):
             row = rowv[r]
@@ -402,7 +403,9 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %v{r}{c} = vector.mulf %sg{r}{c}, %u{r}{c} : vector<8xf32>''')
             else:
                 A(f"  %v{r}{c}_s = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>\n  %v{r}{c} = vector.addf %v{r}{c}_s, %zero8 : vector<8xf32>")
-            A(f"  vector.fragment.store<result> %v{r}{c}, %y_view[{row}, %oc{r}{c}] shape [%c16, %c16] : vector<8xf32>, view<{BM}x{TN}xf32, %y_layout>")
+            if yf16:
+                A(f"  %vh{r}{c} = vector.fptrunc %v{r}{c} : vector<8xf32> to vector<8xf16>")
+            A(f"  vector.fragment.store<result> %{'vh' if yf16 else 'v'}{r}{c}, %y_view[{row}, %oc{r}{c}] shape [%c16, %c16] : vector<8x{YT}>, view<{BM}x{TN}x{YT}, %y_layout>")
     A("  kernel.return\n}\n")
     return "\n".join(L)
 
