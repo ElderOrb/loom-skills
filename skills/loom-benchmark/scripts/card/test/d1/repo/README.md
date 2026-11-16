@@ -19,7 +19,7 @@ The weights are not included. `loom-fetch` (from the Loom SDK, installed with it
 from this repository and the GGUF from [LiquidAI/d1-2B-GGUF](https://huggingface.co/LiquidAI/d1-2B-GGUF), checked against `model.json.lock`:
 
 ```bash
-pip install "hrx-loom[hf]"
+pipx install "hrx-loom[hf]"
 loom-fetch https://huggingface.co/loom-fun/LiquidAI-d1-2B-loom/resolve/main/model.json --materialize=copy --output=d1-2B-GGUF
 loom-serve --model=d1-2B-GGUF/model.json --device=amdgpu
 ```

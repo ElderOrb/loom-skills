@@ -564,9 +564,9 @@ def render(d):
                    f"loom-skills/skills/loom-setup/scripts/install_loom.sh {root} ci:{pin['artifact_id']}",
                    f"source {root}/.venv/bin/activate"]
     elif pin and pin.get("hrx_loom"):
-        install = [f'pip install "hrx-loom[hf]=={pin["hrx_loom"]}"']
+        install = [f'pipx install "hrx-loom[hf]=={pin["hrx_loom"]}"']
     else:
-        install = ['pip install "hrx-loom[hf]"']   # no SDK version recorded anywhere (cannot happen for a built card)
+        install = ['pipx install "hrx-loom[hf]"']   # no SDK version recorded anywhere (cannot happen for a built card)
     # a GPU with no runner and no results is not measured at all: no Quick start for it (its line below says so)
     serving = [g for g in gpus if info["devices"][g].get("state") != "unsupported"
                and (has_results(info["devices"][g]) or has_runner(g))] or [DEFAULT_GPU]
