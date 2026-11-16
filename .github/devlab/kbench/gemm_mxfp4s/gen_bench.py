@@ -82,12 +82,15 @@ GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf
        # ogemm round 3: wave-specialized (4 producer waves decode the next step into a second LDS buffer while 8 WMMA waves multiply; one barrier per step)
        "ws": {"ws": 4}, "wsr4": {"ws": 4, "sw": {"rf": 4}}, "wsl": {"ws": 4, "lvs": True, "sw": {"rf": 4}},
        # ogemm round 4/5: pipelining modes lvs 1 (A + B of the next pair) / 2 (A only), with the next step's first activation pair before the barrier (lvpf)
-       "lvs2": {"lv": True, "lvs": 2, "sw": {"rf": 4}}, "lvs2pf1": {"lv": True, "lvs": 2, "lvpf": 1, "sw": {"rf": 4}}}   # variants that are generator parameters (the levers), not text ablations
+       "lvs2": {"lv": True, "lvs": 2, "sw": {"rf": 4}}, "lvs2pf1": {"lv": True, "lvs": 2, "lvpf": 1, "sw": {"rf": 4}},
+       # ogemm round 6: 16-wave workgroups (8 accumulators per wave, ~150 VGPR: 2 workgroups = 32 waves per WGP instead of 24)
+       "w16a": {"rf": 2, "cf": 4, "lv": True, "lvs": 1, "sw": {"rf": 2, "cf": 2}}, "w16b": {"rf": 4, "cf": 2, "lv": True, "lvs": 1, "sw": {"rf": 4, "cf": 1}},
+       "w16v": {"rf": 2, "cf": 4, "sw": {"rf": 2, "cf": 2}}}   # variants that are generator parameters (the levers), not text ablations
 
 
 # the variants whose results are checked against float64 (the others are timing-only levers that lost or tied; hrx-loom 0.1.0 fails to verify a module of ~65k lines
 # ("view type references encoding value ... not defined at this point", notes/sdk_blockers.md), so the checked set stays at ~60 cases)
-TESTED = ["staged", "adirect", "adr2", "adn128", "t128x256", "swp", "pfa2", "yf16", "lv", "lvs", "lvs2pf1", "ws"]
+TESTED = ["staged", "adirect", "adr2", "adn128", "t128x256", "swp", "pfa2", "yf16", "lvs", "lvs2pf1", "w16a", "w16b", "w16v"]
 
 
 def ytype(variant):
