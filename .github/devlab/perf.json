@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st defold exp3: decode.spec.gdn_fold_defer (default layout, merged with #942) vs origin/mxfp4st (eager fold), same base: ktest + 3 drafted-decode profiles each (acceptance = correctness probe after exp2's one bad profile session), decode ABBA x4, c4 undrafted ABBA x3. Evidence branch, not for merge.",
+ "_comment": "mxfp4st defold exp4: decode.spec.gdn_fold_defer (default layout, merged with #942) vs mxfp4st 9903c8cd (pinned: the branch's merge base; exp2/exp3 bases had moved) (eager fold), same base: ktest + 3 drafted-decode profiles each (acceptance = correctness probe after exp2's one bad profile session), decode ABBA x4, c4 undrafted ABBA x3. Evidence branch, not for merge.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
@@ -7,7 +7,7 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "defold3-kt-prof",
+   "name": "defold4-kt-prof",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
@@ -15,7 +15,7 @@
    "variants": [
     {
      "name": "base",
-     "ref": "origin/mxfp4st",
+     "ref": "9903c8cde29176d24a6bfab4b87533bd50adf04f",
      "build": {},
      "build_args": [
       "--slug",
@@ -46,7 +46,7 @@
    ]
   },
   {
-   "name": "defold3-dec",
+   "name": "defold4-dec",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
@@ -54,7 +54,7 @@
    "variants": [
     {
      "name": "base",
-     "ref": "origin/mxfp4st",
+     "ref": "9903c8cde29176d24a6bfab4b87533bd50adf04f",
      "build": {},
      "build_args": [
       "--slug",
@@ -86,7 +86,7 @@
    ]
   },
   {
-   "name": "defold3-c4",
+   "name": "defold4-c4",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
@@ -94,7 +94,7 @@
    "variants": [
     {
      "name": "base_nd",
-     "ref": "origin/mxfp4st",
+     "ref": "9903c8cde29176d24a6bfab4b87533bd50adf04f",
      "build": {},
      "build_args": [
       "--slug",
