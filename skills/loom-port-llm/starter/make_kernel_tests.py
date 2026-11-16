@@ -1049,7 +1049,7 @@ if cfg.get("recurrent_layers") and _chunk:
             arena[rd // 4:rd // 4 + SB // 4] = S0.reshape(-1); S = S0.astype(np.float64)
         for i in range(first, first + L):
             for h in range(HV):
-                kh = h % HK; q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
+                kh = (h // (HV // HK) if G_GROUPED else h % HK); q = qs[i, kh] * qinv[i, kh] / np.sqrt(DK); k = ks[i, kh] * kinv[i, kh]
                 St = S[h] * np.exp(np.log1p(np.exp(float(alpha[i, h]) + dt[h])) * a_log[h])
                 d = (vs[i, h] - St @ k) / (1 + np.exp(-float(beta[i, h])))
                 S[h] = St + np.outer(d, k); raw_o[i, h] = S[h] @ q
