@@ -1384,6 +1384,9 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   check.return
 }}
 """)
+    def e4m3_bytes_s(v):   # e4m3_bytes keeping the sign of a negative zero (a tiny negative value converts to -0 = 0x80)
+        v = np.asarray(v, np.float64)
+        return (e4m3_bytes(v).view(np.uint8) | np.where((v == 0) & np.signbit(v), 0x80, 0).astype(np.uint8)).view(np.int8)
     if _fuse_on():   # choice prefill.mxfp4s.fuse: the flagged producer twins, the residual-adding output projection, the bf16 SwiGLU output
         def bf16_bits(a):
             u = np.asarray(a, np.float32).view(np.uint32).astype(np.uint64)
@@ -1395,7 +1398,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
         b_mx = np.abs(xb).max(1); b_e = np.frexp(b_mx)[1] - 1
         b_sc = np.where(f8_live, 2.0 ** (7 - b_e), 0.0); b_iv = np.where(f8_live, 2.0 ** (b_e - 7 - 8.0), 0.0)
         save("rs8b_x", bf16_bits(f8_x)); save("rs8b_s", np.stack([b_sc, b_iv], 1).astype(np.float32))
-        save("rs8b_q", np.where(f8_live[:, None], e4m3_bytes(e4m3_round(xb * b_sc[:, None])), 0).astype(np.int8))
+        save("rs8b_q", np.where(f8_live[:, None], e4m3_bytes_s(e4m3_round(xb * b_sc[:, None])), 0).astype(np.int8))
         cases.append(f"""check.case public @row_scale_f16_live_lv_f8_bf16in {{
   %rows = check.literal value(3) : index
   %k = check.literal value({rs_k}) : index
@@ -1417,6 +1420,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
         # post-add-norm twin with the residual already added (flag 1): x holds x + y, y is garbage that must not be read; same fp8 row and scales, x untouched
         if not cfg.get("post_norms"):
             save("pa8r_g", (rng.standard_normal((3, H)) * 1e4).astype(np.float32))
+            save("pa8r_q", np.where(pa8_live[:, None], e4m3_bytes_s(e4m3_round(pa_h * pa8_sc[:, None])), 0).astype(np.int8))
             cases.append(f"""check.case public @post_add_norm_rs_live_lv_f8_radd {{
   %rows = check.literal value(3) : index
   %fl = check.literal value(1) : index
@@ -1427,7 +1431,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %wp = check.file.read.npy path("pa_wp.npy") : tensor<{H}xf32>
   %wn = check.file.read.npy path("pa_wn.npy") : tensor<{H}xf32>
   %es8 = check.file.read.npy path("pa8_s.npy") : tensor<3x2xf32>
-  %eq8 = check.file.read.npy path("pa8_q.npy") : tensor<3x{H}xi8>
+  %eq8 = check.file.read.npy path("pa8r_q.npy") : tensor<3x{H}xi8>
   %h = check.generate.fill value(0.0) : tensor<3x{H}xf32>
   %s = check.generate.fill value(0.0) : tensor<3x2xf32>
   %h16 = check.generate.fill value(0.0) : tensor<3x{H}xf16>
@@ -1489,7 +1493,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
             inv = rng.uniform(0.25, 2.0, rows).astype(np.float32)
             sc = np.stack([np.ones(rows, np.float32), inv * np.float32(2.0 ** -8)], 1)
             yv = ffn_act((xf @ Wd.T) * inv[:, None].astype(np.float64)) * ((xf @ U.T) * inv[:, None].astype(np.float64))
-            ye = np.frexp(np.abs(yv).max(1))[1] - 1
+            ye = np.frexp(np.abs(bf16_vals(yv.astype(np.float32))).max(1))[1] - 1   # the max of the bf16-rounded values (rounding can cross a power of two)
             tag = f"gm8s_swbf_{K}_{n_use}"
             save(tag + "_x", e4m3_bytes(xf)); save(tag + "_s", sc); save(tag + "_w", Wr); save(tag + "_ws", Ws_); save(tag + "_u", Ur); save(tag + "_us", Us_)
             save(tag + "_s8", np.stack([2.0 ** (7 - ye), 2.0 ** (ye - 7 - 8.0)], 1).astype(np.float32)); save(tag + "_inf", np.tile(np.array([0, 0, 1, 0], np.int32), (rows, 1)))
