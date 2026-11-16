@@ -1212,6 +1212,11 @@ if __name__ == "__main__":
             if fmt in HELPER:   # the 64-row tile kernel under the 128-row name (its dequant has no prefetchable load)
                 name = f"{PREFIX}_gemm_{fmt}_{mode}"
                 out.append(_rdna4.with_twins(post(gemm(fmt, mode)).replace(f'export("{name}") @{name}(', f'export("{name}_m128") @{name}_m128(')))
+                if fmt == "mxfp4s" and mode == "store":   # gfx12 fp8 WMMA kernels (gen_mxfp4s.fuse_mxfp4s_f8 launches them): the plain GEMM and its fused SwiGLU pair
+                    import gen_mxfp4s as _mx
+                    if _mx.f8_enabled():
+                        out.append(post(_mx.gemm_mxfp4s_f8_m256("store", PREFIX)))
+                        out.append(post(_mx.gemm_mxfp4s_f8_m256("swiglu", PREFIX)))
             else:
                 out.append(_rdna4.with_twins(post(gemm_big(fmt, mode))))
                 if on256:
