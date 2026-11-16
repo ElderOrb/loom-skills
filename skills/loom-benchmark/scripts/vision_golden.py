@@ -35,7 +35,7 @@ sys.path.insert(0, HERE)
 # "Here" / "There" / "The" / "```" at one to two nats apart in vLLM's own distribution, which moves by about a nat between two recordings
 # of the same prompt and by build in Loom (DevLab run 43832215712: 'Based' vs 'Here' by build, both stable across requests), so
 # the verdict tracked luck, not the image path. The gate's questions now have one decisive answer (the "wide" precedent below).
-OPEN_QUESTIONS = {"shapes": "Describe every shape in this image with its color and position, and transcribe any text exactly.",
+OPEN_QUESTIONS = {"tall": "List the colors of the circles from top to bottom.", "shapes": "Describe every shape in this image with its color and position, and transcribe any text exactly.",
                   "chart": "What is the title of this chart, and which day has the tallest bar?"}
 
 
@@ -72,7 +72,7 @@ def builtin_images():
     im = Image.new("RGB", (300, 1200), (230, 240, 255)); d = ImageDraw.Draw(im)
     for i, c in enumerate(["red", "orange", "yellow", "green", "blue", "purple"]):
         d.ellipse((90, 40 + i * 190, 210, 160 + i * 190), fill=c)
-    out["tall"] = (im, "List the colors of the circles from top to bottom.")
+    out["tall"] = (im, "Answer with only the six circle colors from top to bottom, separated by commas.")
     im = Image.new("RGB", (1600, 260), "white"); d = ImageDraw.Draw(im)
     d.text((800, 130), "THE QUICK BROWN FOX 1234", fill=(120, 0, 0), font=font(90), anchor="mm")
     # A constrained question: "What text is written in this image?" has a first token that is a formatting coin flip
