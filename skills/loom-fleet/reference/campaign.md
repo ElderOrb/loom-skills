@@ -27,7 +27,9 @@ Narrow changes inside a campaign are [targeted fixes](targeted-fix.md).
 | Engineers | one task at a time in their own worktree; PR against the integration branch; read `notes/ENG_CONTRACT.md` and their task file first | open PRs into the base or another branch, publish outside the task |
 | Dashboarder | keeps the tracker artifact current from `status.json` + `log.md` (counts, log entries, ETA, scope changes together, not counts alone) | edit code or cards |
 
-Launch every subagent on the cheaper model tier (engineers, reviewers, dashboarder); the tech lead uses the strongest. Briefs for
+Model tiers: the cheaper tier (sonnet) is the default for engineers, reviewers and the dashboarder; the strongest tier (opus) for tech leads and
+for design-heavy engineering (fused or persistent kernels, register/LDS budgets across fused stages, cross-workgroup sync, open-ended
+optimization). The task file's `Model:` line names the tier and the reason; a parallel cheaper-tier variant of a design is fine. Briefs for
 engineers are explicit and self-contained: they point at the files to read, never assume the conversation.
 
 ## State files (all in the campaign directory, all on disk, none in `/tmp`)
