@@ -33,7 +33,7 @@ if a.info:
         features = {k: v.get("status") for k, v in feats.items()}
     except (OSError, ValueError):
         pass
-LOAD_WAIT = float(os.environ.get("R9700_FUNC_LOAD_WAIT", 900))   # seconds a not-yet-loaded model may answer 503 "unavailable"
+LOAD_WAIT = float(os.environ.get("R9700_FUNC_LOAD_WAIT", 300))   # seconds a not-yet-loaded model may answer 503 "unavailable"
 RETRY_S = float(os.environ.get("R9700_FUNC_RETRY_S", 5))
 NOTHINK = {"chat_template_kwargs": {"enable_thinking": False}}
 R = {"model": a.model, "claimed": features, "checks": {}}
