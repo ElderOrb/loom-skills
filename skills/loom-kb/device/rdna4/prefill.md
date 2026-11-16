@@ -40,3 +40,24 @@ and `GEMM_N_FASTEST` on) unless marked e2e (`devlab-perf`, same-job llama.cpp RO
 ## RDNA4 (gfx12) GEMM twins
 
 The gfx12 twins' kbench findings (what bounds them, what was tried, why int8 WMMA is not the answer) are in `device/rdna4`.
+
+## MXFP4 split planes on fp8 WMMA (R9700; choice `prefill.gemm.mxfp4s_f8`; kbench suite `gemm_mxfp4s`, runs 43769100540 .. 43772576318)
+- **Ceiling.** Register-only fp8 WMMA chains (`k_peak8`): 337-347 TFLOP/s with zero operands, 312 with random operands (power-capped, `k_peak8r`; ninfer measured the same effect).
+- **The kernel.** `gemm_mxfp4s_f8_m256`: 256 x 128 tiles (swiglu 256 x 64 per weight), 8 waves of 64 rows x 64 columns (swiglu: 32 rows x 64 columns of two weights), K step 128 (four
+  blocks), the bf8 decode in LDS (one `v_perm` table lookup per four weights, 2^8 held in the epilogue row factor: the same arithmetic as the ggml-layout kernel of
+  #871), the activation fragments loaded from global memory straight into registers (`a_direct`). Quark's nibble order (element 2i low) is `vector.interleave` of the low and
+  high nibble vectors; `order="split16"` is ggml's. Measured at 2048 rows (random operands, warm L2, one runner):
+
+  | GEMM (rows 2048) | staged activations (LDS) | a_direct (default) | TFLOP/s a_direct |
+  |---|---|---|---|
+  | store K 17408 N 5120 (ffn down) | 1.70 ms | 1.53 | 238 |
+  | store K 5120 N 10240 (gdn qkv) | 1.04 | 0.93 | 232 |
+  | store K 5120 N 12288 (attn q + gate) | 1.26 | 1.10 | 233 |
+  | store K 5120 N 6144 (gdn z / ffn alike) | 0.63 | 0.56 | 230 |
+  | swiglu K 5120 N 17408 (gate + up) | 3.58 | 3.22 (rf 2) | 227 |
+- **What bounds it (ablations on a_direct, 17408 x 5120 store).** No decode ALU (stores of zeros): +0.5 %, the decode is free; no barriers: slower (+10 %: the waves of a workgroup
+  desynchronise); activation fragments of K substeps 1..7 reusing substep 0's (global loads vanish): -6 %; weight fragments from LDS reusing substep 0: -5 %; no WMMA at all: 0.91 ms of the
+  1.57 (the MMA-only time at the random-data peak is ~1.1-1.2 ms, so the WMMA overlaps the rest by about two thirds).
+- **Levers that lost or tied.** Double-buffered weight stage with one barrier per step (`dbuf`): -1..-4 % only (a_direct alone -11 %). K step 256 (`kmult` 2): ties a_direct on store, -4 % on
+  swiglu. 8 rows of waves x 32 rows (`rf` 8): +100 % (spills the fragment loads); `rf` 2: ties on store, -9 % on swiglu (so swiglu uses it). 128-thread workgroups (`nt` 128): 4-7 % slower.
+  Next-step activation fragments carried in registers (`a_pf`): no gain at rf 2, spills at rf 4.
