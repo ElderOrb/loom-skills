@@ -344,6 +344,7 @@ class TagOrg(unittest.TestCase):
             rc = t.main(["--org", "o", "--tag", "v0.1.0", "--only", *[k.split("/")[1] for k in repos], *args], api=api)
         return rc, out.getvalue(), created
 
+    @unittest.skipUnless(__import__("importlib.util").util.find_spec("huggingface_hub"), "needs huggingface_hub")
     def test_statuses_and_exit_code(self):
         repos = {"o/a": {"head": "h1", "tags": {}, "pin": None}, "o/b": {"head": "h2", "tags": {"v0.1.0": "h2"}, "pin": None},
                  "o/c": {"head": "h3", "tags": {}, "pin": "0.2.0"}, "o/d": {"head": "h4", "tags": {}, "pin": None, "error": True}}
