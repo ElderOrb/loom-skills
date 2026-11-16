@@ -103,7 +103,7 @@ for i in $(seq 1 "$reps"); do
   done
 done
 
-python3 - "$out" "$suite" "$(for f in $files; do vname "$f"; done | tr '\n' ' ')" <<'PY'
+CASE_TIMING=$(q "print(1 if s.get('case_timing') else 0)") python3 - "$out" "$suite" "$(for f in $files; do vname "$f"; done | tr '\n' ' ')" <<'PY'
 import glob, json, os, statistics as S, sys
 out, suite, variants = sys.argv[1], sys.argv[2], sys.argv[3].split()
 fails = {}
@@ -116,6 +116,9 @@ for v in variants:
         for w in d.get("work_items", []):
             if w.get("state") not in (None, "completed", "succeeded", "passed") and not w.get("profile_replay"):
                 fails.setdefault(v, {})[w.get("benchmark")] = (w.get("failure") or {}).get("message", w.get("state"))
+            if os.environ.get("CASE_TIMING") == "1" and w.get("benchmark"):   # suite option "case_timing": the whole case (all its launches) per logical operation, host wall
+                try: by.setdefault("k_case_" + w["benchmark"], []).append(w["measurement"]["operation_timing_ns"]["p50"] / 1e6)
+                except KeyError: pass
             for r in w.get("profile_replay", {}).get("summary", {}).get("rows", []):
                 n = r.get("function_name", "")
                 if n.startswith("k_"): by.setdefault(n, []).append(r["timing"]["mean_ns"] / 1e6)
