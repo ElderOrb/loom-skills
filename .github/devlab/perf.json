@@ -22,7 +22,8 @@
      },
      "build_args": [
       "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+      "--prefill-r9700"
      ],
      "build": {
       "MTP_BLOCK_PREP": "",
