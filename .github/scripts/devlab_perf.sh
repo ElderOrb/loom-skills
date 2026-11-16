@@ -685,6 +685,33 @@ PY
       ) > "$out/vllmdet_$p1.log" 2>&1; tail -1 "$out/vllmdet_$p1.log"
       cp "$D/$p1"/bench/det_*.json "$out/" 2>/dev/null; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT"
       res[$s]="$(grep -h DETERMINISM "$out/vllmdet_$p1.log" | tail -1) ($(( $(date +%s) - t1 )) s incl. install+load)";;
+    cold)   # cold:V[:drop|preread|plain]: first-serve crash probe. drop = drop the page cache first (sudo -n), preread = drop then `cat` the checkpoint files, plain = as is.
+            # V served alone; a 1 s sampler (MemAvailable, Cached, serve RSS/threads, /v1/status) runs from before the serve to after the first requests; out/cold_V_MODE.*
+      mode=${p2:-drop}; ct=$out/cold_${p1}_$mode; : > "$ct.timeline"
+      free_gpu
+      if [ "$mode" != plain ]; then sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 && echo "page cache dropped" || echo "WARNING: could not drop the page cache"; fi
+      if [ "$mode" = preread ]; then
+        t1=$(date +%s); find "$HOME/.cache" "$WORK" -name '*.safetensors' -size +100M 2>/dev/null | tee "$ct.files" | xargs -r cat > /dev/null; echo "preread $(wc -l < "$ct.files") files in $(( $(date +%s) - t1 )) s"; fi
+      grep -E 'MemTotal|MemAvailable|^Cached' /proc/meminfo | tr '\n' ' '; echo
+      ( while :; do
+          sp=$(pgrep -f "loom-serve.*--listen=127.0.0.1:$PORT" | head -1)
+          echo "$(date +%T.%N | cut -c1-12) avail_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo) cached_kb=$(awk '/^Cached/{print $2}' /proc/meminfo) pid=${sp:-none} rss_anon_kb=$(awk '/RssAnon/{print $2}' /proc/${sp:-0}/status 2>/dev/null) thr=$(awk '/Threads/{print $2}' /proc/${sp:-0}/status 2>/dev/null) st=$(curl -s -m 1 $url/v1/status | head -c 400 | tr '\n' ' ')" >> "$ct.timeline"
+          sleep 1; done ) &
+      samp=$!
+      if serve_alone "$p1"; then
+        for i in 1 2 3; do
+          step "cold request $i ($mode)"; t1=$(date +%s)
+          curl -s -m 600 -w "\nHTTP %{http_code} in %{time_total}s\n" "$url/v1/chat/completions" -H 'Content-Type: application/json' \
+            -d '{"model":"'"$cardid"'","messages":[{"role":"user","content":"What is the capital of France? One word."}],"max_tokens":32,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}' 2>&1 | tail -c 600 | tee -a "$ct.requests"
+          echo "request $i after $(( $(date +%s) - t1 )) s" | tee -a "$ct.requests"
+          curl -s -m 3 $url/v1/status | head -c 1500 >> "$ct.requests"; echo >> "$ct.requests"
+        done
+      fi
+      kill $samp 2>/dev/null
+      { sudo -n dmesg -T || dmesg -T; } 2>/dev/null | grep -iE 'oom|killed process|amdgpu|kfd|segfault|general protection' | tail -n 40 > "$ct.dmesg"
+      cp "$LOOM_SERVE_STATE/perf-$p1.log" "$ct.serve.log" 2>/dev/null
+      echo "min avail_kb: $(grep -o 'avail_kb=[0-9]*' "$ct.timeline" | cut -d= -f2 | sort -n | head -1); max rss_anon_kb: $(grep -o 'rss_anon_kb=[0-9]*' "$ct.timeline" | cut -d= -f2 | sort -n | tail -1)"
+      res[$s]="$(grep -c 'HTTP 200' "$ct.requests" 2>/dev/null) of 3 requests HTTP 200 ($mode)";;
     admit)   # admit:V[:TOKENS]: ctx_admit.py on V served as configured (its execution context/pool): is a request of TOKENS (default ~ the served context) admitted? (the card's served context on the device)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "context admission $p1 ${p2:-}"
