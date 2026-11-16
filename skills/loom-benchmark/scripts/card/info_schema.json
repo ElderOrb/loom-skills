@@ -58,6 +58,18 @@
     "required_bytes": {"type": "integer", "description": "unsupported only: the memory the package needs on this GPU (weights, KV cache at the native context, headroom)"},
     "memory_bytes": {"type": "integer", "description": "loom-serve --memory_bytes on this GPU when it differs from the package value (model.json or card.memory_bytes): the GPU memory bounds the elastic pool"},
     "served_context": {"type": "integer", "description": "Tokens per request this GPU serves when its memory budget holds less KV cache than the native context needs; the same package serves it, --memory_bytes bounds the pool. Absent: the native context."},
+    "rx9070xt": {"type": "object", "required": ["tested"], "additionalProperties": false,
+                 "description": "radeon-r9700 only: the same package (gfx1201 programs) also tried on a 16 GB AMD Radeon RX 9070 XT (Navi 48, gfx1201) by loom-benchmark test_9070xt.py. The README's R9700 section says the context it was tested at. Written by make_info.py build --rx9070xt; a card covering radeon-r9700 without that evidence gets {tested: false}.",
+                 "properties": {
+                  "tested": {"type": "boolean", "description": "true: loaded on a Radeon RX 9070 XT, answered a sanity prompt and completed a request of max_context tokens; false: not tested (not run, or the package does not fit 16 GB: reason)"},
+                  "max_context": {"type": ["integer", "null"], "description": "Largest context (prompt plus answer, a multiple of 1024 up to the native context) the 9070 XT completed with the serve flags below"},
+                  "reason": {"type": "string", "description": "tested false: why (e.g. the weights do not fit 16 GB)"},
+                  "date": {"type": "string", "description": "YYYY-MM-DD of the test"},
+                  "memory_bytes": {"type": "integer", "description": "loom-serve --memory_bytes of the test"},
+                  "serve_args": {"type": "array", "items": {"type": "string"}, "description": "loom-serve flags of the test beyond --model and --device"},
+                  "execution": {"type": "object", "description": "text definition settings of the test's deployment document over the card's preset (prefill_capacity: a smaller prefill chunk whose workspace fits 16 GB beside the weights)"},
+                  "hrx_loom": {"type": "string", "description": "hrx-loom version of the test"}
+                 }},
     "remeasure": {"type": "object", "required": ["date", "source", "band", "programs_sha256", "compared_programs", "result"], "additionalProperties": false,
      "description": "A same-runner A/B (make_info.py remeasure, from strix_ab_compare.py) that re-measured this GPU on this package against the build whose performance sessions the card shows: every card metric within +-band. Sessions measured on compared_programs then stand for programs_sha256 (not marked as another build); the card says so in one line. Optional key.",
      "properties": {"date": {"type": "string"}, "source": {"type": "string"}, "band": {"type": "number"},

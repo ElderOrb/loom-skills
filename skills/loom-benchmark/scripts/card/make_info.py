@@ -9,7 +9,7 @@ byte-identical files.
   make_info.py build PKG --repo loom-fun/NAME [--org ORG] [--generator-commit SHA] [--evidence EV.json ...]
                          [--memory-bytes N] [--output DIR] [--license ID] [--report generated|attached]
                          [--gpus ID,ID] [--gpu-memory GPU=N] [--served-context GPU=N] [--fit VERDICT.json]
-                         [--from-info OLD.json] [--next-steps FILE] [--status paused|active] [-o PKG/info.json]
+                         [--from-info OLD.json] [--rx9070xt RESULT.json] [--next-steps FILE] [--status paused|active] [-o PKG/info.json]
       PKG holds model.json (and model.json.lock, llm_config.json): card values the package already implies
       (tags, the default --output, a memory_bytes in model.json) are dropped. Evidence files apply in order.
       --generator-commit: the loom-skills commit of these card scripts (default: this checkout's HEAD, or
@@ -30,6 +30,9 @@ byte-identical files.
       memory); --served-context GPU=N: the tokens per request that GPU serves when its memory holds less KV cache than
       the native context needs. --fit VERDICT.json: both, and state unsupported for a package that does not fit, for
       radeon-r9700, from the fit table (a list of {slug, w: weight bytes, kv: KV bytes at ctx tokens, ctx, need}).
+      --rx9070xt RESULT.json: loom-benchmark test_9070xt.py's result, devices.radeon-r9700.rx9070xt (tested, max_context): the
+      same package tried on a 16 GB Radeon RX 9070 XT; the README's R9700 section says the context it was tested at. Kept from
+      OLD.json unless given; a card covering radeon-r9700 without either says {tested: false}.
       --next-steps FILE: the card's next steps, one per line (a leading "- " is dropped; an empty FILE removes
       them); --status paused|active (active removes the status). Both are kept from OLD.json unless given.
 
@@ -307,7 +310,7 @@ def cmd_build(a):
         kind_of = lambda s: (old.get("sources") or {}).get(s["source"], {}).get("kind")
         for gpu, dev in old["devices"].items():
             st = gpu_state(gpu)
-            st["meta"] = {k: dev[k] for k in ("state", "required_bytes", "reason", "memory_bytes", "served_context") if k in dev}
+            st["meta"] = {k: dev[k] for k in ("state", "required_bytes", "reason", "memory_bytes", "served_context", "rx9070xt") if k in dev}
             st["data"] = "state" not in dev
             if dev.get("performance"):
                 st["baseline"] = dev["performance"]["baseline"]
@@ -448,6 +451,8 @@ def cmd_build(a):
                     m["served_context"] = ctx
                 if need is None:
                     write_gpu_preset(a.pkg, pkg["model"], fit, a.repo, ctx, gpu)
+    if a.rx9070xt:   # the R9700's programs also tried on a 16 GB Radeon RX 9070 XT (loom-benchmark test_9070xt.py)
+        gpu_state("radeon-r9700")["meta"]["rx9070xt"] = rx9070xt_entry(load_json(a.rx9070xt), a.rx9070xt)
     gpus = [g for g in GPUS if g in G or g in (a.gpus or "").split(",")]
     for g in (a.gpus or "").split(",") if a.gpus else []:
         if g and g not in GPUS:
@@ -512,6 +517,8 @@ def cmd_build(a):
                 d["memory_bytes"] = cap   # the package's budget is more than this GPU has
         elif "state" not in d:
             d["state"] = "not_measured"
+        if gpu == "radeon-r9700":   # every R9700 card says whether the 16 GB RX 9070 XT was tried
+            d.setdefault("rx9070xt", {"tested": False})
         devices[gpu] = d
     info = {"schema": SCHEMA_ID, "repo": a.repo, "card": card,
             "versions": {"card_generator": a.generator_commit, **versions},
@@ -1100,6 +1107,16 @@ def add_source_args(p, kind):
                    "else strix-halo; a DevLab job's downloaded files carry no device: pass it)")
 
 
+RX9070XT_KEYS = ("tested", "max_context", "reason", "date", "memory_bytes", "serve_args", "execution", "hrx_loom")
+
+
+def rx9070xt_entry(res, path):
+    """devices.radeon-r9700.rx9070xt from test_9070xt.py's result: tested only with a completed max_context."""
+    if not isinstance(res.get("tested"), bool) or (res["tested"] and not res.get("max_context")):
+        sys.exit(f"--rx9070xt {path}: not a test_9070xt.py result (tested true needs a max_context)")
+    return {k: res[k] for k in RX9070XT_KEYS if res.get(k) is not None}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1113,6 +1130,8 @@ def main(argv=None):
     b.add_argument("--fit", action="append", metavar="VERDICT.json", help="a fit table (repeat; GPU=PATH names the device): the device's memory_bytes, served context or "
                    "unsupported state. A path takes the device whose device.json fit_table has that file name, else radeon-r9700; 'auto' = the table of every "
                    "registry device that has one in this checkout")
+    b.add_argument("--rx9070xt", metavar="RESULT.json", help="loom-benchmark test_9070xt.py's result: the package also tried on a 16 GB Radeon RX 9070 XT "
+                   "(devices.radeon-r9700.rx9070xt; without it a card keeps --from-info's entry, else {tested: false})")
     b.add_argument("--generator-commit", help="loom-skills commit of the card scripts, or 'unknown' (default: this "
                    "checkout's HEAD)")
     b.add_argument("--evidence", nargs="*")

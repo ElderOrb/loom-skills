@@ -1,0 +1,9 @@
+{
+ "tested": true,
+ "max_context": 20480,
+ "date": "2026-11-16",
+ "memory_bytes": 15000000000,
+ "serve_args": ["--memory_bytes=15000000000", "--parameter_mode=preload", "--state_slab_bytes=4mib"],
+ "hrx_loom": "0.1.0",
+ "note": "TEST FIXTURE: made-up result, not a measurement"
+}

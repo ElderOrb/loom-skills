@@ -389,10 +389,11 @@ py "$C/make_info.py" build "$tmp/r9700_two" --from-info "$tmp/r_strix_info.json"
 mkdir -p "$tmp/r9700_none"; cp -r "$R/pkg/." "$tmp/r9700_none/"
 py "$C/make_info.py" build "$tmp/r9700_none" --from-info "$tmp/r_strix_info.json" "${R3[@]}" --gpus strix-halo,radeon-r9700 \
   --fit "$R/fit_none.json" -o "$tmp/r9700_none/info.json" 2>/dev/null
-# a staging card: R9700 results only (Strix Halo not yet re-measured), a context the R9700's 32 GB cannot hold
+# a staging card: R9700 results only (Strix Halo not yet re-measured), a context the R9700's 32 GB cannot hold, and the
+# package also tried on a 16 GB Radeon RX 9070 XT (test_9070xt.py's result: one line in the R9700 section)
 mkdir -p "$tmp/r9700_staging"; cp -r "$R/pkg/." "$tmp/r9700_staging/"
 py "$C/make_info.py" build "$tmp/r9700_staging" --repo loom-fun/unsloth-Qwen3-0.6B-loom --org loom-fun-staging "${R3[@]}" --memory-bytes 17000000000 \
-  --gpus strix-halo,radeon-r9700 --fit "$R/fit_reduced.json" --evidence "$tmp/r_gates.json" "$tmp/r_perf_sub.json" "$tmp/r_vk_sub.json" \
+  --rx9070xt "$R/rx9070xt.json" --gpus strix-halo,radeon-r9700 --fit "$R/fit_reduced.json" --evidence "$tmp/r_gates.json" "$tmp/r_perf_sub.json" "$tmp/r_vk_sub.json" \
   "$R/evidence/roofline_reduced.json" -o "$tmp/r9700_staging/info.json" 2>/dev/null
 # the same staging card, its package with a second preset for the R9700 (build.py --prefill-r9700: larger prefill chunk, same programs):
 # the R9700 Quick start fetches that preset, the Strix Halo one the default
@@ -437,7 +438,8 @@ old = c.normalize(json.load(open(sys.argv[5])))['devices']['strix-halo']
 assert two['devices']['strix-halo']['gates'] == old['gates'] and two['devices']['strix-halo']['performance'] == old['performance'], 'strix entry changed'
 assert two['devices']['radeon-r9700']['roofline']['device']['name'].startswith('AMD Radeon AI PRO R9700S'), 'roofline device'
 assert 'memory_bytes' not in two['devices']['radeon-r9700'] and 'served_context' not in two['devices']['radeon-r9700']
-assert none['devices']['radeon-r9700'] == {'state': 'unsupported', 'required_bytes': 82400000000} and c.has_results(none['devices']['strix-halo'])
+assert none['devices']['radeon-r9700'] == {'state': 'unsupported', 'required_bytes': 82400000000, 'rx9070xt': {'tested': False}} and c.has_results(none['devices']['strix-halo'])
+assert stg['devices']['radeon-r9700']['rx9070xt']['max_context'] == 20480 and two['devices']['radeon-r9700']['rx9070xt'] == {'tested': False}
 assert stg['devices']['strix-halo'] == {'state': 'not_measured'}, stg['devices']['strix-halo']
 r = stg['devices']['radeon-r9700']
 assert r['memory_bytes'] == 34000000000 and r['served_context'] == 20480 and r['performance']['sessions'][0]['over_context'], r.keys()

@@ -343,6 +343,18 @@
      "skills_commit": "0123456789abcdef0123456789abcdef01234567"
     }
    },
+   "rx9070xt": {
+    "date": "2026-11-16",
+    "hrx_loom": "0.1.0",
+    "max_context": 20480,
+    "memory_bytes": 15000000000,
+    "serve_args": [
+     "--memory_bytes=15000000000",
+     "--parameter_mode=preload",
+     "--state_slab_bytes=4mib"
+    ],
+    "tested": true
+   },
    "served_context": 20480
   },
   "strix-halo": {

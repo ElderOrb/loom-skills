@@ -343,6 +343,9 @@
      "skills_commit": "0123456789abcdef0123456789abcdef01234567"
     }
    },
+   "rx9070xt": {
+    "tested": false
+   },
    "served_context": 20480
   },
   "strix-halo": {

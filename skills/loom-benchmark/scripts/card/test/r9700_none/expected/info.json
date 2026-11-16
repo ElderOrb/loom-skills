@@ -65,6 +65,9 @@
  "devices": {
   "radeon-r9700": {
    "required_bytes": 82400000000,
+   "rx9070xt": {
+    "tested": false
+   },
    "state": "unsupported"
   },
   "strix-halo": {

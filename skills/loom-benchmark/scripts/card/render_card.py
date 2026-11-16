@@ -396,6 +396,14 @@ def gpu_line(info, g):
     return f"{GPUS[g]['name']} ({gpu_arch(g)}): the results for this package are not yet re-measured."
 
 
+def rx9070xt_line(info, g):
+    """The R9700 section's line for the same package tried on a 16 GB Radeon RX 9070 XT (info.json devices.radeon-r9700.rx9070xt), or []."""
+    t = (info["devices"].get(g) or {}).get("rx9070xt") or {}
+    if g != "radeon-r9700" or not t.get("tested") or not t.get("max_context"):
+        return []
+    return [f"This model was also tested on Radeon 9070XT at context size {t['max_context']:,}.", ""]
+
+
 def single_layout(info):
     """True for a card of one GPU with results (every other GPU, if any, is one the package does not fit): the card
     reads exactly as the cards of one GPU always did. Otherwise each GPU gets its own table and column."""
@@ -679,10 +687,11 @@ def render(d):
     bname = ((info["devices"][first].get("performance") or {}).get("baseline") or {}).get("name", "llama.cpp") if first else "llama.cpp"
     L += [f"## Performance vs {bname}", ""]
     if solo:
+        L += rx9070xt_line(info, live[0])
         perf_section(L, info, facts, feats, d, live[0], here, gpu_context(info, live[0], native))
     else:
         for g in gpus:
-            L += [f"### {gpu_title(g)}", ""]
+            L += [f"### {gpu_title(g)}", ""] + rx9070xt_line(info, g)
             if has_results(info["devices"][g]):
                 perf_section(L, info, facts, feats, d, g, here, gpu_context(info, g, native))
             else:

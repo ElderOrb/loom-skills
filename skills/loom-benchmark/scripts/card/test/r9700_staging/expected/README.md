@@ -46,6 +46,8 @@ AMD Ryzen AI Max+ 395 "Strix Halo" (gfx1151): the results for this package are n
 
 ### Radeon AI PRO R9700 (gfx1201, 32 GB)
 
+This model was also tested on Radeon 9070XT at context size 20,480.
+
 | metric | llama.cpp | Loom | margin | roofline | Loom % of roofline | llama.cpp Vulkan |
 |---|---|---|---|---|---|---|
 | decode tok/s, short prompt | 781.9 | 1023.4 | +31 % | 1535.5 | 67 % | 744.4 |

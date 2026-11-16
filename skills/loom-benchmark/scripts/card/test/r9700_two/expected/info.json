@@ -383,6 +383,9 @@
      "sha256": "e2580b65f6bbdfad305c66492242c1a5e94da94378d023f3a1a44834b9a7fef0",
      "skills_commit": "0123456789abcdef0123456789abcdef01234567"
     }
+   },
+   "rx9070xt": {
+    "tested": false
    }
   },
   "strix-halo": {
