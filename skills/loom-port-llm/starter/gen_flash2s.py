@@ -35,7 +35,10 @@ LAYERS = _c["layers"] - 1
 assert D in (256, 512) and not _c.get("attn_sinks"), "gen_flash2s: head_dim 256 or 512 without attention sinks"
 # FLASH2_B=2 (gfx12 twin; opt-in): the key-split two-heads-per-wave loop of flash2_b2.py, at head_dim 512 with 8 query heads per KV head
 # (gemma4 E2B) or head_dim 256 with 6 (Qwen3.5-class 27B: three head pairs per KV head). Other shapes keep the plain twin.
-B_MODE = "2" if os.environ.get("FLASH2_B") in ("2", "3") and os.environ.get("FLASH2_ARCH") == "rdna4" and (D, G) in ((512, 8), (256, 6)) else "0"
+B_MODE = "2" if os.environ.get("FLASH2_B") in ("2", "3", "6") and os.environ.get("FLASH2_ARCH") == "rdna4" and (D, G) in ((512, 8), (256, 6)) else "0"
+# FLASH2_B=6 (gfx12 twin, head_dim 256 / 6 query heads per KV head): the whole-tile kernel is flash2_g6.py's one-head-per-wave loop (all six
+# heads of a KV head per workgroup, no workgroup memory); the partial-tile kernel keeps the key-split loop of FLASH2_B=2.
+G6 = B_MODE == "2" and os.environ.get("FLASH2_B") == "6" and (D, G) == (256, 6) and os.environ.get("FLASH2_ROLE") != "partial"
 B_HEADS = 3 if os.environ.get("FLASH2_B") == "3" and (D, G) == (256, 6) else 2   # query heads per wave of the key-split loop (3: two head triples per KV head)
 HALF = D // 4 if B_MODE == "2" else 128   # dims per wave (key-split loop: four waves share a head pair, each owns a quarter of the dims)
 NFH = HALF // 16                  # 16-dim fragments per wave (8)
@@ -540,6 +543,10 @@ if R4:
         from flash2_b2 import rewrite_b2
         assert GW == B_HEADS and WPH == 4 and WAVES == 4
         text = rewrite_b2(text, KVH, D, PARTIAL, QH, B_HEADS)
+    if G6:
+        from flash2_g6 import g6_kernel
+        assert WINDOW >= 262144, "flash2_g6: no sliding window"
+        text = g6_kernel(KVH, G, D, QH, float(SCALE), GATE, GATE_SIG, LAYERS, POS_BYTES, json.loads(os.environ.get("FLASH2_G6_OPTS") or "{}"))
     if not B_MODE == "2" and os.environ.get("FLASH2_ABL"):   # timing ablations (flash2_ablate.py), profiling only
         from flash2_ablate import ablate
         text = ablate(text, os.environ["FLASH2_ABL"])
