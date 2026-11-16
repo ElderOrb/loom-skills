@@ -6,28 +6,6 @@
  "kit": null,
  "jobs": [
   {
-   "name": "cold",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "require_preset_r9700": true,
-   "kit": null,
-   "memory_bytes_r9700": 34000000000,
-   "runner": "r9700",
-   "variants": [
-    {
-     "name": "c104",
-     "context": 106496,
-     "execution": {
-      "context_capacity": 106496,
-      "pool_capacity": 106496
-     }
-    }
-   ],
-   "steps": [
-    "cold:c104:plain1",
-    "func:c104"
-   ]
-  },
-  {
    "name": "coldoff",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
    "require_preset_r9700": true,
@@ -45,16 +23,16 @@
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ]
+     ],
+     "build": {
+      "MTP_BLOCK_PREP": "",
+      "PROPOSE_HEAD_ROWS": "0"
+     }
     }
    ],
    "steps": [
     "cold:c104:plain1"
-   ],
-   "env": {
-    "MTP_BLOCK_PREP": "",
-    "PROPOSE_HEAD_ROWS": "0"
-   }
+   ]
   }
  ]
 }
