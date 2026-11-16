@@ -1,4 +1,4 @@
 summarize_info.py: copy of loom-fun/loom-dev summarize_info.py
-repo: https://github.com/loom-fun/loom-dev (PR #1, branch loom-card-3, open, not merged)
-commit: ee7171332ef69c59e4ef249b8695c684f625077e
+repo: https://github.com/loom-fun/loom-dev (main, after PR #2)
+commit: 436de08d286749cd71779b594d7076dc8a238685
 Refresh: copy the file from loom-dev at the new commit, update this commit line, run `python3 -I run_contract.py`.
