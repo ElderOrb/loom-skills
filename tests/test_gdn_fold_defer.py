@@ -14,14 +14,14 @@ import gen_draft  # noqa: E402
 CFG = {"gdn": {"conv_kernel": 4, "k_heads": 16, "v_heads": 48, "head_k": 128, "head_v": 128, "inner": 6144, "v_order": "grouped"},
        "recurrent_layers": [i for i in range(64) if i % 4 != 3]}
 ENV = {"GDN_ROW_LANES": "8", "GDN_COLS": "4", "LLM_DRAFT": '{"kind": "mtp"}', "GDN_CHUNK": "1"}
-KEYS = list(ENV) + ["GDN_FOLD", "GDN_FOLD_DEFER", "GDN_PEND_TAIL"]
+KEYS = list(ENV) + ["GDN_FOLD", "GDN_FOLD_DEFER"]
 
 
 def with_env(fn, **extra):
     old = {k: os.environ.get(k) for k in KEYS}
     try:
         os.environ.update(ENV)
-        for k in ("GDN_FOLD", "GDN_FOLD_DEFER", "GDN_PEND_TAIL"):
+        for k in ("GDN_FOLD", "GDN_FOLD_DEFER"):
             os.environ.pop(k, None)
         os.environ.update(extra)
         return fn()
@@ -65,23 +65,17 @@ class GdnFoldDefer(unittest.TestCase):
         self.assertEqual(tail["pend_base"], off["layer_bytes"] * NG)
         self.assertGreaterEqual(tail["pend_stride"], block)
         self.assertEqual(tail["slot_bytes"], tail["pend_base"] + tail["pend_stride"] * NG)
-        inter = geometry(GDN_FOLD="1", GDN_FOLD_DEFER="1", GDN_PEND_TAIL="0")   # after each layer's state + history
-        self.assertEqual(inter["pend_base"], off["layer_bytes"])
-        self.assertEqual(inter["pend_stride"], inter["layer_bytes"])
-        self.assertGreaterEqual(inter["layer_bytes"], off["layer_bytes"] + block)
-        self.assertEqual(inter["slot_bytes"], inter["layer_bytes"] * NG)
-        for g in (tail, inter):
-            self.assertEqual(g["layer_bytes"] % 256, 0)
+        self.assertEqual(tail["pend_base"] % 256, 0)
+        self.assertEqual(tail["pend_stride"] % 256, 0)
 
     def test_on_emits_the_defer_kernels(self):
         t = kernels(GDN_FOLD="1", GDN_FOLD_DEFER="1")
         for k in ("g_gdn_pend", "g_gdn_flush", "g_gdn_pend_clear", "g_gdn_fold", "g_gdn_recurrence_rec_rdna4"):
             self.assertIn(f'export("{k}")', t)
-        # the non-verification kernels are unchanged apart from the layer stride
+        # every other kernel is unchanged (the layer stride too)
         off = kernels(GDN_FOLD="1")
-        lb_off, lb_on = (str(g["layer_bytes"]) for g in (geometry(GDN_FOLD="1"), geometry(GDN_FOLD="1", GDN_FOLD_DEFER="1")))
-        for k in ("g_gdn_conv", "g_gdn_recurrence", "g_gdn_recurrence_rdna4", "g_gdn_fold"):
-            self.assertEqual(kernel(t, k), kernel(off, k).replace(lb_off, lb_on), k)
+        for k in ("g_gdn_conv", "g_gdn_recurrence", "g_gdn_recurrence_rdna4", "g_gdn_fold", "g_gdn_fold_hist", "g_gdn_conv_bank"):
+            self.assertEqual(kernel(t, k), kernel(off, k), k)
 
     def test_pending_fold_uses_the_fold_order(self):
         t = kernels(GDN_FOLD="1", GDN_FOLD_DEFER="1")
@@ -93,7 +87,7 @@ class GdnFoldDefer(unittest.TestCase):
             self.assertIn("%s0 = %pinit0 : vector<16xf32>", r)
             self.assertNotIn("%s0 = %init0 :", r)
             # a speculative span writes the folded state to its writer slot
-            self.assertRegex(r, r"scf\.if %rank_spec \{\n    vector\.store %pinit0, %next_view\[%si0\]")
+            self.assertIn("scf.if %rank_spec {\n    vector.store %pinit0, %next_view[%si0] {cache_scope = device, cache_temporal = non_temporal}", r)
         rec_on, rec_off = kernel(t, "g_gdn_recurrence_rec_rdna4"), kernel(kernels(GDN_FOLD="1"), "g_gdn_recurrence_rec_rdna4")
         ops = lambda s: [l.strip() for l in s.split("\n") if re.search(r"= (vector|scalar)\.(dotf|expf|softplusf|logisticf|subf)", l)]
         self.assertEqual(ops(rec_on), ops(rec_off))

@@ -51,12 +51,7 @@ def gdn_geometry(cfg):
     pend_base = pend_stride = pend_bytes = 0
     if _defer_env() and _row_lanes(DK, DV):   # decode.spec.gdn_fold_defer: the slot also holds each layer's pending fold
         pend_bytes = (PEND_HEAD + FOLD_W * (HK * DK + HV * DV + HV) * 4 + 255) // 256 * 256
-        if os.environ.get("GDN_PEND_TAIL", "1") not in ("", "0"):   # after every layer's state: the layer stride is that of the slot without it
-            pend_base, pend_stride = layer_bytes * NG, pend_bytes
-        else:                                                         # after each layer's state + history (the layer stride grows)
-            pend_base, pend_stride = layer_bytes, layer_bytes + pend_bytes
-            layer_bytes += pend_bytes
-            pend_bytes = 0
+        pend_base, pend_stride = layer_bytes * NG, pend_bytes   # after every layer's state: the layer stride is that of the slot without it
     return dict(HK=HK, HV=HV, DK=DK, DV=DV, K=K, C=C, VD=HV * DV, state_bytes=state_bytes, pend_base=pend_base, pend_stride=pend_stride,
                 pend_bytes=pend_bytes,
                 layer_bytes=layer_bytes, slot_bytes=(layer_bytes + pend_bytes) * NG)
@@ -1020,9 +1015,9 @@ def _defer_rows(text, G, CW, RL):
         text = text.replace(old, new)
     anchor = f"  %a = view.load %a_view[%vh] : view<{HV}xf32> -> f32\n"
     V = ", ".join([VR] * CW)
-    # GDN_PEND_NT (A/B instrument): the folded-state write with a non-temporal device-scope cache policy (it is read again only
-    # by the next verification, one step later: no point keeping it in L2 / MALL ahead of the weight stream)
-    nt = " {cache_scope = device, cache_temporal = non_temporal}" if os.environ.get("GDN_PEND_NT", "") not in ("", "0") else ""
+    # the folded-state write is non-temporal: it is read again only by the next verification; written through the caches it slowed the
+    # next weight matvecs by ~0.35 ms per drafted step (R9700 profile, defold exp4/exp5)
+    nt = " {cache_scope = device, cache_temporal = non_temporal}"
     code = (_pend_views(G, "reader", "dfr")
             + "  %dfr_zero32 = scalar.constant 0 : i32\n"
             "  %dfr_n32 = scf.if %fresh -> (i32) {\n    scf.yield %dfr_zero32 : i32\n  } else {\n"
@@ -1048,8 +1043,6 @@ def _defer_rows(text, G, CW, RL):
     sub(anchor, code + anchor)
     for j in J:
         sub(f"%s{j} = %init{j} : {VR}", f"%s{j} = %pinit{j} : {VR}")
-        if os.environ.get("GDN_STATE_LU", "") not in ("", "0"):   # A/B instrument: the state read is its last use in this step
-            sub(f"%g{j} = vector.load %state_view[%si{j}] :", f"%g{j} = vector.load %state_view[%si{j}] {{cache_scope = device, cache_temporal = last_use}} :")
     return text
 
 
