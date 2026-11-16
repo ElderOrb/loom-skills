@@ -4847,8 +4847,13 @@ def gdn_layer(i, b, nm, sz, par):
         # only; the `// gdn-capture:` marker places the same capture at the head of the GEMM branch: a verify epoch can pack another
         # request's prompt with the speculative spans (t >= 64), and its replay restores these inputs.
         ind = lambda t: "\n".join("  " + l for l in t.split("\n"))
-        MIX = (f"  scf.if %gemm {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
-               f"  }} else {{\n{FRONT}\n{REC0}\n{GATE}\n  }}")
+        # GDN_FUSED2_MIN (choice prefill.gdn.fused2_min): the fused pair runs in epochs of at least this many rows (64 = every GEMM epoch, 128 =
+        # %big: a 64-row epoch, i.e. a prompt or tail under 64 tokens, keeps the chain, whose spans under 64 run the exact sequential kernel)
+        fmin = int(os.environ.get("GDN_FUSED2_MIN", "64"))
+        assert fmin in (64, 128), "GDN_FUSED2_MIN: 64 or 128"
+        cond, rest = ("%gemm", f"{FRONT}\n{REC0}\n{GATE}") if fmin == 64 else ("%big", f"{FRONT}\n{REC}\n{GATE}")
+        MIX = (f"  scf.if {cond} {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
+               f"  }} else {{\n{rest}\n  }}")
     else:
         MIX = f"{FRONT}\n{REC}\n{GATE}"
     T = P + [

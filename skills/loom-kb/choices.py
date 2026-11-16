@@ -384,6 +384,10 @@ CHOICE("prefill.gdn.fused2", "bool", False, "GDN_FUSED2", devices=["rdna4"], row
            "and W = T beta e^gc K, U = T beta V, P per (value head, 32-token chunk), fully parallel) and g_gdn_fb_rdna4 (the serial state pass "
            "d = U - W S, O = e^gc Q S + P d, S update, norm-gate epilogue, conv history commit) replace conv, commit, qk_norm, the chunk kernel and "
            "norm_gate in GEMM-shape epochs; gfx11 and short epochs keep the chain (128 x 128 heads, conv 4).")
+CHOICE("prefill.gdn.fused2_min", "int", 64, "GDN_FUSED2_MIN", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_fa_rdna4", "g_gdn_fb_rdna4"],
+       from_pr="mxfp4st olayer2",
+       doc="With prefill.gdn.fused2: the smallest epoch (rows) that takes the fused pair: 64 = every GEMM-shape epoch; 128 = 64-row epochs (prompts and "
+           "tails under 64 tokens) keep the chain, whose spans under 64 tokens run the exact sequential recurrence.")
 CHOICE("prefill.gdn.ab_f8", "bool", False, "GDN_AB_F8", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_ab_gemm_mxfp4s_store_pair_f8_m256_rdna4"],
        from_pr="mxfp4st olayer2",
        doc="MXFP4 split-plane hybrids with prefill.gdn.ab_q8 and the fp8 GEMMs (gen_mxfp4s.ab_f8): in GEMM-shape epochs whose rows are a multiple of 32 "
