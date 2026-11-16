@@ -30,6 +30,7 @@ def f8_enabled():
 
 # kernel designs of the fp8 GEMM (choice prefill.gemm.mxfp4s_f8_kernel, env GEMM_MXFP4S_F8_KERNEL): name -> (store kwargs, swiglu kwargs) of gemm_mxfp4s_f8_m256
 F8_KERNELS = {"v1": ({}, {}),
+              "lvs": ({"lv": True, "lvs": 1}, {}),     # ogemm: store GEMMs -5..-6 % at 1024 rows (kbench 43869957328); the SwiGLU pair keeps v1 (lvs at rf 4 ties it)
               "lv": ({"lv": True}, {"lv": True, "rf": 4}),
               "ws": ({"ws": 4}, {"ws": 4})}
 
