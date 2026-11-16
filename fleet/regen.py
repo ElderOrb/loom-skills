@@ -597,7 +597,9 @@ def sdk_decide(st, name, e, cmp_path):
             return "hold", [f"confirmed regression > {SDK_REGRESSION:.0%} in both runs: " + ", ".join(f"{k} {a:+.1f} % / {b:+.1f} %" for k, (a, b) in both.items())] + reasons, perf, rows
         return "promote", reasons, perf, rows
     slow = {k: v for k, v in perf.items() if v is not None and v < -SDK_REGRESSION * 100}
-    gone = [k for k, v in perf.items() if v is None]
+    # a row neither side served (beyond the context both serve on this device, e.g. a 32k row on a 32k card) is not measured, not missing
+    m = cmp.get("metrics") or {}
+    gone = [k for k, v in perf.items() if v is None and (m.get(SDK_METRICS[k]) or {}).get("old") is not None]
     if slow or gone:
         return "rerun", ([f"slower than -{SDK_REGRESSION:.0%}: " + ", ".join(f"{k} {v:+.1f} %" for k, v in slow.items())] if slow else []) + \
             ([f"missing: {', '.join(gone)}"] if gone else []) + reasons, perf, rows

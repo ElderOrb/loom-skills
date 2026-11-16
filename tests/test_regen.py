@@ -341,7 +341,8 @@ class SdkAbTest(Base):
     def cmp_file(self, name, ratios, gates=None, text="MATCH", degraded=None):
         """a strix_ab_compare.py result with the given new/old ratio per row"""
         p = os.path.join(self.tmp, f"{name}.json")
-        json.dump({"job": name, "metrics": {k: {"ratio": r, "status": "PASS"} for k, r in ratios.items()}, "gate_failures": gates or [],
+        json.dump({"job": name, "metrics": {k: {"old": 100.0, "new": round(100.0 * r, 2) if r else None, "ratio": r, "status": "PASS" if r else "MISSING"}
+                               for k, r in ratios.items()}, "gate_failures": gates or [],
                    "text": {"status": text, "prompts": 3, "identical": 3 if text == "MATCH" else 1}, "degraded_runner": degraded or {}}, open(p, "w"))
         return p
 
@@ -387,6 +388,17 @@ class SdkAbTest(Base):
         with self.assertRaises(SystemExit), mock.patch.object(regen, "sh", self.gen):
             regen.main(["plan", "--base", "sdk020", "--device", "radeon-r9700", "--mode", "sdk-ab", "--old", "loom-fun", "--state", self.state, SLUG])
 
+    def test_a_row_neither_side_served_is_not_measured_not_missing(self):
+        st = self.plan_sdk()
+        e = st.jobs[JOB]
+        e.update(round=1)
+        p = os.path.join(self.tmp, "na.json")
+        json.dump({"metrics": {"decode": {"old": 100.0, "new": 101.0, "ratio": 1.01}, "prefill_8k": {"old": 100.0, "new": 100.0, "ratio": 1.0},
+                               "streams4": {"old": 100.0, "new": 100.0, "ratio": 1.0}}, "gate_failures": [], "text": {"status": "MATCH"}}, open(p, "w"))
+        self.assertEqual(regen.sdk_decide(st, JOB, e, p)[0], "promote")   # no decode_32k row on either side
+        m = json.load(open(p)); m["metrics"]["decode_32k"] = {"old": 50.0, "new": None, "ratio": None}; json.dump(m, open(p, "w"))
+        self.assertEqual(regen.sdk_decide(st, JOB, e, p)[0], "rerun")   # the old side served it, the new one did not
+
     def test_deltas_in_percent_positive_is_v02_faster(self):
         self.e(self.plan_sdk())
         e = self.collect_with(self.GOOD).jobs[JOB]
@@ -402,7 +414,7 @@ class SdkAbTest(Base):
 
     def test_missing_metric_is_a_rerun_not_a_pass(self):
         self.e(self.plan_sdk())
-        e = self.collect_with({k: v for k, v in self.GOOD.items() if k != "streams4"}).jobs[JOB]
+        e = self.collect_with({**self.GOOD, "streams4": None}).jobs[JOB]   # the old side served the row, the new one did not
         self.assertEqual(e["decision"], "rerun")
         self.assertIn("4stream", e["reason"])
 
