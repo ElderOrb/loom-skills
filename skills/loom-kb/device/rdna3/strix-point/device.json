@@ -1,0 +1,50 @@
+{
+  "schema": "loom-kb/device/1",
+  "device": "strix-point",
+  "order": 2,
+  "family": "rdna3",
+  "gfx": "gfx1150",
+  "aliases": [
+    "gfx1150",
+    "radeon-890m",
+    "890m"
+  ],
+  "name": "AMD Ryzen AI 300 \"Strix Point\" (Radeon 890M)",
+  "short": "Strix Point",
+  "memory": "15 GiB GTT (32 GB laptop)",
+  "memory_bytes": 14000000000,
+  "memory_note": "MEASURED on one laptop (HP OmniBook Ultra 14, Ryzen AI 9 HX 375, 32 GB LPDDR5X-7500): the GPU's GTT is half of RAM by default (mem_info_gtt_total 16.19e9 = 15.08 GiB), and loom-serve must stay inside it. --memory_bytes above the GTT registers, then every weight load fails. 14e9 is that machine's value; another Strix Point laptop scales with its RAM (budget = min(GTT, 60 % of RAM) - 1 GB)",
+  "card": {
+    "runner": "Strix Point",
+    "tag": "strix-point",
+    "detect": {
+      "pattern": "strix ?point|890m|880m|gfx1150",
+      "flags": "i"
+    },
+    "serve_args": []
+  },
+  "roofline": {
+    "default": "strix-point",
+    "presets": {
+      "strix-point": {
+        "name": "AMD Ryzen AI 9 HX 375 \"Strix Point\" (gfx1150, LPDDR5X-7500)",
+        "bw": 120000000000.0,
+        "flops": 23760000000000.0,
+        "note": "SPEC, not measured: LPDDR5X-7500 on a 128-bit bus = 120 GB/s peak (mclk 937 MHz x 8; HP OmniBook Ultra 14); 16 CUs x 512 x 2.9 GHz = 23.8 TFLOP/s dense f16 WMMA. Replace bw with a measured streaming rate (Strix Halo reaches 216 of 256 peak). A Strix Point laptop with DDR5-5600 SODIMMs has 89.6 GB/s peak: bandwidth is per laptop, not per chip"
+      }
+    }
+  },
+  "runner": {
+    "key": "strix-point",
+    "labels": [],
+    "note": "no DevLab runner: measured on a local laptop with .github/scripts/devlab_perf.sh (the card harness); fill labels with a runner's labels (and always include Linux) once one is registered"
+  },
+  "preset_suffix": "-strix-point",
+  "fit_table": null,
+  "prefill_flag": null,
+  "devlab_device_block": {
+    "cpu": "AMD Ryzen AI 9 HX 375 (local, {runner})",
+    "gpu": "AMD Radeon 890M (gfx1150)",
+    "os": "Linux"
+  }
+}

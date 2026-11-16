@@ -1,0 +1,86 @@
+{
+ "schema": "loom-device-results/1",
+ "device": "strix-point",
+ "gfx": "gfx1150",
+ "host": {
+  "machine": "HP OmniBook Ultra Laptop 14z-fd000",
+  "cpu": "AMD Ryzen AI 9 HX 375 w/ Radeon 890M",
+  "gpu": "Radeon 890M (gfx1150, 16 CU, PCI 1002:150e)",
+  "ram": "32 GB LPDDR5X-7500 (128-bit, 120 GB/s peak)",
+  "gtt_bytes": 16188948480,
+  "os": "Linux 7.0.0-43-generic (Ubuntu)",
+  "memlock": "8 MiB (default; see host_setup)"
+ },
+ "host_setup": {
+  "memlock": "RLIMIT_MEMLOCK must be raised (unlimited): io_uring buffer pinning fails at 8 MiB; runs below used an LD_PRELOAD that disables io_uring (IREE portable backend) because the session had no root",
+  "memory_bytes": "<= GTT (mem_info_gtt_total); elastic backing; fixed backing does not fit 262k-context presets"
+ },
+ "models": {
+  "loom-fun/unsloth-Qwen3.5-4B-loom": {
+   "card_revision": "6e8e69042ec764ba92c560d4be4f7d7c8141f2f8",
+   "sdk": "hrx-loom 0.1.0 (PyPI, hrx-system d01d1c1)",
+   "provisional": "v0.1.0 run; final pass on v0.2.0rc1 pending",
+   "date": "2026-11-16",
+   "harness": ".github/scripts/devlab_perf.sh (local, job asis)",
+   "fits": true,
+   "memory_bytes": 15000000000,
+   "min_memory_bytes_registers": "between 12e9 (fails, code 8) and 14e9 (ok)",
+   "pool_backing": "elastic",
+   "served_context": 262144,
+   "serve_flags": [],
+   "preset": "chat (card default, unmodified)",
+   "draft_depth": 3,
+   "func": "pass",
+   "gates_dev": {
+    "consistency": "PASS",
+    "spec": "PASS",
+    "agent": "PASS",
+    "agent_think_off": "PASS",
+    "golden": "PASS",
+    "compare": "PASS",
+    "vision": "PASS",
+    "sampling": "PASS"
+   },
+   "perf": {
+    "loom": {
+     "decode": 31.34,
+     "decode_2k": 29.1,
+     "decode_32k": 22.22,
+     "prefill_1k": 997.2,
+     "prefill_2k": 1010.3,
+     "streams4": 81.6,
+     "acceptance": {
+      "decode": 0.33,
+      "decode_2k": 0.42,
+      "decode_32k": 0.4
+     }
+    },
+    "llamacpp_rocm_b1374": {
+     "decode": 20.6,
+     "decode_2k": 24.95,
+     "decode_32k": 15.79,
+     "prefill_1k": 697.9,
+     "prefill_2k": 697.3,
+     "streams4": 73.9,
+     "drafting": "DFlash AtomicChat Q8_0, n-max 7"
+    },
+    "llamacpp_vulkan_b12211": {
+     "decode": 20.64,
+     "decode_2k": 22.87,
+     "decode_32k": 14.45,
+     "prefill_1k": 590.2,
+     "prefill_2k": 647.8,
+     "streams4": 68.1,
+     "drafting": "DFlash AtomicChat Q8_0, n-max 7"
+    }
+   },
+   "not_measured": [
+    "prefill_8k",
+    "prefill_16k",
+    "prefill_32k",
+    "gates quick/full",
+    "per-device preset sweep (draft_depth, prefill_capacity, MV_WG1, GEMM_M256)"
+   ]
+  }
+ }
+}
