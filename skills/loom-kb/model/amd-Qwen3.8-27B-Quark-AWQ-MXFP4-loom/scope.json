@@ -35,12 +35,7 @@
    "set": {
     "decode.mxfp4s.act_q8": true
    },
-   "evidence": "the f32 matvec of the split-plane kernels is ALU-bound at the 4-row verify of a drafted decode: DevLab R9700 run 43773677422 (one job) drafted decode 38.5 -> 53.0 tok/s, 4 streams 76.9 -> 125.5, same acceptance (0.50-0.52)",
-   "when": {
-    "devices": [
-     "rdna4"
-    ]
-   }
+   "evidence": "the f32 matvec of the split-plane kernels is ALU-bound at the 4-row verify of a drafted decode: DevLab R9700 run 43773677422 (one job) drafted decode 38.5 -> 53.0 tok/s, 4 streams 76.9 -> 125.5, same acceptance (0.50-0.52)"
   }
  ]
 }
