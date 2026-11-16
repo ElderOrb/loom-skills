@@ -7,7 +7,9 @@
 #   signal while work is in flight (one core, 0% when idle) instead of parking on the KFD interrupt. On Strix Halo
 #   firmware that keys the memory-fabric clocks to CPU activity (SMU 0x0a640600, BIOS 1.12: AMD DevLab), a parked
 #   CPU leaves FCLK/UCLK ~20% low and Loom 10-45% slower; HIP (llama.cpp) always keeps a core busy. LOOM_ACTIVE_WAIT=0
-#   keeps the SDK's default wait. A device URI that already sets completion_spin_ns is passed unchanged.
+#   drops that value; on hrx-loom 0.2.x (loom-serve has --wait_mode) it also passes --wait_mode=blocking, which forces the
+#   parked wait whatever the URI says (0.2's own default is an active 1 s window), so 0 is the true "no active wait" A/B arm;
+#   on 0.1.x it keeps the SDK's default wait (parked). A device URI that already sets completion_spin_ns is passed unchanged.
 #   The value is the SDK's maximum (uint32 ns, 4.29 s): the spin window restarts at every completion and parks once
 #   a submission runs longer than it; with 1 s, multi-second long-prefill epochs parked (Laguna 32k: 1187 vs 1539 tok/s).
 # Logs/PIDs: ~/.cache/loom-serve/NAME.{log,pid,port} (pick unique NAMEs). Stop: stop.sh NAME
@@ -25,6 +27,8 @@ esac
 venv=${VENV:-$HOME/loom/.venv}
 bin=$venv/bin; [ -d "$bin" ] || bin=$venv/Scripts   # Windows venvs use Scripts/
 py=$bin/python
+waitflag=()   # LOOM_ACTIVE_WAIT=0: SDK 0.2 default-waits actively, so parking has to be asked for
+if [ "${LOOM_ACTIVE_WAIT:-1}" = 0 ] && "$bin/loom-serve" --help 2>&1 | grep -q -- '--wait_mode'; then waitflag=(--wait_mode=blocking); fi
 state=${LOOM_SERVE_STATE:-$HOME/.cache/loom-serve}; mkdir -p "$state"   # NAME.pid / NAME.log / NAME.port live here
 # Listening sockets on $port: `ss` on Linux, `netstat -ano` (last column = Windows PID) elsewhere.
 listeners() { if command -v ss >/dev/null; then ss -ltnp | grep ":$port "; else netstat -ano -p tcp | tr -d '\r' | grep LISTENING | grep ":$port "; fi; }
@@ -41,7 +45,7 @@ if [ ${#models[@]} -gt 0 ] && [ -f "$(dirname "${models[0]#--model=}")/llm_confi
 fi
 memflag=(--memory_bytes=$mem); [ "$mem" != none ] || memflag=()   # MEMORY_BYTES=none: no cap (--pool_backing=fixed takes none)
 [ "$dev" != amdgpu ] || { [ "$mem" = none ] && [ -z "${memneed:-}" ]; } || "$(dirname "$0")/memcheck.sh" "${memneed:-$mem}" "loom-serve ${extra[*]:-} --memory_bytes=${mem}" || exit 1   # only budgets above the cap are checked
-nohup "$bin/loom-serve" --device="$dev" --listen=127.0.0.1:$port "${memflag[@]}" --workers=8 "${models[@]}" "${extra[@]}" > $state/$name.log 2>&1 &
+nohup "$bin/loom-serve" --device="$dev" --listen=127.0.0.1:$port "${memflag[@]}" "${waitflag[@]}" --workers=8 "${models[@]}" "${extra[@]}" > $state/$name.log 2>&1 &
 echo $! > $state/$name.pid; echo $port > $state/$name.port; start=$(date +%s)
 while kill -0 $(cat $state/$name.pid) 2>/dev/null; do
   st=$(curl -s -m 2 http://127.0.0.1:$port/v1/status | "$py" -c 'import sys,json; d=json.load(sys.stdin)["data"]; print(",".join(x["loom"]["registration"] for x in d) if d else "none")' 2>/dev/null)

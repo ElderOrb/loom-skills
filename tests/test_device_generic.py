@@ -58,7 +58,7 @@ class DeviceJobs(unittest.TestCase):
     def test_field_names_follow_the_runner_key(self):
         row = {"slug": "s", "w": 3e9, "kv": 40e9, "kvpp": 4e5, "ctx": 1e5, "verdict": "fits (reduced ctx)", "rx7900xtx_execution": {"prefill_capacity": 2048}}
         job, ex_ctx, old, ctx, preset = device_jobs.device_fields(RX, row, {"memory_bytes": 20e9}, 24e9)
-        self.assertEqual(preset, {"context_capacity": ctx, "pool_capacity": ctx, "prefill_capacity": 2048})
+        self.assertEqual(preset, {"context_capacity": ctx, "prefill_capacity": 2048})
         self.assertIn("require_preset_rx7900xtx", job)
         self.assertIn("memory_bytes_rx7900xtx", job)
         self.assertNotIn("memory_bytes_r9700", job)

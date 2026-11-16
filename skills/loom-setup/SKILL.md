@@ -1,6 +1,6 @@
 ---
 name: loom-setup
-description: Install AMD Loom (hrx-loom from PyPI, or a ROCm/hrx-system CI wheel) and the hrx-loom-library catalog from a cold start, fetch catalog models with loom-fetch, and start/stop/inspect loom-serve on the GPU or NPU. Use for "install loom", "loom-fetch a model", "start loom-serve for X", "is the server ready", NPU serving.
+description: Install AMD Loom (hrx-loom 0.2.0rc1 from its GitHub release, PyPI 0.1.0, or a ROCm/hrx-system CI wheel) and the hrx-loom-library catalog from a cold start, fetch catalog models with loom-fetch, and start/stop/inspect loom-serve on the GPU or NPU. Use for "install loom", "loom-fetch a model", "start loom-serve for X", "is the server ready", NPU serving.
 ---
 
 # Loom setup: install → fetch → serve
@@ -20,12 +20,14 @@ binary approval).
 ## 1. Install (≈30 s with a warm pip cache, a few minutes cold)
 
 ```bash
-bash "${LOOM_SKILL_DIR}/scripts/install_loom.sh" ~/loom            # hrx-loom 0.1.0 from PyPI (what the port templates target)
+bash "${LOOM_SKILL_DIR}/scripts/install_loom.sh" ~/loom            # hrx-loom 0.2.0rc1 from its GitHub release (sha256-verified)
+bash "${LOOM_SKILL_DIR}/scripts/install_loom.sh" ~/loom 0.1.0      # hrx-loom 0.1.0 from PyPI (packages without an SDK pin)
 bash "${LOOM_SKILL_DIR}/scripts/install_loom.sh" ~/loom latest     # newest PyPI release
 bash "${LOOM_SKILL_DIR}/scripts/install_loom.sh" ~/loom ci-latest  # newest main CI wheel (needs gh)
 ```
 The script:
-- creates `~/loom/.venv` with `pip install 'hrx-loom[hf]==0.1.0'`, which provides loom-serve,
+- creates `~/loom/.venv` with the pinned wheel (`hrx-loom[hf]` 0.2.0rc1: the release asset, checked against the release's
+  `SHA256SUMS`; it is a pre-release and not on PyPI, so no gh or token is needed), which provides loom-serve,
   loom-fetch, loom-test, loom-run, loom-compile, loom-benchmark, loom-opt, loom-format, etc.
   (Linux x86-64 glibc ≥ 2.39 and Windows 11 x86-64 wheels; no ROCm SDK needed);
 - clones `ROCm/hrx-loom-library` to `~/loom/library` and checks out the **catalog revision the
@@ -34,7 +36,7 @@ The script:
   uvicorn and httpx for the port, benchmark and UI scripts.
 
 Facts:
-- **Pin the version.** The `loom-port-llm` templates target the 0.1.0 text ABI (`text_*_v1`
+- **Pin the version.** The `loom-port-llm` templates target one text ABI (`text_*_v1`
   exports). A newer release can change it; then registration fails with a "root symbol … was
   not found" error and the templates need the diff of the upstream tiny-text fixture between
   the two tags (see `loom-port-llm`).
@@ -50,11 +52,12 @@ Facts:
 
 ### SDK pins (a package that needs another hrx-loom than the default)
 
-A package whose programs need a newer SDK than PyPI 0.1.0 carries `"sdk": {hrx_loom, source, artifact_id, hrx_system_sha,
-wheel_sha256, expires}` in its `llm_config.json` (a catalog package: from its `catalog.json`). Every script that installs
+A package carries `"sdk": {hrx_loom, source (release|pypi|ci), branch, artifact_id, hrx_system_sha,
+wheel_sha256, expires}` in its `llm_config.json`; a package **without** a pin means hrx-loom 0.1.0 (PyPI), explicitly, so
+the published v0.1.0 cards keep running on it while the installer default is 0.2.0rc1. (A catalog package takes it from its `catalog.json`.) Every script that installs
 Loom for a package calls `scripts/ensure_sdk.sh ROOT llm_config.json`, which prints the root to use: ROOT when it already is
-that wheel, else `ROOT-<artifact id>` (installed from the pinned CI artifact), so pinned and default SDKs coexist.
-`LOOM_VERSION` set explicitly overrides the pin. **CI artifacts expire (~90 days; `sdk.expires`)**, and an expired pin makes
+that wheel, else `ROOT-<artifact id | version>` (installed from the pinned wheel), so pinned and default SDKs coexist.
+`LOOM_VERSION` set explicitly overrides the pin. A `release` pin never expires; **CI artifacts expire (~90 days; `sdk.expires`)**, and an expired CI pin makes
 `ensure_sdk.sh` fail. Refresh it before then: `install_loom.sh ROOT-new ci-latest` (or `ci:ID`), rerun the gates on that SDK, then
 `python3 scripts/sdk_pin.py stamp ROOT-new FILE` for the kit's `catalog.json` and the published card's `llm_config.json`
 (republish the card; the nightly reads the pin from the card). A PyPI release, once one has the features, replaces the pin.
@@ -63,20 +66,21 @@ that wheel, else `ROOT-<artifact id>` (installed from the pinned CI artifact), s
 
 ```bash
 cd ~/loom && . .venv/bin/activate
-L=library/model
-loom-fetch $L/moonshine-ai/moonshine-streaming-tiny/model.json --list            # presets / variants (use --dry-run for sizes)
-loom-fetch $L/moonshine-ai/moonshine-streaming-tiny/model.json --preset=streaming --output=models/moonshine --no-input
-loom-fetch $L/Qwen/Qwen3.8-27B/model.json --preset=vision --output=models/qwen27b-vision --no-input --dry-run   # size check first
+loom-fetch --list                                    # the catalog of this SDK (its pinned revision: no checkout needed)
+loom-fetch --model moonshine-ai/moonshine-streaming-tiny --preset=streaming --output=models/moonshine --no-input
+loom-fetch --model Qwen/Qwen3.8-27B --preset=vision --output=models/qwen27b-vision --no-input --dry-run   # size check first
 ```
+`--model ID` reads the catalog the installed SDK names (`dist-info/loom.json`), so a model and its programs always match the
+SDK; with `--preset` omitted a multi-preset card answers `preset: select explicitly (N choices)`.
 Notes:
 - `--dry-run` prints what would be downloaded. Use it to check sizes against the
   memory budget.
 - Weights come from Hugging Face; the HF cache (`~/.cache/huggingface/hub`) is reused.
   Gated repos need the user to accept the license on the HF page first.
-- If fetch complains about a card/lock mismatch for a library model, add
-  `--origin=library=$PWD/library` so program sources resolve against your checkout.
-- Without a checkout you can fetch remote cards directly:
-  `loom-fetch https://raw.githubusercontent.com/ROCm/hrx-loom-library/main/model/<org>/<name>/model.json --preset=… --output=…`
+- To use your own library checkout instead of the SDK's catalog: `loom-fetch library/model/<org>/<name>/model.json ...`, and if
+  fetch complains about a card/lock mismatch add `--origin=library=$PWD/library` so program sources resolve against it.
+- A published card fetches by repo: `loom-fetch huggingface:loom-fun/REPO[:PRESET] --output=NAME` (the revision is resolved and
+  pinned for you; the `[hf]` extra, installed by `install_loom.sh`, provides the Hugging Face client).
 - Catalog models seen working on Strix Halo:
 
   | Model | Kind | Preset |
@@ -111,8 +115,9 @@ that ties the data-fabric and memory clocks to CPU activity (SMU `0x0a640600`, B
 holds FCLK/UCLK about 20% low while Loom's CPU sleeps, and Loom measures 10-45% slower (memory-bound kernels most).
 llama.cpp is never affected: HIP keeps a core busy launching and waiting. With the active wait, energy per token
 drops. The value is the SDK's maximum (uint32 nanoseconds, 4.29 s): the spin window restarts at each completion,
-so a shorter one parks during multi-second long-prefill submissions. `LOOM_ACTIVE_WAIT=0 serve.sh ...` keeps the
-SDK's default wait (A/B only).
+so a shorter one parks during multi-second long-prefill submissions. `LOOM_ACTIVE_WAIT=0 serve.sh ...` is the A/B arm
+without it: on 0.2.x it passes `--wait_mode=blocking` (0.2's own default is an active 1 s window); on 0.1.x the SDK's default
+(parked).
 
 ## 4. Use / inspect
 

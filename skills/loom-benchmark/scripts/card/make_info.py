@@ -254,15 +254,14 @@ def write_gpu_preset(pkg_dir, model, verdict_path, repo, ctx, gpu="radeon-r9700"
     row = fit_rows(verdict_path, gpu).get(repo.split("/")[-1])   # the fit's sizing + the serving settings the scope rules give (exec.*)
     ex = gpu_preset_execution(row, ctx, gpu) or {}
     if ctx and "context_capacity" not in ex:   # a served context below the native one (fit ctx_cap or memory): the preset serves it
-        ex.update(context_capacity=ctx, pool_capacity=min(ctx, ex.get("pool_capacity") or ctx))
+        ex.update(context_capacity=ctx)
     # the R9700 is served with fixed state backing (card_lib.GPUS "serve_args"): the pool is committed eagerly, so a default preset
     # whose pool is larger than the GPU holds beside the weights gets a smaller one (a native context that fits always fits it)
     base = next(iter(model["presets"].values()))["execution"]
     cap = fixed_pool_capacity(row, gpu=gpu)
-    pool = ex.get("pool_capacity") or base.get("pool_capacity") or base.get("context_capacity")
+    pool = ex.get("context_capacity") or base.get("context_capacity")   # SDK 0.2: the pool is sized by context_capacity (+ memory_bytes)
     if cap is not None and pool and pool > cap:
-        ex["pool_capacity"] = cap
-        ex["context_capacity"] = min(ex.get("context_capacity") or base["context_capacity"], cap)
+        ex["context_capacity"] = cap
     if not ex:
         return None
     doc = with_gpu_preset(model, ex, gpu)

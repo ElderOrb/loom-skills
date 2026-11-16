@@ -495,7 +495,23 @@ assert [k for k in ma if ma[k] != mb[k]] == ['prefill_8k'], [k for k in ma if ma
 assert mb['prefill_8k']['loom'] == round((1424.7 * 1.031 + 1424.7 * 1.034) / 2, 1) and mb['prefill_8k']['baseline'] == ma['prefill_8k']['baseline']
 assert b['remeasure']['improved']['prefill_8k']['published'] == 1424.7" "$C" "$tmp/flint/info.json" "$tmp/ratchet/info.json" \
   && echo "OK   ratchet: only the improved row's Loom value changed (mean of the two runs), llama.cpp kept" || { echo "FAIL ratchet: card values"; bad=1; }
-for n in flint d1 ratchet r9700_two r9700_none r9700_staging r9700_preset r9700_exec; do
+# hrx-loom 0.2.0rc1 packages (llm_config.json "sdk": a release pin): the Quick start installs the release wheel by URL (sha256 checked),
+# fetches `huggingface:REPO[:PRESET]`, serves the directory; sdk02: one preset, sdk02_presets: Strix Halo and R9700 presets
+SDK02='{"hrx_loom": "0.2.0rc1", "source": "release", "branch": "v0.2.0rc1", "hrx_system_sha": "0123456789abcdef0123456789abcdef01234567", "wheel_sha256": "869ba98dea2fef8355aa190f962241cf62b067b7f5788b5d59b55cebd30658cd"}'
+for pair in r9700_none:sdk02 r9700_preset:sdk02_presets; do
+  rm -rf "$tmp/${pair#*:}"; cp -r "$tmp/${pair%:*}" "$tmp/${pair#*:}"
+  py -c "import json, sys; p = sys.argv[1] + '/llm_config.json'; c = json.load(open(p)); c['sdk'] = json.loads(sys.argv[2])
+json.dump(c, open(p, 'w'), indent=1)" "$tmp/${pair#*:}" "$SDK02"
+done
+# a SDK 0.2 package's R9700 preset carries no pool_capacity (context_capacity and memory_bytes size the pool); a v0.1 preset's is clamped
+py -c "import json, sys; sys.path.insert(0, sys.argv[1]); import card_lib as c
+m = c.load_json(sys.argv[2] + '/model.json'); ex = {k: v for k, v in m['presets']['chat']['execution'].items() if k != 'pool_capacity'}
+m['presets']['chat']['execution'] = ex
+alt = c.with_gpu_preset(m, c.gpu_preset_execution({'r9700_execution': {'prefill_capacity': 2048}}, 20480))['presets']['chat-r9700']['execution']
+assert alt['context_capacity'] == 20480 and 'pool_capacity' not in alt, alt
+assert c.EXEC_KEYS == ('prefill_capacity', 'context_capacity', 'rows', 'draft_depth')" "$C" "$R/pkg" \
+  && echo "OK   r9700 preset: no pool_capacity on SDK 0.2" || { echo "FAIL r9700 preset: pool_capacity written"; bad=1; }
+for n in flint d1 ratchet r9700_two r9700_none r9700_staging r9700_preset r9700_exec sdk02 sdk02_presets; do
   files="info.json README.md REPORT.md"; [ "$n" = flint ] && files="$files flags.json roofline_rows.json"
   py "$C/render_card.py" "$tmp/$n" 2>/dev/null
   py "$C/render_card.py" "$tmp/$n" -o "$tmp/${n}_README2.md" 2>/dev/null
