@@ -1422,8 +1422,8 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %fl = check.literal value(1) : index
   %info = check.file.read.npy path("pa_info.npy") : tensor<3x4xi32>
   %y = check.file.read.npy path("pa8r_g.npy") : tensor<3x{H}xf32>
-  %x = check.file.read.npy path("pa_xe_live_lv.npy") : tensor<3x{H}xf32>
-  %ex = check.file.read.npy path("pa_xe_live_lv.npy") : tensor<3x{H}xf32>
+  %x = check.file.read.npy path("pa_xe_lv.npy") : tensor<3x{H}xf32>
+  %ex = check.file.read.npy path("pa_xe_lv.npy") : tensor<3x{H}xf32>
   %wp = check.file.read.npy path("pa_wp.npy") : tensor<{H}xf32>
   %wn = check.file.read.npy path("pa_wn.npy") : tensor<{H}xf32>
   %es8 = check.file.read.npy path("pa8_s.npy") : tensor<3x2xf32>
