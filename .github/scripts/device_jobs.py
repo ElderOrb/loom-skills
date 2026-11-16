@@ -45,6 +45,9 @@ import matched_spec  # noqa: E402
 registry = card_lib.registry
 
 
+VLLM_MAX_LEN = 40960   # vLLM's --max-model-len for the baseline rows: the longest row is a 32k document + its answer; the model's native 262144 does not fit a 32 GB GPU's KV cache
+
+
 def key_of(gpu):
     """The runner key of a device (device.json runner.key): the suffix of the job fields memory_bytes_<key> and require_preset_<key>."""
     return registry.device(gpu)["runner"]["key"]
@@ -171,6 +174,7 @@ def main(argv=None, device=None, tool="device_jobs.py"):
         jobs.append({
             **({"llama_kv_rocm": jf["llama_kv_rocm"]} if "llama_kv_rocm" in jf and st is None else {}),
             **({"vllm_spec": spec} if st and (spec := matched_spec.vllm_spec(f"loom-fun/{slug}")) else {}),
+            **({"vllm_max_len": VLLM_MAX_LEN} if st else {}),
             "name": slug.lower().replace(".", "-")[:40], **({"repeat_rows": rr} if rr > 1 else {}),
             "card": f"{a.card_org}/{slug}", **({f"require_preset_{K}": True} if preset else {}), "kit": m["kit"], **base,
             f"memory_bytes_{K}": jf[f"memory_bytes_{K}"], **({"served_context": ctx} if ctx else {}),
