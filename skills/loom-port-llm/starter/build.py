@@ -205,6 +205,9 @@ for f, k in (("draft_weights.loom", "policy"), ("head_weights.loom", "head_polic
         os.replace(os.path.join(gen, f), os.path.join(pkg, f))
         DRAFT[k] = f
         POLICIES.append(f)
+if os.path.exists(os.path.join(gen, "phead_main")):   # draft.propose.head_pieces: the proposal head's pieces are prepared by weights.loom
+    os.remove(os.path.join(gen, "phead_main"))
+    DRAFT["phead"] = "main"
 # The largest program's scratch at a prefill-sized invocation (a drafting hybrid's @llm_verify keeps every token's
 # gated delta-net inputs for the replay: 7 GB for 30 such layers at a 4096-token prefill), plus 3 GiB for the state
 # storage, slab rounding and the workspace's own rounding. A fixed 3 GiB alone refused such a card's full-context
