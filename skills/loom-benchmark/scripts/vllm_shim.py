@@ -83,7 +83,7 @@ def _derived_max_len(checkpoint, revision=None):
 class VllmEngine:
     """vLLM offline engine (imported lazily: the unit tests never load it)."""
 
-    def __init__(self, checkpoint, max_model_len, revision=None, dtype="bfloat16", seed=0, extra=None, gpu_util=0.85, images=0):
+    def __init__(self, checkpoint, max_model_len, revision=None, dtype="bfloat16", seed=0, extra=None, gpu_util=0.85, images=0, max_batched=None):
         import vllm
         self.version = vllm.__version__
         derived = _derived_max_len(checkpoint, revision)
@@ -92,6 +92,8 @@ class VllmEngine:
             max_model_len = derived
         kw = dict(model=checkpoint, dtype=dtype, seed=seed, max_model_len=max_model_len, enable_prefix_caching=False, gpu_memory_utilization=gpu_util,
                   limit_mm_per_prompt={"image": images, "video": 0}, **(extra or {}))
+        if max_batched:   # smaller encoder-cache profile: gfx1151's math SDPA fallback allocates tokens^2 for the image profile (256 GiB at 16384)
+            kw["max_num_batched_tokens"] = max_batched
         if revision:
             kw["revision"] = revision
         self.llm = vllm.LLM(**kw)
@@ -178,9 +180,10 @@ def main():
     ap.add_argument("--gpu-util", type=float, default=float(os.environ.get("VLLM_GPU_UTIL", 0.85)))
     ap.add_argument("--images", type=int, default=int(os.environ.get("VLLM_IMAGES", 0)),
                     help="images per prompt (0: text only; vLLM then skips the vision encoder's memory profile, which tries a 256 GiB attention matrix on a VL checkpoint)")
+    ap.add_argument("--max-batched-tokens", type=int, default=int(os.environ.get("VLLM_MAX_BATCHED_TOKENS", 0)) or None)
     ap.add_argument("--mock", action="store_true")
     a = ap.parse_args()
-    engine = MockEngine() if a.mock else VllmEngine(a.checkpoint, a.max_model_len, a.revision, gpu_util=a.gpu_util, images=a.images)
+    engine = MockEngine() if a.mock else VllmEngine(a.checkpoint, a.max_model_len, a.revision, gpu_util=a.gpu_util, images=a.images, max_batched=a.max_batched_tokens)
     print(f"READY vllm_shim {engine.props()}", flush=True)
     make_server(engine, a.port, a.image_placeholder).serve_forever()
 
