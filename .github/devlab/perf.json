@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st draft exp5: on top of the fast kernels (kern #879): head rows N, block Q8_0 vs Q4_0, head-only, depth, context ladder. Evidence branch: not for merge.",
+ "_comment": "mxfp4st draft exp6: the final package as the KB resolves it (model node: block Q8_0, head rows 49152) at the model's served context 106496 vs the same build with both choices off; ktest, func, dev gates, ABBA short/long rows, depth 2/4, 4 streams undrafted. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -22,228 +22,69 @@
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 65536
+     "context": 106496
     },
     {
-     "name": "r49",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "49152"
-     },
+     "name": "card",
+     "build": {},
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 65536
+     "context": 106496
     },
     {
-     "name": "r65",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "65536"
-     },
+     "name": "cardd2",
+     "build": {},
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 65536
-    },
-    {
-     "name": "r82",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 65536
-    },
-    {
-     "name": "r65q4",
-     "build": {
-      "MTP_BLOCK_PREP": "q4_0",
-      "PROPOSE_HEAD_ROWS": "65536"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 65536
-    },
-    {
-     "name": "h65",
-     "build": {
-      "MTP_BLOCK_PREP": "",
-      "PROPOSE_HEAD_ROWS": "65536"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 65536
-    },
-    {
-     "name": "r65d2",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "65536"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 65536,
+     "context": 106496,
      "execution": {
       "draft_depth": 2
      }
     },
     {
-     "name": "r65d4",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "65536"
-     },
+     "name": "cardd4",
+     "build": {},
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 65536,
+     "context": 106496,
      "execution": {
       "draft_depth": 4
      }
     },
     {
-     "name": "basec104",
-     "build": {
-      "MTP_BLOCK_PREP": "",
-      "PROPOSE_HEAD_ROWS": "0"
-     },
+     "name": "nodraft",
+     "build": {},
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 106496
-    },
-    {
-     "name": "r49c104",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "49152"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 106496
-    },
-    {
-     "name": "r49c96",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "49152"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    },
-    {
-     "name": "r65c96",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "65536"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    },
-    {
-     "name": "r65c88",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "65536"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 90112
-    },
-    {
-     "name": "r65c80",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "65536"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 81920
-    },
-    {
-     "name": "r82c72",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 73728
-    },
-    {
-     "name": "r82c64",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 65536
+     "context": 106496,
+     "execution": {
+      "draft_depth": 0
+     }
     }
    ],
    "steps": [
-    "func:basec104",
-    "func:r49c104",
-    "func:r49c96",
-    "func:r65c96",
-    "func:r65c88",
-    "func:r65c80",
-    "func:r82c72",
-    "func:r82c64",
+    "ktest:card",
+    "func:card",
+    "gates:card:dev",
     "perf:base:1",
-    "perf:r82:1",
-    "perf:r65:1",
-    "perf:r49:1",
-    "perf:r65q4:1",
-    "perf:h65:1",
-    "perf:h65:1",
-    "perf:r65q4:1",
-    "perf:r49:1",
-    "perf:r65:1",
-    "perf:r82:1",
+    "perf:card:1",
+    "perf:card:1",
     "perf:base:1",
     "perf:base:1:long",
-    "perf:r49:1:long",
-    "perf:r65:1:long",
-    "perf:r82:1:long",
-    "perf:r82:1:long",
-    "perf:r65:1:long",
-    "perf:r49:1:long",
+    "perf:card:1:long",
+    "perf:card:1:long",
     "perf:base:1:long",
-    "perf:r65d2:1",
-    "perf:r65d4:1",
-    "perf:r65d2:1:long",
-    "perf:r65d4:1:long"
+    "perf:cardd2:1",
+    "perf:cardd4:1",
+    "c4:nodraft"
    ],
    "repeat_rows": 3,
    "env": {
