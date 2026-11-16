@@ -77,6 +77,17 @@
     "decode.head.verify": "q8_0"
    },
    "evidence": "vhead (#960; DECISIONS D21, BRIEF exception: A/B + gates + decision record): the verified head reads a pieced load-time Q8_0 copy of the bf16 lm_head (int8 activations). DevLab R9700, one job each, ABBA, repeat-rows 3 (43854018704, 43864913856), with the N 65536 proposal pieces: decode 73.75 -> 75.28 / 75.23 (+2 %), decode_2k +2.4..+2.8 %, decode_32k +2.4 %; the bf16 head is no longer resident (VRAM peak 33.05 -> 31.86 GB at 98304); fresh-VM first load passes at 106496 and 114688; dev gates vs vLLM 8/8 PASS (consistency, spec, agent, agent_think_off, golden, sampling, compare, vision; 43854018704), golden matched prefix / gaps identical to the bf16-head build (14 prompts, 0 bad)."
+  },
+  {
+   "when": {
+    "devices": [
+     "rdna4"
+    ]
+   },
+   "set": {
+    "prefill.gemm.mxfp4s_f8_kernel": "lvs"
+   },
+   "evidence": "ogemm (PR mxfp4st-ogemm): the store GEMMs load both operands lane-vector (16 bytes per lane = two K substeps, same permuted K order for both) and issue the next K pair's loads before this pair's WMMAs; the SwiGLU pair stays v1. kbench gemm_mxfp4s (R9700, 4 jobs, loom-test PASS; 43869957328, 43871481153): store GEMMs at 1024 rows -4.7..-7.6 % (17408x5120 0.809 -> 0.766 ms, 5120x10240 0.467 -> 0.444, 5120x12288 0.569 -> 0.542, 5120x6144 0.292 -> 0.271, 6144x5120 0.288 -> 0.274). e2e (devlab-perf 43871204257, one job, ABBA, context 110592): prefill 1k/2k/8k/16k/32k 2216/2844/3114/2949/2648 -> 2249/2914/3147/2982/2673 tok/s (+1.5/+2.5/+1.0/+1.1/+0.9 %), decode tie (72.8 vs 72.5), ktest 85/85."
   }
  ]
 }

@@ -1,5 +1,12 @@
 # Device family rdna4: prefill (GEMM twins)
 
+## Contents
+- GEMM twins: what bounds them (`gemm_r9700`)
+- RDNA4 (gfx12) GEMM twins
+- MXFP4 split planes on fp8 WMMA (`gemm_mxfp4s`; v1, the sweeps, the second-generation designs and `lvs`)
+- Qwen3.8-27B on the R9700 (GEMM shapes, prefill outside the GEMMs)
+- MXFP4 card on the R9700: prefill outside the GEMMs
+
 ## GEMM twins: what bounds them (`gemm_r9700` kbench suite)
 
 The gfx12 twins (`gen_gemm_rdna4.py`) run the q4_k m256 kernels at 95-125 TFLOP/s on a 214 TFLOP/s register-only WMMA loop
