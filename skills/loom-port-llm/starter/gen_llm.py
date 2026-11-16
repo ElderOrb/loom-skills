@@ -5708,7 +5708,7 @@ if __name__ == "__main__":
         COMMON += MXFP4
     if any(t["type"] in SPLIT for t in TENS.values()):
         COMMON += MXFP4S
-    if any(t["type"] == "bf16" for t in TENS.values()) and "func.def inline @g_bf16_values" not in COMMON:   # bf16 embedding / head / MTP block (safetensors)
+    if (CFG.get("source") or {}).get("kind") == "safetensors" and any(t["type"] == "bf16" for t in TENS.values()) and "func.def inline @g_bf16_values" not in COMMON:   # bf16 embedding / head / MTP block (safetensors)
         COMMON += BF16_VALUES
     # A BF16 (safetensors) head with a reduced-vocabulary proposal copy: only the proposals run the int8 head (over the Q4_0 copy);
     # the verified head keeps its f32-activation kernels.
