@@ -69,14 +69,21 @@ def _nox(t, mode):
     return re.sub(r"^\s*vector\.store %cr_x\d, %x_stage_st[^\n]*\n", "", t, flags=re.M)
 
 
-GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf": 4}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}, "adr8": {"a_direct": True, "rf": 8}, "adr2": {"a_direct": True, "rf": 2}, "adr2pf": {"a_direct": True, "rf": 2, "a_pf": True}, "adn128": {"a_direct": True, "nt": 128}, "adn128r2": {"a_direct": True, "nt": 128, "rf": 2}, "adr2k2": {"a_direct": True, "rf": 2, "kmult": 2}}   # variants that are generator parameters (the levers), not text ablations
+GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf": 4}, "adbuf": {"a_direct": True, "dbuf": True}, "adk2": {"a_direct": True, "kmult": 2}, "adr8": {"a_direct": True, "rf": 8}, "adr2": {"a_direct": True, "rf": 2}, "adr2pf": {"a_direct": True, "rf": 2, "a_pf": True}, "adn128": {"a_direct": True, "nt": 128}, "adn128r2": {"a_direct": True, "nt": 128, "rf": 2}, "adr2k2": {"a_direct": True, "rf": 2, "kmult": 2},
+       # pfgemm round 1 (a swiglu entry in "sw" overrides the lever for the swiglu kernels: tn there is per weight)
+       "t128x256": {"bm": 128, "tn": 256, "sw": {"bm": 128, "tn": 128}}, "t256x256": {"bm": 256, "tn": 256, "sw": {"bm": 256, "tn": 128}},
+       "swp": {"swp": True}, "swz": {"swz": True}, "pfa2": {"pfa": 2}, "pfa1": {"pfa": 1}}   # variants that are generator parameters (the levers), not text ablations
 
 
 def kernel(mode, kn, variant="", order="pairs"):
     """variant: `lever[+ablation...]`: a GEN lever (generator parameters), then text ablations applied on top of it"""
     parts = variant.split("+") if variant else []
     lever = parts[0] if parts and parts[0] in GEN else ""
-    t = G.gemm_mxfp4s_f8_m256(mode, order=order, **GEN.get(lever, {}))
+    kw = dict(GEN.get(lever, {}))
+    sw = kw.pop("sw", None)
+    if mode == "swiglu" and sw:
+        kw.update(sw)
+    t = G.gemm_mxfp4s_f8_m256(mode, order=order, **kw)
     variant = "+".join(x for x in parts if x != lever)
     old = f"g_gemm_mxfp4s_{mode}_f8_m256_rdna4"
     t = t.replace(f'export("{old}") @{old}(', f'export("{kn}") @{kn}(')
