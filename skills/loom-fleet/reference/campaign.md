@@ -165,7 +165,7 @@ or check depends on (tool dialect, vocab size, draft kind, dense/MoE, model size
 Every campaign records `status.json` "velocity": per stage start, end, agent-hours, runner-hours and the note on what was automated or
 reused. The goal is that campaign N+1 costs clearly less than campaign N, so each campaign ends with a **dry run** of a realistic
 next one (a new device row such as gfx1100, or a new model in an existing family): perform it on a branch using only the repo's
-files, measure the effort per stage against the recorded one, and list every manual step as a defect to automate. A campaign whose
+files, measure the cost per stage (agent tokens, runner-hours) against the recorded one, and list every manual step as a defect to automate. A campaign whose
 dry run is not cheaper than its predecessor is not finished.
 
 ## Adding a device row (no new kernels)
@@ -183,6 +183,9 @@ preset suffix. Once a runner exists: fill `runner.labels` (include Linux) and `r
 
 ## Working style
 
+- **Cost model: agent tokens and DevLab runner-hours are the only currencies.** Never estimate or weigh human implementation effort or
+  complexity in briefs, task files, reports or decisions: agents write the code. Default to the most aggressive design (full fusion,
+  alternative designs in parallel); spend runner time carefully (kernel-level checks first, one batched end-to-end job per round).
 - Decide, don't escalate: pick the option you would recommend, finish, then report the outcome in a line or two.
 - When the owner cites an external project, engine or performance claim, find it (clone the repo into an on-disk work directory, read
   its benchmark docs and kernels) and answer with specifics before asking them for details.
