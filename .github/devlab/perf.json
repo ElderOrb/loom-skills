@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st draft exp3: short rows (decode, decode_2k, prefill) and 32k rows per session, repeat-rows 3; reference-free dev gates (spec = drafted vs undrafted) on q8; func at context 98304 for q8 and base. Evidence branch: not for merge.",
+ "_comment": "mxfp4st draft exp4: the prepared-copy memory cost (load-time staging = 4 lanes x the largest staged range) and head rows N (acceptance vs ms), block-only. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -21,64 +21,31 @@
      "context": 65536
     },
     {
-     "name": "h81",
+     "name": "blk",
      "build": {
-      "MTP_BLOCK_PREP": "",
-      "PROPOSE_HEAD_ROWS": "81920"
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "0"
      },
      "context": 65536
     },
     {
-     "name": "q8",
+     "name": "r33",
      "build": {
       "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
+      "PROPOSE_HEAD_ROWS": "32768"
      },
      "context": 65536
     },
     {
-     "name": "q4",
+     "name": "r49",
      "build": {
-      "MTP_BLOCK_PREP": "q4_0",
-      "PROPOSE_HEAD_ROWS": "81920"
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "49152"
      },
      "context": 65536
     },
     {
-     "name": "q8d2",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "context": 65536,
-     "execution": {
-      "draft_depth": 2
-     }
-    },
-    {
-     "name": "q8d4",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "context": 65536,
-     "execution": {
-      "draft_depth": 4
-     }
-    },
-    {
-     "name": "q8d5",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "context": 65536,
-     "execution": {
-      "draft_depth": 5
-     }
-    },
-    {
-     "name": "q8r65",
+     "name": "r65",
      "build": {
       "MTP_BLOCK_PREP": "q8_0",
       "PROPOSE_HEAD_ROWS": "65536"
@@ -86,74 +53,122 @@
      "context": 65536
     },
     {
-     "name": "q8r98",
+     "name": "r82",
      "build": {
       "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "98304"
+      "PROPOSE_HEAD_ROWS": "81920"
      },
      "context": 65536
     },
     {
-     "name": "q8c113",
+     "name": "basec96",
      "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
-     },
-     "context": 113664
-    },
-    {
-     "name": "q8c98",
-     "build": {
-      "MTP_BLOCK_PREP": "q8_0",
-      "PROPOSE_HEAD_ROWS": "81920"
+      "MTP_BLOCK_PREP": "",
+      "PROPOSE_HEAD_ROWS": "0"
      },
      "context": 98304
     },
     {
-     "name": "q8c82",
+     "name": "basec80",
+     "build": {
+      "MTP_BLOCK_PREP": "",
+      "PROPOSE_HEAD_ROWS": "0"
+     },
+     "context": 81920
+    },
+    {
+     "name": "blkc111",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "0"
+     },
+     "context": 113664
+    },
+    {
+     "name": "blkc96",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "0"
+     },
+     "context": 98304
+    },
+    {
+     "name": "r33c111",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "32768"
+     },
+     "context": 113664
+    },
+    {
+     "name": "r33c96",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "32768"
+     },
+     "context": 98304
+    },
+    {
+     "name": "r33c80",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "32768"
+     },
+     "context": 81920
+    },
+    {
+     "name": "r49c96",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "49152"
+     },
+     "context": 98304
+    },
+    {
+     "name": "r49c80",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0",
+      "PROPOSE_HEAD_ROWS": "49152"
+     },
+     "context": 81920
+    },
+    {
+     "name": "r82c80",
      "build": {
       "MTP_BLOCK_PREP": "q8_0",
       "PROPOSE_HEAD_ROWS": "81920"
      },
      "context": 81920
-    },
-    {
-     "name": "basec113",
-     "build": {
-      "MTP_BLOCK_PREP": "",
-      "PROPOSE_HEAD_ROWS": "0"
-     },
-     "context": 113664
     }
    ],
    "steps": [
-    "func:q8c113",
-    "func:q8c98",
-    "func:q8c82",
-    "func:basec113",
-    "gates:q8:dev",
+    "func:basec96",
+    "func:basec80",
+    "func:blkc111",
+    "func:blkc96",
+    "func:r33c111",
+    "func:r33c96",
+    "func:r33c80",
+    "func:r49c96",
+    "func:r49c80",
+    "func:r82c80",
+    "gates:r33:dev",
     "perf:base:1",
-    "perf:q8:1",
-    "perf:q4:1",
-    "perf:h81:1",
-    "perf:h81:1",
-    "perf:q4:1",
-    "perf:q8:1",
+    "perf:r82:1",
+    "perf:r49:1",
+    "perf:r33:1",
+    "perf:blk:1",
+    "perf:blk:1",
+    "perf:r33:1",
+    "perf:r49:1",
+    "perf:r82:1",
     "perf:base:1",
     "perf:base:1:long",
-    "perf:q8:1:long",
-    "perf:q4:1:long",
-    "perf:h81:1:long",
-    "perf:h81:1:long",
-    "perf:q4:1:long",
-    "perf:q8:1:long",
-    "perf:base:1:long",
-    "perf:q8d2:1",
-    "perf:q8d4:1",
-    "perf:q8d5:1",
-    "perf:q8r65:1",
-    "perf:q8r98:1",
-    "perf:q8:1"
+    "perf:r33:1:long",
+    "perf:r82:1:long",
+    "perf:r82:1:long",
+    "perf:r33:1:long",
+    "perf:base:1:long"
    ],
    "repeat_rows": 3,
    "env": {
