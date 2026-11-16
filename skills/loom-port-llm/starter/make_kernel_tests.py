@@ -1592,7 +1592,7 @@ def e4m3_bytes(v):
     e = np.floor(np.log2(np.maximum(a, 2.0 ** -20))).astype(np.int64)
     sub = a < 2.0 ** -6
     ef = np.where(sub, 0, e + 7); mant = np.where(sub, np.rint(a / 2.0 ** -9), np.rint((a / 2.0 ** e - 1) * 8)).astype(np.int64)
-    b = np.where(a == 0, 0, (ef << 3) | mant) | np.where(v < 0, 0x80, 0)
+    b = np.where(a == 0, 0, (ef << 3) | mant) | np.where(np.signbit(v), 0x80, 0)   # a negative value that rounds to zero is -0 (0x80), as the hardware conversion keeps it
     return b.astype(np.uint8).view(np.int8)
 from gen_mxfp4s import f8_enabled as _f8_on  # noqa: E402
 if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gemm.mxfp4s_f8: the fp8 twins of the row-scale producers (ktest_select skips them when the build has none)
