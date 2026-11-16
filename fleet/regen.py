@@ -115,17 +115,18 @@ def hf_head(repo):
 def new_sdk_pin(pin):
     """True for a package pinned to the SDK this migration moves TO (SDK_NEW or one of its release candidates): every other pin, or none, is an
     old card (0.1.0; Flash-Next's 0.2.0.dev0 CI build is its "previous" SDK)"""
-    base = SDK_NEW.split("rc")[0]
+    base = SDK_NEW.split("rc")[0]   # works for SDK_NEW = "0.2.0rc1" and, after the final release, "0.2.0" alike
     return bool(pin) and (pin == base or str(pin).startswith(base + "rc"))
 
 
 def old_sdk_revision(repo):
     """the newest commit of REPO whose llm_config.json is not pinned to the new SDK (None if there is none)"""
     from huggingface_hub import HfApi, hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
     for c in HfApi().list_repo_commits(repo):
         try:
             pin = (json.load(open(hf_hub_download(repo, "llm_config.json", revision=c.commit_id))).get("sdk") or {}).get("hrx_loom")
-        except Exception:   # a commit without llm_config.json (the repo's first commits) is not a package
+        except EntryNotFoundError:   # a commit without llm_config.json (the repo's first commits) is not a package; any other error reaches plan's die
             continue
         if not new_sdk_pin(pin):
             return c.commit_id
@@ -615,15 +616,6 @@ def sdk_decide(st, name, e, cmp_path):
         reasons.append(f"greedy text differs from v0.1 on {t['prompts'] - t['identical']}/{t['prompts']} prompts (reported)")
     if cmp.get("degraded_runner"):
         return ("hold" if e["round"] > 1 else "rerun"), [f"degraded runner (old side off the card value): {cmp['degraded_runner']}"] + reasons, perf, rows
-    prev = st.jobs[e["prev"]] if e.get("prev") else None
-    if prev and prev.get("perf"):
-        p1 = prev["perf"]
-        both = {k: (p1[k], perf[k]) for k in perf if p1.get(k) is not None and perf[k] is not None and p1[k] < -SDK_REGRESSION * 100 and perf[k] < -SDK_REGRESSION * 100}
-        perf = {k: (round((p1[k] + perf[k]) / 2, 1) if p1.get(k) is not None and perf[k] is not None else perf[k]) for k in perf}
-        if both:
-            return "hold", [f"confirmed regression > {SDK_REGRESSION:.0%} in both runs: " + ", ".join(f"{k} {a:+.1f} % / {b:+.1f} %" for k, (a, b) in both.items())] + reasons, perf, rows
-        return "promote", reasons, perf, rows
-    slow = {k: v for k, v in perf.items() if v is not None and v < -SDK_REGRESSION * 100}
     # decode, prefill and 4stream must be measured on both sides; only the long-context row may be absent on BOTH (beyond the context both serve
     # on this device, e.g. a 32k row on a 32k card): that is "not measured", not missing. A failed perf step on both sides still reruns.
     m = cmp.get("metrics") or {}
@@ -631,6 +623,17 @@ def sdk_decide(st, name, e, cmp_path):
     newonly = [k for k, v in perf.items() if v is None and (m.get(SDK_METRICS[k]) or {}).get("old") is None and (m.get(SDK_METRICS[k]) or {}).get("new") is not None]
     if newonly:
         reasons.append(f"served only on the new SDK (no old value to compare): {', '.join(newonly)}")
+    prev = st.jobs[e["prev"]] if e.get("prev") else None
+    if prev and prev.get("perf"):
+        p1 = prev["perf"]
+        both = {k: (p1[k], perf[k]) for k in perf if p1.get(k) is not None and perf[k] is not None and p1[k] < -SDK_REGRESSION * 100 and perf[k] < -SDK_REGRESSION * 100}
+        perf = {k: (round((p1[k] + perf[k]) / 2, 1) if p1.get(k) is not None and perf[k] is not None else perf[k]) for k in perf}
+        if gone:   # the confirming run measured too little to decide: hold with the reason (never a promote on missing rows)
+            return "hold", [f"missing in the confirming run: {', '.join(gone)}"] + reasons, perf, rows
+        if both:
+            return "hold", [f"confirmed regression > {SDK_REGRESSION:.0%} in both runs: " + ", ".join(f"{k} {a:+.1f} % / {b:+.1f} %" for k, (a, b) in both.items())] + reasons, perf, rows
+        return "promote", reasons, perf, rows
+    slow = {k: v for k, v in perf.items() if v is not None and v < -SDK_REGRESSION * 100}
     if slow or gone:
         return "rerun", ([f"slower than -{SDK_REGRESSION:.0%}: " + ", ".join(f"{k} {v:+.1f} %" for k, v in slow.items())] if slow else []) + \
             ([f"missing: {', '.join(gone)}"] if gone else []) + reasons, perf, rows

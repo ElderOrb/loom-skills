@@ -407,6 +407,34 @@ class SdkAbTest(Base):
         self.assertEqual(d, "promote")
         self.assertTrue(any("only on the new SDK" in x for x in r))
 
+    def test_old_sdk_revision_walks_the_history(self):
+        from huggingface_hub.utils import EntryNotFoundError
+        commits = [mock.Mock(commit_id=c) for c in ("c3", "c2", "c1", "c0")]
+        pins = {"c3": {"sdk": {"hrx_loom": regen.SDK_NEW}}, "c2": {"sdk": {"hrx_loom": "0.1.0"}}, "c1": {}}
+        def dl(repo, name, revision):
+            if revision not in pins:
+                raise EntryNotFoundError("no llm_config.json")
+            p = os.path.join(self.tmp, f"{revision}.json"); json.dump(pins[revision], open(p, "w")); return p
+        api = mock.Mock(); api.list_repo_commits.return_value = commits
+        with mock.patch("huggingface_hub.HfApi", return_value=api), mock.patch("huggingface_hub.hf_hub_download", dl):
+            self.assertEqual(regen.old_sdk_revision("o/r"), "c2")
+            pins["c2"] = {"sdk": {"hrx_loom": regen.SDK_NEW}}; pins["c1"] = {"sdk": {"hrx_loom": regen.SDK_NEW}}
+            self.assertIsNone(regen.old_sdk_revision("o/r"))   # c0 has no llm_config.json: not a package
+        def boom(repo, name, revision):
+            raise OSError("429")
+        with mock.patch("huggingface_hub.HfApi", return_value=api), mock.patch("huggingface_hub.hf_hub_download", boom):
+            with self.assertRaises(OSError):   # a Hub failure is not "no package": plan dies with a clear message instead
+                regen.old_sdk_revision("o/r")
+
+    def test_round_two_with_nothing_measured_holds(self):
+        st = self.plan_sdk()
+        e = st.jobs[JOB]
+        e.update(round=2, prev=JOB)
+        e["perf"] = {"decode": 1.0, "prefill": 1.0, "longctx": 1.0, "4stream": 1.0}
+        p = os.path.join(self.tmp, "empty.json")
+        json.dump({"metrics": {}, "gate_failures": [], "text": {"status": "MATCH"}}, open(p, "w"))
+        self.assertEqual(regen.sdk_decide(st, JOB, e, p)[0], "hold")
+
     def test_new_sdk_pins_are_the_target_and_its_candidates(self):
         base = regen.SDK_NEW.split("rc")[0]
         self.assertTrue(regen.new_sdk_pin(base) and regen.new_sdk_pin(base + "rc1"))
