@@ -27,8 +27,18 @@ HK, HV, DK, DV, K, C, VD, LB, SB = (G[k] for k in ("HK", "HV", "DK", "DV", "K", 
 RATIO = HV // HK
 
 
+ABL_A = [("nosolve",), ("nostore",), ("noconv",)]   # timing-only ablations of g_gdn_fa_rdna4 (gen_gdn_fused.phase_a abl=)
+ABL_B = [("nonorm",)]                                # of g_gdn_fb_rdna4
+
+
 def kernels():
-    return GG.gdn_kernels(CFG, EPS)
+    t = GG.gdn_kernels(CFG, EPS)
+    NG, LB_ = len(CFG["recurrent_layers"]), G["layer_bytes"]
+    for a in ABL_A:
+        t += GF.phase_a(G, NG, LB_, EPS, True, RATIO, abl=a)
+    for a in ABL_B:
+        t += GF.phase_b(G, NG, LB_, EPS, True, RATIO, abl=a)
+    return t
 
 
 def save(d, name, a):
@@ -90,6 +100,10 @@ def launches(t, ns, AT, MT, OT, WT, which):
              f"  kernel.launch @g_gdn_qk_norm[%t](%t, %s, %inv) : [index](index, {T['t']}, {T['inv']})\n"
              f"  kernel.launch @g_gdn_chunk_rdna4[%spans](%t, %spans, %layer, %meta, %orig, %arena, %s, %inv, %alpha, %beta, %a, %dt, %raw) : [index](index, index, index, {MT}, {OT}, {AT}, {T['t']}, {T['inv']}, {T['hv']}, {T['hv']}, {T['a']}, {T['a']}, {T['vd']})\n"
              f"  kernel.launch @g_gdn_norm_gate[%t](%t, %info, %raw, %nw, %z, %o) : [index](index, tensor<{t}x4xi32>, {T['vd']}, {T['nw']}, {T['vd']}, {T['vd']})\n")
+    if which.startswith("fa_"):
+        return fa.replace("@g_gdn_fa_rdna4[", f"@g_gdn_fa_rdna4_{which[3:]}[")
+    if which.startswith("fb_"):
+        return fb.replace("@g_gdn_fb_rdna4[", f"@g_gdn_fb_rdna4_{which[3:]}[")
     return {"fa": fa, "fb": fb, "fused": fa + fb, "chain": chain}[which]
 
 
@@ -166,7 +180,7 @@ def bench(d, rows):
     write_inputs(d, pfx, arrs, t)
     AT, MT, OT, WT = types(t, ns)
     out = []
-    for which in ("chain", "fused", "fa", "fb"):
+    for which in ["chain", "fused", "fa", "fb"] + ["fa_" + "_".join(a) for a in ABL_A] + ["fb_" + "_".join(a) for a in ABL_B]:
         out.append(f"""check.case public @{which}_{rows}_case {{
 {operands(pfx, t, ns, AT, MT, OT, WT, chain=which == "chain")}{launches(t, ns, AT, MT, OT, WT, which)}  check.return
 }}
