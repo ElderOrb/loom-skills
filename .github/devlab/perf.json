@@ -1,47 +1,103 @@
 {
- "_comment": "R9700 per-model measurement (r9700_jobs.py): one job per model on one R9700 runner; loom-fun-staging card, llama.cpp ROCm b1375 + Vulkan b12211 with the matched drafting, reduced-context models served at served_context. Does not fit: none",
+ "_comment": "mxfp4st fprod exp1: doubling of the producers (post-add-norm, o, f row-scale twins) and the swiglu / down GEMM, one job. Evidence branch: not for merge.",
  "runner": "r9700",
- "memory_bytes": 34000000000,
- "llama_spec": "matched",
+ "memory_bytes": 30000000000,
+ "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
+ "kit": null,
+ "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "unsloth-qwen3-0-6b-loom",
-   "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
+   "name": "amd-q38-fprod-e1",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
    "kit": null,
    "llamacpp": "b1375",
-   "llamacpp_vulkan": "b12211",
-   "memory_bytes_r9700": 17000000000,
    "variants": [
     {
-     "name": "card",
-     "build": {}
+     "name": "base",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536
     },
     {
-     "name": "nodraft",
+     "name": "dh",
      "build": {},
-     "execution": {
-      "draft_depth": 0
-     }
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536,
+     "double": [
+      "llm_advance:g_post_add_norm_rs"
+     ]
+    },
+    {
+     "name": "do",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536,
+     "double": [
+      "llm_advance:g_row_scale_f16_live_lv_f8_rdna4>\\(%t, %info, %n(VD|Q), %o,"
+     ]
+    },
+    {
+     "name": "df",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536,
+     "double": [
+      "llm_advance:g_row_scale_f16_live_lv_f8_rdna4>\\(%t, %info, %nFF, %f,"
+     ]
+    },
+    {
+     "name": "dsw",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536,
+     "double": [
+      "llm_advance:swiglu_f8_m256_rdna4"
+     ]
+    },
+    {
+     "name": "ddn",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536,
+     "double": [
+      "llm_advance:g_gemm_mxfp4s_store_f8_m256_rdna4>\\(%tp, %nH, %nFF"
+     ]
     }
    ],
    "steps": [
-    "func:card",
-    "ktest:card",
-    "gates:card:dev",
-    "perf:card:3",
-    "perf:card:3:long",
-    "c4:nodraft",
-    "llama@rocm.np1:3",
-    "llama@rocm.np1:3:long",
-    "llamac4@rocm.nodraft",
-    "llama@vulkan.np1:3",
-    "llama@vulkan.np1:3:long",
-    "llamac4@vulkan.perslot.nodraft"
+    "perf:base:1",
+    "perf:base:1:long",
+    "perf:dh:1",
+    "perf:dh:1:long",
+    "perf:do:1",
+    "perf:do:1:long",
+    "perf:df:1",
+    "perf:df:1:long",
+    "perf:dsw:1",
+    "perf:dsw:1:long",
+    "perf:ddn:1",
+    "perf:ddn:1:long",
+    "perf:base:1",
+    "perf:base:1:long"
    ]
   }
- ],
- "card": "loom-fun/unsloth-Qwen3-0.6B-loom",
- "kit": null,
- "llamacpp": "b1375",
- "llamacpp_vulkan": "b12211"
+ ]
 }
