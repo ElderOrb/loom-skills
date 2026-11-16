@@ -39,6 +39,26 @@ if [ ${#models[@]} -gt 0 ] && [ -f "$(dirname "${models[0]#--model=}")/llm_confi
     case " $pkgargs " in *" --pool_backing=fixed "*) echo "serve.sh: the package serves with $pkgargs (no --memory_bytes); committed ${pkgbytes:-unknown} bytes" >&2; mem=none; memneed=${pkgbytes:-};; esac
   fi
 fi
+# Safetensors parameter files are mapped by the runtime: on a cold page cache the first load fails with RESOURCE_EXHAUSTED (libamdf
+# memory_create ENOMEM) and the model stays "unavailable" (R9700, 19.8 GB checkpoint; notes/sdk_blockers.md). Read them once first (page cache only;
+# LOOM_SERVE_PREREAD=0 skips it). GGUF packages declare no safetensors parameter file, so they are unchanged.
+if [ "${LOOM_SERVE_PREREAD:-1}" != 0 ]; then
+  for m in "${models[@]}"; do
+    "$py" -I -c "
+import json, os, sys
+mj = sys.argv[1]; d = os.path.dirname(os.path.abspath(mj)); seen = set()
+def walk(o):
+    if isinstance(o, dict):
+        if o.get('format') == 'safetensors' and isinstance(o.get('path'), str): seen.add(os.path.join(d, o['path']))
+        for v in o.values(): walk(v)
+    elif isinstance(o, list):
+        for v in o: walk(v)
+walk(json.load(open(mj)))
+print('\n'.join(sorted(f for f in seen if os.path.isfile(f))))" "${m#--model=}" 2>/dev/null | while IFS= read -r f; do
+      t=$(date +%s); cat "$f" > /dev/null 2>&1; echo "serve.sh: pre-read $f in $(( $(date +%s) - t )) s" >&2
+    done
+  done
+fi
 memflag=(--memory_bytes=$mem); [ "$mem" != none ] || memflag=()   # MEMORY_BYTES=none: no cap (--pool_backing=fixed takes none)
 [ "$dev" != amdgpu ] || { [ "$mem" = none ] && [ -z "${memneed:-}" ]; } || "$(dirname "$0")/memcheck.sh" "${memneed:-$mem}" "loom-serve ${extra[*]:-} --memory_bytes=${mem}" || exit 1   # only budgets above the cap are checked
 nohup "$bin/loom-serve" --device="$dev" --listen=127.0.0.1:$port "${memflag[@]}" --workers=8 "${models[@]}" "${extra[@]}" > $state/$name.log 2>&1 &
