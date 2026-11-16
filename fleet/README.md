@@ -37,6 +37,7 @@ Adding a model: `python fleet/add_model.py SLUG PACKAGE_DIR --staging-revision R
     regen.py submit S.json --max-inflight auto                               # a sweep in waves (the device's runner count); a --priority plan waits one wave at most
     regen.py rerun S.json && regen.py submit S.json                          # ONE confirming -r2 job where the ratchet asks for it
     regen.py publish S.json --dry-run                                        # card-only upload to loom-fun-staging (no flag: uploads)
+    regen.py package S.json --dry-run                                        # sdk-ab: the v0.2 package to staging before ingest (SDK A/B, below)
     regen.py status S.json --status-json status.json                         # models.<slug>.<gpu> stage / verdict / run
     regen.py plan --base BRANCH --device strix-halo --device radeon-r9700 --mode sdk-ab --all --state S.json   # SDK migration A/B (below)
 
@@ -46,8 +47,20 @@ their `"sdk"`; `devlab_perf.sh` gives each SDK its own root and runs `serve.sh` 
 plus the card job's func / ktest / gates and llama.cpp baselines. `collect` writes `perf` = % delta v0.2 vs v0.1 for decode, prefill (8k), longctx
 (decode_32k) and 4stream (positive = v0.2 faster) per model and device; `status --status-json` writes it as `models.<slug>.perf.<gpu>`. A metric more
 than 3 % slower queues ONE confirming `-r2` job (`rerun`); slower than 3 % in both runs = `needs_decision` with both numbers. `ingest` builds the v0.2
-card on the staging head (publish the v0.2 package first: `make_info.py` refuses programs other than the ones the job built) and puts the delta line
-into the publish message.
+card on the staging head and puts the delta line into the publish message. Order: `plan -> submit -> poll -> collect -> package -> ingest -> publish`.
+
+`regen.py package S.json [--dry-run] [--slugs S...] [--ref REF]` is the step between `collect` and `ingest` (`make_info.py` refuses programs other than the
+ones the job built, so the v0.2 package must be on staging before the card is made). It builds the base once, CPU only (`build_fleet.py --ref origin/<base>
+--with-gen`), snapshots each staging repo at its head (small files, never weights), and replaces `program/**`, the package-root `*.loom`, `gen/**`,
+`llm_config.json` and `model.json` with the canonical build's; `tokenizer.json`, `model.json.lock` and the card files stay (the old card until `ingest`).
+`model.json` is the canonical one with the published `origins` and parameter-file `origin`s carried over; it is checked against the published one first
+(`pool_capacity`, origins and the per-GPU presets aside): a field the canonical build adds is listed, a removed or changed one stops that model. The
+upload is `publish_package.py upload` (not `--card-only`) to loom-fun-staging with `--parent-commit` = the snapshot head, so a concurrent publish fails it.
+State per job: `package = {revision, programs_sha256, base}`; a rerun skips a published model, and a head that already holds the canonical programs is
+recorded without an upload. A job whose `programs_sha256_staging.txt` differs from the canonical build's stops that model (`needs_decision`); `ingest`
+stops a model without a package, with a package whose hash is not the job's, or whose staging head no longer holds the package's programs. Default
+selection: collected, promoted jobs; `--slugs` takes named models in any stage. `--dry-run` runs everything but the upload (publish_package.py's own dry run)
+and changes no state.
 
 Time model (measured on this campaign's 86 DevLab jobs; new GPU, 35 fitting models, 3 runners, `--mode card`): about 12.8 runner-h, 6.3 h wall
 (3.8 h of it measuring), 1 engineer with about 2 h of active work. `--mode card` costs about 0.75x of an A/B job (0.6x for large models); a
