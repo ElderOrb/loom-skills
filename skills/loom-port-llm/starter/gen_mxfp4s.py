@@ -395,16 +395,16 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %tile_first = index.madd %row_origin, %n, %out_origin : index
   %tile_offset = index.scale %tile_first, {'%two' if (yf16 or ybf16) else '%four'} : index, offset -> offset
   %y_view = buffer.view %y[%tile_offset] : buffer -> view<{BM}x{TN}x{YT}, %y_layout>''')
-    for r in range(RF):
-        for c in range(cfr):
-            A(f"  %oc{r}{c}_c = index.constant {c * 16} : index\n  %oc{r}{c} = index.add %wave_col, %oc{r}{c}_c : index")
     if radd:   # every old tile first: Loom orders a global load after the stores before it, so loads interleaved with the stores would each wait for the previous store
         for r in range(RF):
             for c in range(cfr):
+                A(f"  %oc{r}{c}_c = index.constant {c * 16} : index\n  %oc{r}{c} = index.add %wave_col, %oc{r}{c}_c : index")
                 A(f"  %yo{r}{c} = vector.fragment.load<result> %y_view[{rowv[r]}, %oc{r}{c}] shape [%c16, %c16] : view<{BM}x{TN}xf32, %y_layout> -> vector<8xf32>")
     for r in range(RF):
         for c in range(cfr):
             row = rowv[r]
+            if not radd:
+                A(f"  %oc{r}{c}_c = index.constant {c * 16} : index\n  %oc{r}{c} = index.add %wave_col, %oc{r}{c}_c : index")
             if two_w:
                 A(f'''  %g{r}{c} = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>
   %u{r}{c} = vector.mulf %o1r{r}c{c}, %inv{r} : vector<8xf32>
