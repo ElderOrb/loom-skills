@@ -1417,6 +1417,43 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   check.return
 }}
 """)
+    # the paired skinny fp8 GEMM of the GDN alpha / beta projections (choice prefill.gdn.ab_f8): one launch, both weights, the first GDN layer's planes
+    from gen_mxfp4s import ab_f8_enabled as _abf8_on
+    _gl = (cfg.get("recurrent_layers") or [None])[0]
+    if _abf8_on() and _gl is not None and f"blk.{_gl}.ssm_alpha.weight" in T and T[f"blk.{_gl}.ssm_alpha.weight"].tensor_type.name.lower() in SPLIT:
+        na, nb = f"blk.{_gl}.ssm_alpha.weight", f"blk.{_gl}.ssm_beta.weight"
+        Wa, Wb = deq(na).astype(np.float64), deq(nb).astype(np.float64); n, K = Wa.shape
+        rows = 96
+        xf = e4m3_round(np.clip(rng.standard_normal((rows, K)) * 30.0, -440, 440))
+        inv = rng.uniform(0.25, 2.0, rows).astype(np.float32)
+        sc = np.stack([np.ones(rows, np.float32), inv * np.float32(2.0 ** -8)], 1)
+        ya = (xf @ Wa.T) * inv[:, None].astype(np.float64); yb = (xf @ Wb.T) * inv[:, None].astype(np.float64)
+        tag = "gm8s_ab"
+        for nm_, a_ in (("x", e4m3_bytes(xf)), ("s", sc), ("ya", ya.astype(np.float32)), ("yb", yb.astype(np.float32)), ("wa", raw(na)), ("was", raw_scale(na)),
+                        ("wb", raw(nb)), ("wbs", raw_scale(nb))):
+            save(f"{tag}_{nm_}", a_)
+        tys = {k_: ty(v_) for k_, v_ in (("wa", raw(na)), ("was", raw_scale(na)), ("wb", raw(nb)), ("wbs", raw_scale(nb)))}
+        tol = 1.0e-3 * float(max(np.abs(ya).std(), np.abs(yb).std()) + 1e-6)
+        cases.append(f"""check.case public @{tag} {{
+  %rows = check.literal value({rows}) : index
+  %k = check.literal value({K}) : index
+  %n = check.literal value({n}) : index
+  %x = check.file.read.npy path("{tag}_x.npy") : tensor<{rows}x{K}xi8>
+  %s = check.file.read.npy path("{tag}_s.npy") : tensor<{rows}x2xf32>
+  %wa = check.file.read.npy path("{tag}_wa.npy") : {tys['wa']}
+  %was = check.file.read.npy path("{tag}_was.npy") : {tys['was']}
+  %wb = check.file.read.npy path("{tag}_wb.npy") : {tys['wb']}
+  %wbs = check.file.read.npy path("{tag}_wbs.npy") : {tys['wbs']}
+  %ea = check.file.read.npy path("{tag}_ya.npy") : tensor<{rows}x{n}xf32>
+  %eb = check.file.read.npy path("{tag}_yb.npy") : tensor<{rows}x{n}xf32>
+  %ya = check.generate.fill value(0.0) : tensor<{rows}x{n}xf32>
+  %yb = check.generate.fill value(0.0) : tensor<{rows}x{n}xf32>
+  kernel.launch @g_ab_gemm_mxfp4s_store_pair_f8_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %wa, %was, %wb, %wbs, %ya, %yb) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {tys['wa']}, {tys['was']}, {tys['wb']}, {tys['wbs']}, tensor<{rows}x{n}xf32>, tensor<{rows}x{n}xf32>)
+  check.expect.close actual(%ya) expected(%ea) atol({tol:.3e}) rtol(2.0e-3) nan(different) : tensor<{rows}x{n}xf32>
+  check.expect.close actual(%yb) expected(%eb) atol({tol:.3e}) rtol(2.0e-3) nan(different) : tensor<{rows}x{n}xf32>
+  check.return
+}}
+""")
     # the row-scale producer's fp8 twin (the live-row-skip variant the prefill launches): row 1 is a padding row
     rs_k = cfg["ffn"] if isinstance(cfg.get("ffn"), int) else H
     f8_x = (rng.standard_normal((3, rs_k)) * np.array([[1e-3], [1.0], [3e5]])).astype(np.float32)

@@ -5877,6 +5877,11 @@ if __name__ == "__main__":
         from gen_mxfp4s import fuse_mxfp4s_f8 as _f8s_fuse
         text, _nf8s = _f8s_fuse(text)
         print("mxfp4s fp8 groups:", _nf8s)
+        from gen_mxfp4s import ab_f8_enabled as _abf8_on
+        if GDN and _abf8_on():   # gfx12: the GDN alpha / beta projections as one paired skinny fp8 GEMM (choice prefill.gdn.ab_f8)
+            from gen_mxfp4s import ab_f8 as _abf8
+            text, _nab = _abf8(text, GDN["HV"], H)
+            print("alpha/beta fp8 layers:", _nab)
     if seg_tokens():
         text = seg_attention(text)
     SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in text}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
