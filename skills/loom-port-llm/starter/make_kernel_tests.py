@@ -1150,11 +1150,15 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _defer_on(gdn_geometry(c
     ns = len(r1); t = sum(L for L, _, _, _ in r1); assert t == sum(L for L, _ in r2)
     qkv1 = rng.standard_normal((t, C)).astype(np.float32); qkv2 = rng.standard_normal((t, C)).astype(np.float32)
     al1, be1, al2, be2 = (rng.standard_normal((t, HV)).astype(np.float32) for _ in range(4))
-    arena = np.zeros(2 * ns * LBd // 4, np.float32); origins = np.zeros((ns, 5), np.int64)
+    # + a fourth row that forks from the first row's writer slot at its retained position (the final publishing epoch: two spans read
+    # that slot, g_gdn_flush applies its pending fold once) and publishes to a slot of its own
+    arena = np.zeros((2 * ns + 1) * LBd // 4, np.float32); origins = np.zeros((ns + 1, 5), np.int64)
     mk = lambda: np.zeros(4 + 9 * ns, np.int32)
-    m1, c1, m2, c2, m2p, m3 = mk(), mk(), mk(), mk(), mk(), mk()
-    for m in (m1, c1, m2, c2, m2p, m3):
+    m1, c1, m2, c2, m2p = mk(), mk(), mk(), mk(), mk()
+    m3 = np.zeros(4 + 9 * (ns + 1), np.int32)
+    for m in (m1, c1, m2, c2, m2p):
         m[0] = ns
+    m3[0] = ns + 1
     i1 = np.zeros((t, 4), np.int32); i2 = np.zeros((t, 4), np.int32)
     raw2 = np.zeros((t, HV, DV)); f1 = f2 = 0
     for si, ((L1, p0, a1, fork), (L2, a2)) in enumerate(zip(r1, r2)):
@@ -1183,12 +1187,15 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _defer_on(gdn_geometry(c
                 if n >= a1:
                     raw2[ti, h] = S[h] @ qs_[kh]
         f1 += L1; f2 += L2
+    w0, pr = origins[0][1], r1[0][1] + r1[0][2] + r2[0][1]
+    origins[ns] = [w0, 2 * ns * LBd, 0, pr, 0]; m3[4 + 9 * ns:4 + 9 * ns + 9] = [1, pr, 0, ns, 0, 0, 0, 0, 0]
     for n, a in [("gd_m1", m1), ("gd_c1", c1), ("gd_m2", m2), ("gd_c2", c2), ("gd_m2p", m2p), ("gd_m3", m3), ("gd_orig", origins.reshape(-1).view(np.int32)),
                  ("gd_i1", i1), ("gd_i2", i2), ("gd_arena", arena), ("gd_q1", qkv1), ("gd_q2", qkv2), ("gd_al1", al1), ("gd_be1", be1),
                  ("gd_al2", al2), ("gd_be2", be2), ("gd_raw2", raw2.reshape(t, VD).astype(np.float32))]:
         save(n, a)
     from gen_gdn import FOLD_W as _FW
-    AT = f"tensor<{2 * ns * LBd // 4}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * ns}xi32>"; IT = f"tensor<{t}x4xi32>"
+    AT = f"tensor<{(2 * ns + 1) * LBd // 4}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * (ns + 1)}xi32>"; IT = f"tensor<{t}x4xi32>"
+    M3 = f"tensor<{4 + 9 * (ns + 1)}xi32>"
     XT, ST, VT, HT = f"tensor<{t}x{C}xf32>", f"tensor<{t}x{2 * HK}xf32>", f"tensor<{t}x{VD}xf32>", f"tensor<{t}x{HV}xf32>"
     BX, BK, BD = (f"tensor<{ns * _FW}x{w}xf32>" for w in (C, HK * DK, VD + HV))
     REC = f"[index](index, index, index, {MT}, {OT}, {AT}, {XT}, {ST}, {HT}, {HT}, tensor<{HV}xf32>, tensor<{HV}xf32>, {VT}, {BD})"
@@ -1212,16 +1219,19 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _defer_on(gdn_geometry(c
   kernel.launch @g_gdn_pend[%spans, %layers](%t, %spans, {m}, {c}, %orig, {ar}, %bk{tag}, %bd{tag}) : {TWO}, {MT}, {MT}, {OT}, {AT}, {BK}, {BD})
 """
         if eager:
-            s += f"  kernel.launch @g_gdn_pend_clear[%spans, %layers](%t, %spans, {clear_m}, %orig, {ar}) : {TWO}, {MT}, {OT}, {AT})\n"
+            cs, ct = ("%spans3", M3) if clear_m == "%m3" else ("%spans", MT)
+            s += f"  kernel.launch @g_gdn_pend_clear[{cs}, %layers](%t, {cs}, {clear_m}, %orig, {ar}) : {TWO}, {ct}, {OT}, {AT})\n"
         return s
-    fin = lambda ar: (f"  kernel.launch @g_gdn_flush[%spans, %layers](%t, %spans, %m3, %orig, {ar}) : {TWO}, {MT}, {OT}, {AT})\n"
-                      f"  kernel.launch @g_gdn_pend_clear[%spans, %layers](%t, %spans, %m3, %orig, {ar}) : {TWO}, {MT}, {OT}, {AT})\n")
+    fin = lambda ar: (f"  kernel.launch @g_gdn_flush[%spans3, %layers](%t, %spans3, %m3, %orig, {ar}) : {TWO}, {M3}, {OT}, {AT})\n"
+                      f"  kernel.launch @g_gdn_pend_clear[%spans3, %layers](%t, %spans3, %m3, %orig, {ar}) : {TWO}, {M3}, {OT}, {AT})\n")
     cases.append(f"""check.case public @gdn_fold_defer {{
   %t = check.literal value({t}) : index
   %spans = check.literal value({ns}) : index
   %layer = check.literal value(0) : index
   %layers = check.literal value(1) : index
-{"".join(f'  %{n} = check.file.read.npy path("gd_{n}.npy") : {MT}{chr(10)}' for n in ("m1", "c1", "m2", "c2", "m2p", "m3"))}  %orig = check.file.read.npy path("gd_orig.npy") : {OT}
+  %spans3 = check.literal value({ns + 1}) : index
+{"".join(f'  %{n} = check.file.read.npy path("gd_{n}.npy") : {MT}{chr(10)}' for n in ("m1", "c1", "m2", "c2", "m2p"))}  %m3 = check.file.read.npy path("gd_m3.npy") : {M3}
+  %orig = check.file.read.npy path("gd_orig.npy") : {OT}
   %i1 = check.file.read.npy path("gd_i1.npy") : {IT}
   %i2 = check.file.read.npy path("gd_i2.npy") : {IT}
   %ae = check.file.read.npy path("gd_arena.npy") : {AT}
