@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st decode: which of the two node changes (Q4_0 block, gdn_copy_split 8) breaks the consistency gate.",
+ "_comment": "mxfp4st decode: Q4_0 block flake bisect: dev gates on the split-only variant, repeated consistency on q4 / base.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
@@ -7,7 +7,29 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "mxfp4-decode-bis",
+   "name": "mxfp4-decode-gs8",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "s8",
+     "build": {
+      "MTP_BLOCK_PREP": "q8_0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    }
+   ],
+   "steps": [
+    "gates:s8:dev"
+   ]
+  },
+  {
+   "name": "mxfp4-decode-cons",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
    "kit": null,
    "llamacpp": "b1375",
@@ -24,19 +46,11 @@
      "context": 98304
     },
     {
-     "name": "s8",
+     "name": "base",
      "build": {
-      "MTP_BLOCK_PREP": "q8_0"
+      "MTP_BLOCK_PREP": "q8_0",
+      "GDN_COPY_SPLIT__RDNA4": "1"
      },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    },
-    {
-     "name": "final",
-     "build": {},
      "build_args": [
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
@@ -45,10 +59,32 @@
     }
    ],
    "steps": [
-    "consistency:q4:1",
-    "consistency:s8:1",
-    "consistency:final:1",
-    "ktest:final"
+    "consistency:q4:3",
+    "consistency:base:3",
+    "consistency:q4:3",
+    "consistency:base:3"
+   ]
+  },
+  {
+   "name": "mxfp4-decode-gq4",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@7cadcaa61a84d708ce67caefda32feccfa98548b",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "q4",
+     "build": {
+      "GDN_COPY_SPLIT__RDNA4": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    }
+   ],
+   "steps": [
+    "gates:q4:dev"
    ]
   }
  ]
