@@ -84,6 +84,10 @@ The gfx12 twins' kbench findings (what bounds them, what was tried, why int8 WMM
     both operands take K in the same permuted order, exact) cut SALU 409 -> 175 and waits 238 -> 98 and are 3-7 % SLOWER.
   - **`lvs` (adopted design): `lv` + the next K pair's loads issued before this pair's WMMAs.** Store GEMMs at 1024 rows -4.7..-7.6 % in four jobs (17408 x 5120 0.809 -> 0.766 ms,
     5120 x 10240 0.467 -> 0.444, x 12288 0.569 -> 0.542, x 6144 0.292 -> 0.271, 6144 x 5120 0.288 -> 0.274); the SwiGLU pair keeps v1 (its `lvs` at 64-row waves ties, at 32-row waves it spills).
+    On the card (node with the choice set, DevLab 43875399332 / 43879845256): prefill +0.6 / +1.5 / +1.6 / +1.6 / +1.4 % at 1k / 2k / 8k / 16k / 32k, decode tie, ktest and
+    golden / compare / spec / agent / vision / sampling gates pass, but the consistency gate FAILS deterministically (twice in one job; the base passes in the same job):
+    a 392-token prompt run alone vs alone with 240 prefix-cached tokens picks '."' vs '.' at generated token 19 (reference gap 1.5 nat > the 1-nat near-tie rule).
+    The changed summation order inside the fp8 WMMA moves a near-tie of the two (lossy fp8) prefill paths. Not enabled on the node: opt-in only.
   - Lost: wave-specialized producer / consumer (`ws`: 4 decode waves + 8 WMMA waves, double-buffered LDS, one barrier per step) +8..19 % (the VGPR budget is per kernel:
     12 waves x 200 VGPR = 2 workgroups / WGP = 16 WMMA waves instead of 24); 16-wave workgroups with 8 accumulators per wave (122-176 VGPR, 32 waves / WGP) tie or +8..17 %;
     next-step activation prefetch before the barrier (`lvpf`) +1..5 %; K step 256 with `lvs` tie. Rejected from the ISA without a run: `scf.for pipeline(2)` (duplicates the step,
