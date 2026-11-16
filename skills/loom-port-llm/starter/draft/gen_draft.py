@@ -826,6 +826,9 @@ def copy_split():
 
 
 def copy_split_twin(text, name, spl):
+    for anchor in (f'kernel.def export("{name}") @{name}(', "  kernel.launch.config workgroups(%tokens, %c1, %c1)",
+                   "  %token_id = kernel.workgroup.id<x> : index\n", "  %lane = index.assume %lane_id [range(%lane_id, 0, 255)] : index\n"):
+        assert text.count(anchor) == 1, f"{name}: the copy kernel's template moved ({anchor.strip()[:40]}): the twin would launch or index wrongly"
     t = text.replace(f'kernel.def export("{name}") @{name}(', f'kernel.def target(@rdna4) export("{name}_rdna4") @{name}_rdna4(', 1)
     t = t.replace("  kernel.launch.config workgroups(%tokens, %c1, %c1)",
                   f"  %c_spl = index.constant {spl} : index\n  %tokens_spl = index.mul %tokens, %c_spl : index\n  kernel.launch.config workgroups(%tokens_spl, %c1, %c1)", 1)
