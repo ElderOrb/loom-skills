@@ -13,6 +13,7 @@ the repo root; `campaign.md`, `targeted-fix.md` and `architecture.md` are in `sk
 - Methodology, baselines, quant, models, gates
 - Publishing and reporting
 - Hygiene
+- Optimization
 - Rules that are project history, not practice
 
 ## Goals and measures
@@ -118,6 +119,18 @@ the repo root; `campaign.md`, `targeted-fix.md` and `architecture.md` are in `sk
 | 62 | Big files never in `/tmp` or a scratchpad (RAM); work dirs on disk; delete outputs | brief; owner rule | `campaign.md` "Hygiene"; `skills/loom/SKILL.md` "Hard rules" |
 | 63 | Watch MemAvailable and anonymous RSS; one build at a time; memory-capped scopes | brief; owner rule | `campaign.md` "Hygiene"; `skills/loom/SKILL.md` "Hard rules" |
 | 64 | Regenerable outputs stay out of commits; verify regeneration byte for byte | owner rule | `campaign.md` "Hygiene"; `targeted-fix.md` section 2 |
+
+## Optimization
+
+| # | Rule | Source | Where |
+|---|---|---|---|
+| 65 | Real profilers first (HAL per-dispatch device timestamps); doubling/ablation only as a cross-check, with its known distortions | owner rule | `skills/loom-optimize/SKILL.md` step 2; `skills/loom-kb/topic/optimize-loop.md` "Profiling", "Ablation: known distortions" |
+| 66 | Bucket budgets from the leader's number; judge the bucket, not each kernel | owner rule | `skills/loom-optimize/SKILL.md` steps 1 and 3 |
+| 67 | Fuse by default, un-fuse only where measured; price a design against its family's profiled share | owner rule | `skills/loom-optimize/SKILL.md` step 4; `skills/loom-kb/topic/optimize-loop.md` "Pricing a design" |
+| 68 | Perf-only iteration rounds, gates once on the winner, cached reference engines, A/B base pinned to a sha | owner rule | `skills/loom-optimize/SKILL.md` steps 6 and 7; `campaign.md` "DevLab" |
+| 69 | Cost = agent tokens + runner time only, never human effort; strongest model tier for design-heavy lanes, alternative designs in parallel | owner rule | `skills/loom-optimize/SKILL.md` "Cost model"; `campaign.md` "Roles", "Working style" |
+| 70 | Keep going past a losing design: a lane ends when every lever has a measured stop reason; stop rules with numbers | owner rule | `skills/loom-optimize/SKILL.md` "Keep going", "When to stop a metric" |
+| 71 | Every technique tried (win or loss) is a row of the technique log; facts go to the KB node; SDK limits to topic `sdk` | owner rule | `skills/loom-optimize/SKILL.md` step 8; `skills/loom-kb/topic/sdk.md` |
 
 ## Rules that are project history, not practice
 

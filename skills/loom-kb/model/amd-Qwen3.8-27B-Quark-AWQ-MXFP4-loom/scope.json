@@ -32,6 +32,7 @@
     "prefill.attn.flash2_trim": true,
     "hybrid.gdn.chunk": true,
     "prefill.attn.flash2_b2": "2",
+    "prefill.attn.flash2_b2_fm": true,
     "prefill.gdn.fused2": true,
     "prefill.gdn.ab_q8": true,
     "prefill.gdn.ab_f8": true,

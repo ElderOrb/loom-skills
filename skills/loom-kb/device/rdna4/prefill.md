@@ -76,8 +76,8 @@ The gfx12 twins' kbench findings (what bounds them, what was tried, why int8 WMM
   - f16 output (`yf16`, halving the output write): store +3 % slower at 2048 rows, ties at 1024: the f32 write is not a bound (the swiglu consumer saving is therefore not worth a producer change).
   - LDS pitch of both stages (`pad` bytes after each 128-value row): 16 (default) and 32 / 80 / 112 tie; 0 is 2.3-4x slower, 8 +25 %, 48 +7 %, 64 +36 %: the pitch sets the bank mapping of the fragment reads, 144 B is already on the good side.
   - Occupancy and wave quantization: at 1024 rows the 17408 x 5120 store has 160 tiles (1.7 x 96 resident workgroups) and still runs at the same TFLOP/s as at 2048 rows (234 vs 238), so the tail is not a loss. Remaining gap to the 312 TFLOP/s random-data peak (76 %): WMMA issue overlaps the staging and fragment traffic only partly (ablations above); every restructuring tried moves the time by under 3 %.
-- **Second-generation designs (ogemm, kbench runs 43864345377 .. 43871481153; choice `prefill.gemm.mxfp4s_f8_kernel`).** Read the ISA first: `loom-compile --format=amdgpu-hsaco`
-  then ROCm's `llvm-objdump -d --mcpu=gfx1201` (any ROCm / TheRock LLVM) and `llvm-readelf --notes` (VGPR, LDS, scratch). The v1 loop per 128-K step: 128 WMMA, ~409 SALU
+- **Second-generation designs (ogemm, kbench runs 43864345377 .. 43871481153; choice `prefill.gemm.mxfp4s_f8_kernel`).** Read the ISA first (recipe: topic `optimize-loop`, "Local pre-flight").
+  The v1 loop per 128-K step: 128 WMMA, ~409 SALU
   (a 64-bit address chain per activation fragment load), 238 waits, every A load waited on right after the barrier.
   - Zero operands make the GEMM 14-17 % faster (register-only WMMA: 19 %); no WMMA at all: 58 % of the time. The kernel is mostly bound by WMMA toggle power at the 300 W cap;
     instruction count alone is not a lever: lane-vector loads (`lv`: one 16-byte load per lane covers two K substeps, A `global_load_b128` with immediate offsets, B `ds_load_b128`;
