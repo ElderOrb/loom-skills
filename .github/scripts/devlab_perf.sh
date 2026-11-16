@@ -277,7 +277,9 @@ for v in $variants; do
     kit_for "$v" "$(qv "$v" "print(v.get('ref') or '')")" || exit 1
     extra=$(qv "$v" "print(' '.join(v.get('build_args') or []) + (f\" --context {v['context']} --pool {v['context']}\" if v.get('context') else ''))")   # "context": N = the served context of a reduced-context model (later flags win)
     envs=$(qv "$v" "print(' '.join(f'{k}={x}' for k, x in (v.get('build') or {}).items()))")
-    step "build $v: env $envs; build.py $cardargs $extra"
+    # the card's slug (its repo name): the knowledge base's model node of the package (exec.*, the kernel choices of its format) applies to a rebuild only with it
+    slugarg=""; grep -q '"--slug"' "${KIT[$v]}/build.py" && slugarg="--slug ${repo##*/}"
+    step "build $v: env $envs; build.py $slugarg $cardargs $extra"
     # "config": generator-config overrides for this variant's rebuild (e.g. {"layers": 12}: a truncated model; the step
     # time minus the layer-proportional part is the per-step fixed cost; outputs are garbage, only timing counts)
     vcfg=$(qv "$v" "print(json.dumps(v.get('config') or {}))")
@@ -285,7 +287,7 @@ for v in $variants; do
 import json, sys
 c = json.load(open(sys.argv[1])); c.update(json.loads(sys.argv[3])); json.dump(c, open(sys.argv[2], "w"), indent=1)
 EOF2
-    ( cd "${KIT[$v]}" && env $envs ${KBV[$v]:+LOOM_KB_ROOT=${KBV[$v]}} "$T" build.py "$D/$v/cfg.json" "$pkg" --tokenizer "$card/tokenizer.json" --model-id "$cardid" $cardargs $extra ) > "$out/build_$v.log" 2>&1 \
+    ( cd "${KIT[$v]}" && env $envs ${KBV[$v]:+LOOM_KB_ROOT=${KBV[$v]}} "$T" build.py "$D/$v/cfg.json" "$pkg" --tokenizer "$card/tokenizer.json" --model-id "$cardid" $slugarg $cardargs $extra ) > "$out/build_$v.log" 2>&1 \
       || { tail -30 "$out/build_$v.log"; echo "FAIL: build $v"; exit 1; }
     tail -3 "$out/build_$v.log"
   else
@@ -440,11 +442,10 @@ vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned 
   "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
   [ -x "$B/vllm_server.sh" ] || { echo "no vllm_server.sh in this checkout (vLLM reference engine, PR #875)"; return 1; }
   export VLLM_STATE=$out
-  local vpy venv ml spec ck rev args
+  local vpy ml spec ck rev args
   vpy=$("$B/vllm_server.sh" --install | tail -1) || return 1
   [ -x "$vpy" ] || { echo "vLLM install failed: $vpy"; return 1; }
-  venv=${vpy%/bin/python}
-  export LD_LIBRARY_PATH=$(ls -d "$venv"/extra/usr/lib/*/ "$venv"/extra/usr/lib/*/openmpi/lib 2>/dev/null | tr '\n' ':')${LD_LIBRARY_PATH:-}
+  eval "$("$B/vllm_server.sh" --env)"   # the venv's own environment (MPI libs, the HIP dev packages Quark's MXFP4 emulation JIT-compiles with): one place, vllm_server.sh
   ml=$(q "print(j.get('vllm_max_len') or j.get('served_context') or 65536)")
   spec=$(q "print(j.get('vllm_spec') or '')")
   read -r ck rev < <("$T" -c "import json; s=json.load(open('$card/llm_config.json'))['source']; print(s['repo'], s.get('revision') or 'main')")
