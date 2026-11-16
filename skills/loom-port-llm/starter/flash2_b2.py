@@ -257,11 +257,13 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     %valid = vector.andi %causal, %winok : vector<8xi1>""")
         if fm:   # fixed reference (S^T came out of the MMAs shifted by -m0, log2 units): no running max, no exchange, no rescale
             for hh, s_ in enumerate(SUF):
-                A(f"""    %masked{s_} = vector.select %valid, %s{ABC[hh]}_f, %neg_v : vector<8xf32>
+                ovl = opts.get("ovl")   # overflow tracked as the largest per-lane block sum (> 2^15 falls back: conservative), not the max score
+                A(f"""    %masked{s_} = vector.select %valid, %s{ABC[hh]}_f, %neg_v : vector<8xf32>""" + ("" if ovl else f"""
     %lmax{s_} = vector.reduce<maxnumf> %masked{s_}, %neg_big : vector<8xf32>, f32
-    %m{s_}_new = scalar.maxnumf %m{s_}, %lmax{s_} : f32
+    %m{s_}_new = scalar.maxnumf %m{s_}, %lmax{s_} : f32""") + f"""
     %p{s_} = vector.exp2f<afn> %masked{s_} : vector<8xf32>
-    %ls{s_} = vector.reduce<addf> %p{s_}, %zero_f : vector<8xf32>, f32
+    %ls{s_} = vector.reduce<addf> %p{s_}, %zero_f : vector<8xf32>, f32""" + (f"""
+    %m{s_}_new = scalar.maxnumf %m{s_}, %ls{s_} : f32""" if ovl else "") + f"""
     %l{s_}_new = scalar.addf %l{s_}, %ls{s_} : f32
     %pt_h{s_} = vector.fptrunc %p{s_} : vector<8xf32> to vector<8xf16>
     vector.store %pt_h{s_}, %pl_view[%c0_i, %c{hh}_i, %fb_wv, %lane, %c0] : vector<8xf16>, view<1x{nh}x{waves}x32x8xf16>""")
@@ -471,7 +473,7 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
   %fo{s_}01 = scalar.maxnumf %fo{s_}0, %fo{s_}1 : f32
   %fo{s_}23 = scalar.maxnumf %fo{s_}2, %fo{s_}3 : f32
   %fo{s_}_t = scalar.maxnumf %fo{s_}01, %fo{s_}23 : f32""")
-        C.append(f"""  %fm_lim = scalar.constant 15.0 : f32
+        C.append(f"""  %fm_lim = scalar.constant {32768.0 if opts.get("ovl") else 15.0} : f32
   %fm_ol = scalar.maxnumf %fo_t, %foB_t : f32
   %fm_svf = kernel.subgroup.reduce<maxnumf> %fm_ol : f32
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)

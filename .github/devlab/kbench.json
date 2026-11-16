@@ -8,17 +8,19 @@
       "gen": "flash_r9700/gen_bench.py",
       "gen_variants": [
         "base",
-        "vtop2+e2",
-        "fm",
-        "fmt",
-        "fmp"
+        "fmp",
+        "fmp+ovl",
+        "fmp+kv0",
+        "fmp+nobar",
+        "fmp+noexp"
       ],
       "files": [
         "bench.loom",
-        "bench_vtop2+e2.loom",
-        "bench_fm.loom",
-        "bench_fmt.loom",
-        "bench_fmp.loom"
+        "bench_fmp.loom",
+        "bench_fmp+ovl.loom",
+        "bench_fmp+kv0.loom",
+        "bench_fmp+nobar.loom",
+        "bench_fmp+noexp.loom"
       ],
       "tests": [
         "test.loom"
