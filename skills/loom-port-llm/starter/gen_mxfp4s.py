@@ -34,7 +34,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, radd=False, ybf16=False, rpf=False, ysc16=False):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, radd=False, rpf=False, ysc16=False):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -45,9 +45,10 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     the R9700 against the staged variant (a_direct=False). rf: 16-row activation fragments per wave (default 4 for store, 2 for swiglu: measured best, see
     device/rdna4/prefill.md); kmult 2 doubles the K step; nt 128 halves the workgroup; a_pf / dbuf are measured non-wins kept for the record.
     radd (store): the tile is ADDED to the f32 contents of %y (y = y + acc * s8[row, 1]: the residual add of the block's output projection,
-    %y is the residual stream). ybf16 (swiglu): the output is bf16 (half the bytes; the consumer is the down projection's row-scale producer)."""
+    %y is the residual stream). ysc16 (swiglu): the output is f16 times 2^-4 (half the bytes, range 1e6; the consumer is the down projection's row-scale producer,
+    which multiplies by 16). Not bf16: its rounding moved two prompts of the compare gate (bf16 fails, f16 passes: device/rdna4/prefill.md)."""
     two_w = mode == "swiglu"
-    assert not (radd and two_w) and not (ybf16 and not two_w) and not (ybf16 and yf16) and not (ysc16 and (not two_w or ybf16 or yf16))
+    assert not (radd and two_w) and not (ysc16 and (not two_w or yf16))
     if ysc16:   # the SwiGLU output as f16 times 2^-4 (range 1e6; exact power-of-two scaling): the producer multiplies by 16
         yf16 = True
     BM = bm or nt                 # rows of the workgroup tile (default 256; 128 / 256 with a wider tn: the tile shapes of the prefill GEMM sweep)
@@ -64,14 +65,14 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     assert RF in (2, 4, 8) and WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2) and NT <= 1024
     assert a_direct or (NT == BM == 256 and TW == 128)
     wave_cols = 16 * cfr
-    YT = 'bf16' if ybf16 else 'f16' if yf16 else 'f32'   # the output element type (f16: a measured option for the SwiGLU output, whose consumer is the down projection's row-scale producer)
+    YT = 'f16' if yf16 else 'f32'   # the output element type (f16: a measured option for the SwiGLU output, whose consumer is the down projection's row-scale producer)
     # the workgroup's thread index folded onto the BM rows of the tile (when the workgroup has more threads than the tile has rows)
     BMI, BMDEF = ("%workitem", "") if NT == BM else ("%bm_item", f"  %bm_item = index.rem %workitem, %{CBM} : index\n")
     KS = 128 * kmult              # K per step: 4 * kmult 32-value blocks (kmult > 1 needs a_direct)
     PX = KS + pad                 # LDS pitch (bytes) of both stages: KS data + pad (16)
     NB = (KS // 32) // HALVES     # blocks one staging thread decodes per step (a half of a row's step; the whole step with 128 threads)
     assert kmult == 1 or a_direct
-    name = f"{prefix}_gemm_mxfp4s_{mode}_f8{'_radd' if radd else ''}{'_bf16' if ybf16 else ''}{'_f16s' if ysc16 else ''}_m256_rdna4"
+    name = f"{prefix}_gemm_mxfp4s_{mode}_f8{'_radd' if radd else ''}{'_f16s' if ysc16 else ''}_m256_rdna4"
     weights = ["w", "w2"] if two_w else ["w"]
     accs = [f"{wi}r{r}c{c}" for wi in range(len(weights)) for r in range(RF) for c in range(cfr)]
     L = []
@@ -404,7 +405,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
         A(f"  %inv{r} = vector.fragment.load<result> %inv_view[{rowv[r]}, %c0] shape [%c16, %c16] : view<{BM}x16xf32> -> vector<8xf32>")
     A(f'''  %y_layout = encoding.layout.strided [%n, %c1] : encoding<layout>
   %tile_first = index.madd %row_origin, %n, %out_origin : index
-  %tile_offset = index.scale %tile_first, {'%two' if (yf16 or ybf16) else '%four'} : index, offset -> offset
+  %tile_offset = index.scale %tile_first, {'%two' if yf16 else '%four'} : index, offset -> offset
   %y_view = buffer.view %y[%tile_offset] : buffer -> view<{BM}x{TN}x{YT}, %y_layout>''')
     if radd:   # every old tile first: Loom orders a global load after the stores before it, so loads interleaved with the stores would each wait for the previous store
         for r in range(RF):
@@ -427,9 +428,9 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
                 A(f"  %v{r}{c}_s = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>\n  %v{r}{c} = vector.addf %v{r}{c}_s, %zero8 : vector<8xf32>")
             if ysc16:
                 A(f"  %vq{r}{c}_k = vector.constant 0.0625 : vector<8xf32>\n  %vq{r}{c} = vector.mulf %v{r}{c}, %vq{r}{c}_k : vector<8xf32>")
-            if yf16 or ybf16:
+            if yf16:
                 A(f"  %vh{r}{c} = vector.fptrunc %v{'q' if ysc16 else ''}{r}{c} : vector<8xf32> to vector<8x{YT}>")
-            A(f"  vector.fragment.store<result> %{'vh' if (yf16 or ybf16) else 'v'}{r}{c}, %y_view[{row}, %oc{r}{c}] shape [%c16, %c16] : vector<8x{YT}>, view<{BM}x{TN}x{YT}, %y_layout>")
+            A(f"  vector.fragment.store<result> %{'vh' if yf16 else 'v'}{r}{c}, %y_view[{row}, %oc{r}{c}] shape [%c16, %c16] : vector<8x{YT}>, view<{BM}x{TN}x{YT}, %y_layout>")
     A("  kernel.return\n}\n")
     return "\n".join(L)
 
@@ -470,8 +471,10 @@ def _w16_guard(store):
             + store + "    }\n")
 
 
-def _flag_bf16_loads(t, name, f16s=False):
-    """A row-scale producer twin with the trailing flag %fl: the input row %x is bf16 when %fl != 0 (the SwiGLU output of the fused fp8 GEMM), f32 otherwise."""
+def _flag_f16s_loads(t, name):
+    """A row-scale producer twin with the trailing flag %fl: the input row %x is f16 times 2^-4 when %fl != 0 (the SwiGLU output of the fused fp8 GEMM: exact
+    power-of-two scaling, range 1e6), f32 otherwise."""
+    f16s = True
     pat = re.compile(r"^(?P<ind>\s*)(?P<v>%\w+) = vector\.load %x4_view\[%row, %bc, %c0\] : view<\[%rows\]x\[%k4\]x4xf32> -> vector<4xf32>\n", re.M)
     assert len(pat.findall(t)) == 2, (name, len(pat.findall(t)))
     def rep(m):
@@ -559,8 +562,8 @@ def f8_producer(text, flag=False):
       view.store %lv_zf, %lv_s8[{z.group(1)}, %lv_c0] : f32, view<[%{z.group(2)}]x2xf32>
       view.store %lv_zf, %lv_s8[{z.group(1)}, %lv_c1] : f32, view<[%{z.group(2)}]x2xf32>
 """, old)
-    if flag:   # the trailing flag argument: row-scale twins read a bf16 input row, post-add-norm twins skip the residual add (the fused GEMM did it)
-        t = _flag_bf16_loads(t, old, os.environ.get("X_FMT") == "f16s") if row_scale else _flag_radd(t, old)
+    if flag:   # the trailing flag argument: row-scale twins read an f16 x 2^-4 input row, post-add-norm twins skip the residual add (the fused GEMM did it)
+        t = _flag_f16s_loads(t, old) if row_scale else _flag_radd(t, old)
     return t
 
 
@@ -594,7 +597,7 @@ def _kernel_def(text, name):
 
 
 def fuse_enabled():
-    """MXFP4S_FUSE (choice prefill.mxfp4s.fuse) on, with the fp8 GEMMs on: the residual add in the output projections' epilogue, the SwiGLU output in bf16."""
+    """MXFP4S_FUSE (choice prefill.mxfp4s.fuse) on, with the fp8 GEMMs on: the SwiGLU output as f16 x 2^-4 (and, with X_RADD=1, the residual add in the output projections' epilogue)."""
     return f8_enabled() and os.environ.get("MXFP4S_FUSE", "0").lower() not in ("", "0", "false", "no", "off")
 
 
@@ -606,8 +609,8 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
     256-row kernel } else { as before }`. The gfx11 programs keep every launch they had. An operand buffer with a producer or a reader this
     pass does not know stays as it is (f16 path). Returns (text, number of fp8 GEMM groups).
     fuse (default fuse_enabled()): (1) an output projection (store leaf) whose y is read next by a g_post_add_norm_rs producer adds its tile to the residual
-    (`_radd` kernel writing %x) and the producer's twin skips the add (trailing flag); (2) the SwiGLU pair writes bf16 and the row-scale producer of its
-    output reads bf16 (trailing flag). Both only in the %huge epochs; every other epoch and the gfx11 programs are unchanged."""
+    (`_radd` kernel writing %x) and the producer's twin skips the add (trailing flag); (2) the SwiGLU pair writes f16 x 2^-4 and the row-scale producer of its
+    output reads it (trailing flag; (1) only with X_RADD=1: measured slower). Both only in the %huge epochs; every other epoch and the gfx11 programs are unchanged."""
     if fuse is None:
         fuse = fuse_enabled()
     a = text.find("command.program.def public @llm_advance(")
@@ -678,7 +681,7 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
         converted[leaf_at[g]] += 4   # gate and up leaves
     f16_optional = {x: converted[x] == len(readers[x]) for x in used}
     radd_leaf, fl_prod = {}, set()   # store leaf line -> the residual buffer it accumulates into; producer lines whose trailing flag is the %huge epoch flag
-    if fuse and os.environ.get("X_RADD", "1") != "0":
+    if fuse and os.environ.get("X_RADD", "0") == "1":   # the residual add in the output projections: measured slower than the plain GEMM + producer (-0.8 %), off
         for pi, l in enumerate(lines):
             m = _LAUNCH.match(l)
             if not (m and m.group("k").startswith("g_post_add_norm_rs") and _PRODUCER.match(m.group("k"))):
@@ -700,8 +703,8 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
             if ok and i not in radd_leaf:
                 radd_leaf[i] = xr
                 fl_prod.add(pi)
-    for g, _, _, _ in triples:   # the row-scale producers of the SwiGLU output (their data argument is the gate leaf's output buffer) read bf16
-        if fuse and os.environ.get("X_BF16", "1") != "0":
+    for g, _, _, _ in triples:   # the row-scale producers of the SwiGLU output (their data argument is the gate leaf's output buffer) read f16 x 2^-4
+        if fuse:
             ya = _split(_LAUNCH.match(lines[g]).group("args"))[-1]
             fl_prod.update(pi for idx in producers.values() for pi in idx if (_split(_LAUNCH.match(lines[pi]).group("args"))[-3] == ya
                                                                           and _LAUNCH.match(lines[pi]).group("k").startswith("g_row_scale_f16")))
@@ -753,7 +756,7 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
         region = lines[g - 2:s1 + 1]
         repl[g - 2] = "\n".join([
             f"{ind}scf.if %huge {{",
-            f"{ind}  // dual-group: rdna4 kernel.launch @{prefix}_gemm_mxfp4s_swiglu_f8{('_f16s' if os.environ.get('X_FMT') == 'f16s' else '_bf16') if (fuse and os.environ.get('X_BF16', '1') != '0') else ''}_m256_rdna4[{mg.group('grid')}]({', '.join(args)}) : [{mg.group('gt')}]({', '.join(at)})",
+            f"{ind}  // dual-group: rdna4 kernel.launch @{prefix}_gemm_mxfp4s_swiglu_f8{'_f16s' if fuse else ''}_m256_rdna4[{mg.group('grid')}]({', '.join(args)}) : [{mg.group('gt')}]({', '.join(at)})",
             f"{ind}  {lines[g].strip()}", f"{ind}  {lines[u].strip()}", f"{ind}  {lines[s0 + 1].strip()}",
             f"{ind}  // dual-group: end",
             f"{ind}}} else {{"] + region + [f"{ind}}}"])

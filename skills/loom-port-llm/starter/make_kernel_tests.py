@@ -1443,18 +1443,17 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
         v = np.asarray(v, np.float64)
         return (e4m3_bytes(v).view(np.uint8) | np.where((v == 0) & np.signbit(v), 0x80, 0).astype(np.uint8)).view(np.int8)
     if _fuse_on():   # choice prefill.mxfp4s.fuse: the flagged producer twins, the residual-adding output projection, the bf16 SwiGLU output
-        def bf16_bits(a):
-            u = np.asarray(a, np.float32).view(np.uint32).astype(np.uint64)
-            return ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16).view(np.int16)
+        def bf16_bits(a):   # the SwiGLU intermediate: f16 of (value * 2^-4) (the name is kept from the first, bf16 version)
+            return (np.clip(np.asarray(a, np.float32), -1.0e6, 1.0e6) * np.float32(0.0625)).astype(np.float16).view(np.int16)
         def bf16_vals(a):
-            return (bf16_bits(a).view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+            return bf16_bits(a).view(np.float16).astype(np.float32) * np.float32(16.0)
         # row-scale twin reading a bf16 row (flag 1): the same fp8 row and scales as numpy's from the bf16-rounded values
         xb = bf16_vals(f8_x)
         b_mx = np.abs(xb).max(1); b_e = np.frexp(b_mx)[1] - 1
         b_sc = np.where(f8_live, 2.0 ** (7 - b_e), 0.0); b_iv = np.where(f8_live, 2.0 ** (b_e - 7 - 8.0), 0.0)
         save("rs8b_x", bf16_bits(f8_x)); save("rs8b_s", np.stack([b_sc, b_iv], 1).astype(np.float32))
         save("rs8b_q", np.where(f8_live[:, None], e4m3_bytes_s(e4m3_round(xb * b_sc[:, None])), 0).astype(np.int8))
-        cases.append(f"""check.case public @row_scale_f16_live_lv_f8_bf16in {{
+        cases.append(f"""check.case public @row_scale_f16_live_lv_f8_f16sin {{
   %rows = check.literal value(3) : index
   %k = check.literal value({rs_k}) : index
   %fl = check.literal value(1) : index
@@ -1576,7 +1575,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %h16 = check.generate.fill value(0.0) : tensor<{rows}x{n_use}xf16>
   %s8 = check.generate.fill value(7.0) : tensor<{rows}x2xf32>
   %q8 = check.generate.fill value(0) : tensor<{rows}x{n_use}xi8>
-  kernel.launch @g_gemm_mxfp4s_swiglu_f8{'_f16s' if os.environ.get('X_FMT') == 'f16s' else '_bf16'}_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %w, %ws, %u, %us, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {ty(Wr)}, {ty(Ws_)}, {ty(Ur)}, {ty(Us_)}, tensor<{rows}x{n_use}xi16>)
+  kernel.launch @g_gemm_mxfp4s_swiglu_f8_f16s_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %w, %ws, %u, %us, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {ty(Wr)}, {ty(Ws_)}, {ty(Ur)}, {ty(Us_)}, tensor<{rows}x{n_use}xi16>)
   kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %n, %y, %s16, %h16, %q8, %s8, %w16, %fl) : [index](index, tensor<{rows}x4xi32>, index, tensor<{rows}x{n_use}xi16>, tensor<{rows}x2xf32>, tensor<{rows}x{n_use}xf16>, tensor<{rows}x{n_use}xi8>, tensor<{rows}x2xf32>, index, index)
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<{rows}x2xf32>
   check.expect.close actual(%h16) expected(%eh16) atol(2.0e-1) rtol(2.0e-2) nan(different) : tensor<{rows}x{n_use}xf16>

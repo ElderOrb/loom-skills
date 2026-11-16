@@ -98,7 +98,7 @@ class KernelTests(unittest.TestCase):
         """the tile shape / pipelining / grid / prefetch / output / pitch options of the generator (device/rdna4/prefill.md: all measured, none a win)"""
         for mode, kw in (("store", dict(bm=128, tn=256)), ("store", dict(bm=256, tn=256)), ("swiglu", dict(bm=256, tn=128)), ("store", dict(swp=True)),
                          ("store", dict(rf=2, swp=True)), ("swiglu", dict(swz=True)), ("store", dict(pfa=2)), ("swiglu", dict(yf16=True)), ("store", dict(pad=32)),
-                         ("store", dict(radd=True)), ("swiglu", dict(ybf16=True))):
+                         ("store", dict(radd=True)), ("swiglu", dict(ysc16=True))):
             with tempfile.TemporaryDirectory() as d:
                 f = Path(d) / "t.loom"
                 f.write_text(HEADER + R.gemm_mxfp4s_f8_m256(mode, **kw))
@@ -270,21 +270,32 @@ command.program.def public @llm_advance() launch(%weights: buffer) {{
         self.assertNotIn("%fz_", text)
         self.assertNotIn("_bf16_", text)
 
-    def test_fuse_adds_the_output_projection_into_the_residual_and_flags_the_producers(self):
+    def test_fuse_writes_the_swiglu_output_as_f16s_and_flags_its_producer(self):
         text, n = R.fuse_mxfp4s_f8(self.program_with_next_layer(), fuse=True)
+        self.assertEqual(n, 3)
+        self.assertIn("@g_gemm_mxfp4s_swiglu_f8_f16s_m256_rdna4[", text)
+        self.assertRegex(text, r"@g_row_scale_f16_live_lv_f8_rdna4\[%t\]\(%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8, %w16_\w+, %fz_huge\)")
+        self.assertRegex(text, r"@g_post_add_norm_rs_live_lv_f8_rdna4\[%t\]\(%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_\w+, %fz_zero\)")
+        self.assertNotIn("radd", text)   # the residual add in the projections is opt-in (X_RADD=1): slower than the plain GEMM + producer
+        self.assertIn("%fz_huge = scf.select %huge, %fz_one, %fz_zero : index", text)
+        self.assertIn("%fl: index) {", text)   # the twins take the flag
+
+    def test_fuse_with_radd_adds_the_output_projection_into_the_residual(self):
+        old = os.environ.get("X_RADD")
+        os.environ["X_RADD"] = "1"
+        try:
+            text, n = R.fuse_mxfp4s_f8(self.program_with_next_layer(), fuse=True)
+        finally:
+            os.environ.pop("X_RADD") if old is None else os.environ.__setitem__("X_RADD", old)
         self.assertEqual(n, 3)
         # the down projection accumulates into %x (its gfx11 provider still writes %y), the producer after it skips the add
         self.assertIn("rdna4 kernel.launch @g_gemm_mxfp4s_store_f8_radd_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8, %wd, %wd_sc, %x)", text)
         self.assertRegex(text, r"@g_post_add_norm_rs_live_lv_f8_rdna4\[%t\]\(%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_\w+, %fz_huge\)")
-        # the producer before the SwiGLU pair has no output projection before it: flag 0
         self.assertRegex(text, r"@g_post_add_norm_rs_live_lv_f8_rdna4\[%t\]\(%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_\w+, %fz_zero\)")
-        # the SwiGLU pair writes bf16, the row-scale producer of its output reads it
-        self.assertIn("@g_gemm_mxfp4s_swiglu_f8_bf16_m256_rdna4[", text)
-        self.assertRegex(text, r"@g_row_scale_f16_live_lv_f8_rdna4\[%t\]\(%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8, %w16_\w+, %fz_huge\)")
-        self.assertIn("%fz_huge = scf.select %huge, %fz_one, %fz_zero : index", text)
-        self.assertIn("%fl: index) {", text)   # the twins take the flag
 
     def test_a_reader_of_y_between_the_projection_and_the_producer_keeps_the_plain_gemm(self):
+        os.environ["X_RADD"] = "1"
+        self.addCleanup(os.environ.pop, "X_RADD", None)
         prog = self.program_with_next_layer().replace("  scf.if %mm {\n    kernel.launch @g_post_add_norm_rs_live_lv[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16) : [index](index, buffer, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer, buffer, buffer)\n  } else {\n    kernel.launch @g_post_add_norm[%t](%t, %y, %wn, %x, %wn, %h) : [index](index, buffer, view<5120xf32>, buffer, view<5120xf32>, buffer)\n  }\n  command.return",
                                                       "  kernel.launch @g_other[%t](%t, %y) : [index](index, buffer)\n  command.return")
         self.assertIn("g_other", prog)   # (the replacement only applies to the appended producer; the fixture's own producer stays)
