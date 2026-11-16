@@ -1424,8 +1424,9 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
         na, nb = f"blk.{_gl}.ssm_alpha.weight", f"blk.{_gl}.ssm_beta.weight"
         Wa, Wb = deq(na).astype(np.float64), deq(nb).astype(np.float64); n, K = Wa.shape
         rows = 96
-        xf = e4m3_round(np.clip(rng.standard_normal((rows, K)) * 30.0, -440, 440))
-        inv = rng.uniform(0.25, 2.0, rows).astype(np.float32)
+        _r = np.random.default_rng(96)   # its own generator: the later cases keep their data
+        xf = e4m3_round(np.clip(_r.standard_normal((rows, K)) * 30.0, -440, 440))
+        inv = _r.uniform(0.25, 2.0, rows).astype(np.float32)
         sc = np.stack([np.ones(rows, np.float32), inv * np.float32(2.0 ** -8)], 1)
         ya = (xf @ Wa.T) * inv[:, None].astype(np.float64); yb = (xf @ Wb.T) * inv[:, None].astype(np.float64)
         tag = "gm8s_ab"
