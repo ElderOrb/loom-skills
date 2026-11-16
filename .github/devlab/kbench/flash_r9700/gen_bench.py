@@ -152,7 +152,7 @@ def tests():
     cases.append("tB")
     for v in [""] + TESTED:
         for c, cx, tc in [(c, ctx, t) for c in cases] + [("tC", 64, 64)]:
-            name = f"t_{v or 'base'}_{c}"
+            name = f"t_{(v or 'base').replace('+', '_')}_{c}"
             out.append(kernel(v, name))
             out.append(f"check.case public @{name}_case {{\n" + launch(name, c, cx, tc, f'check.file.read.npy path("{c}_g.npy")')
                        + f'  %e = check.file.read.npy path("{c}_o.npy") : tensor<{tc}x{QD}xf32>\n'
