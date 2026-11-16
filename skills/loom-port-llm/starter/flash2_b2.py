@@ -19,11 +19,17 @@ Measured on E2B (R9700, vs the staged twin): prefill +7 / +12 / +19 % at 8k / 16
 import re
 
 
-def rewrite_b2(text, kvh, d, partial):
-    assert d == 512
+def rewrite_b2(text, kvh, d, partial, qh=None):
+    """d = 512 (gemma4 global layers: 8 query heads per KV head) or 256 (Qwen3.5-class 27B: 6 per KV head, three head pairs per KV head).
+    A wave owns d / 4 output dims (HALF of gen_flash2s.py: 128 / 64) and sums its 16 keys' S^T over all d dims."""
+    assert d in (256, 512)
     waves = 4
+    qh = qh or kvh * 8
     R = kvh * d
     NF = d // 16
+    NO = d // 64                   # output fragments of a wave per head (8 / 4)
+    NKW = NF // 8                  # 64-dim K loads per lane for one 16-key S tile (4 / 2)
+    FPW = NF // waves              # Q^T fragments each wave stages (8 / 4)
     QP = NF * 8 + 8
     pos_bytes = int(re.search(r"%pos_bytes = index\.constant (\d+) : offset", text).group(1))
     marker = "  // Partial tile: O^T / l" if partial else "  // O^T / l, gate, store through"
@@ -42,23 +48,24 @@ def rewrite_b2(text, kvh, d, partial):
     for nm in sorted(defined, key=len, reverse=True):
         epi_b = re.sub(re.escape(nm) + r"\b(?!\w)", nm + "B", epi_b)
     epi_b = re.sub(r"%o(\d+)B?\b(?!\w)", r"%oB\1", epi_b) if False else epi_b
-    for k in range(8):
+    for k in range(NO):
         epi_b = re.sub(rf"%o{k}\b(?!\w)", f"%oB{k}", epi_b)
     epi_b = re.sub(r"%l_final\b(?!\w)", "%lB_final", epi_b)
     epi_b = re.sub(r"(?<![\w%])%head\b(?!\w)", "%head1", epi_b)
     epi_b = re.sub(r"%head\b(?!\w)", "%head1", epi_b)
     # Q^T staging of both heads
-    qst = ("  %fb_c8 = index.constant 8 : index\n  %fb_c64 = index.constant 64 : index\n  %fb_c256 = index.constant 256 : index\n"
-           "  %fb_dh8 = index.mul %dim_half, %fb_c8 : index\n  %fb_dh64 = index.mul %dim_half, %fb_c64 : index\n"
-           "  %fb_h256 = index.mul %lane_half, %fb_c256 : index\n  %fb_qb = index.add %fb_h256, %fb_dh64 : index\n"
-           "  %head1_v = index.add %head, %c1 : index\n  %head1 = index.assume %head1_v [range(%head1_v, 1, " + str(kvh * 8 - 1) + ")] : index\n")
+    qst = ("  %fb_c8 = index.constant 8 : index\n  %fb_cfpw = index.constant " + str(FPW) + " : index\n  %fb_cdw = index.constant " + str(FPW * 8) + " : index\n"
+           "  %fb_chalf = index.constant " + str(d // 2) + " : index\n"
+           "  %fb_dh8 = index.mul %dim_half, %fb_cfpw : index\n  %fb_dh64 = index.mul %dim_half, %fb_cdw : index\n"
+           "  %fb_h256 = index.mul %lane_half, %fb_chalf : index\n  %fb_qb = index.add %fb_h256, %fb_dh64 : index\n"
+           "  %head1_v = index.add %head, %c1 : index\n  %head1 = index.assume %head1_v [range(%head1_v, 1, " + str(qh - 1) + ")] : index\n")
     for hh, hn in ((0, "%head"), (1, "%head1")):
-        for c in range(8):
+        for c in range(FPW):
             qst += (f"  %fqs{hh}_{c}_v = index.add %fb_dh8, %e{c} : index\n  %fqs{hh}_{c} = index.assume %fqs{hh}_{c}_v [range(%fqs{hh}_{c}_v, 0, {NF - 1})] : index\n"
                     f"  %fqe{hh}_{c}_v = index.mul %fqs{hh}_{c}, %fb_c8 : index\n  %fqe{hh}_{c} = index.assume %fqe{hh}_{c}_v [range(%fqe{hh}_{c}_v, 0, {QP - 8})] : index\n"
                     f"  %fqn{hh}_{c}_o = index.constant {8 * c} : index\n  %fqn{hh}_{c}_v = index.add %fb_qb, %fqn{hh}_{c}_o : index\n"
                     f"  %fqn{hh}_{c} = index.assume %fqn{hh}_{c}_v [range(%fqn{hh}_{c}_v, 0, {d - 8})] : index\n"
-                    f"  %fqraw{hh}_{c} = vector.load %q_view[%q_token, {hn}, %fqn{hh}_{c}] : view<[%tokens]x{kvh * 8}x{d}xf32> -> vector<8xf32>\n"
+                    f"  %fqraw{hh}_{c} = vector.load %q_view[%q_token, {hn}, %fqn{hh}_{c}] : view<[%tokens]x{qh}x{d}xf32> -> vector<8xf32>\n"
                     f"  %fqh{hh}_{c} = vector.fptrunc %fqraw{hh}_{c} : vector<8xf32> to vector<8xf16>\n"
                     f"  vector.store %fqh{hh}_{c}, %ql_view[%c{hh}_i, %lane, %fqe{hh}_{c}] : vector<8xf16>, view<2x32x{QP}xf16>\n")
     qst += "  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
@@ -117,9 +124,9 @@ def rewrite_b2(text, kvh, d, partial):
     if partial:
         pass
     ty8 = ", ".join(["vector<8xf32>"] * 8)
-    acc = ", ".join([f"%a{k} = %init : vector<8xf32>" for k in range(8)] + [f"%b{k} = %init : vector<8xf32>" for k in range(8)])
-    outs = ", ".join([f"%o{k}" for k in range(8)] + [f"%oB{k}" for k in range(8)])
-    ty16 = ", ".join(["vector<8xf32>"] * 16)
+    acc = ", ".join([f"%a{k} = %init : vector<8xf32>" for k in range(NO)] + [f"%b{k} = %init : vector<8xf32>" for k in range(NO)])
+    outs = ", ".join([f"%o{k}" for k in range(NO)] + [f"%oB{k}" for k in range(NO)])
+    ty16 = ", ".join(["vector<8xf32>"] * (2 * NO))
     L = []
     A = L.append
     A(f"  %m_final, %l_final, %mB_final, %lB_final, {outs} = scf.for %bt = [%c0 to %nblk step %c1](%m = %neg_big : f32, %l = %zero_f : f32, %mB = %neg_big : f32, %lB = %zero_f : f32, {acc}) -> (f32, f32, f32, f32, {ty16}) {{")
@@ -137,9 +144,9 @@ def rewrite_b2(text, kvh, d, partial):
     %rw{j} = index.assume %rw{j}_v [range(%rw{j}_v, 0, 1048560), lt(%rw{j}_v, %pl_rows_m)] : index""")
     A("    %rk_a = scf.select %fb_is2, %rw2, %rw3 : index\n    %rk_b = scf.select %fb_is1, %rw1, %rk_a : index\n    %rk_c = scf.select %fb_is0, %rw0, %rk_b : index\n    %rk = index.assume %rk_c [range(%rk_c, 0, 1048560), lt(%rk_c, %pl_rows_m)] : index")
     A("    %kw_lr_v = index.add %rk, %lane_col : index\n    %kw_lr = index.assume %kw_lr_v [range(%kw_lr_v, 0, 1048575), lt(%kw_lr_v, %pool)] : index\n"
-      "    %kw_c256 = index.constant 256 : index\n    %kw_h = index.mul %lane_half, %kw_c256 : index\n    %c64k = index.constant 64 : index\n    %fq8c = index.constant 8 : index")
-    A(f"    %sA_f, %sB_f = scf.for %kw = [%c0 to %c4 step %c1](%sA = %init : vector<8xf32>, %sB = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>){{")
-    A(f"""      %kw_a = index.assume %kw [range(%kw, 0, 3)] : index
+      f"    %kw_c256 = index.constant {d // 2} : index\n    %kw_h = index.mul %lane_half, %kw_c256 : index\n    %c64k = index.constant 64 : index\n    %fq8c = index.constant 8 : index")
+    A(f"    %sA_f, %sB_f = scf.for %kw = [%c0 to %c{NKW} step %c1](%sA = %init : vector<8xf32>, %sB = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>){{")
+    A(f"""      %kw_a = index.assume %kw [range(%kw, 0, {NKW - 1})] : index
       %kw_o = index.mul %kw_a, %c64k : index
       %kw_c = index.add %kw_h, %kw_o : index
       %kw_ci = index.assume %kw_c [range(%kw_c, 0, {d - 64})] : index
@@ -208,10 +215,10 @@ def rewrite_b2(text, kvh, d, partial):
     %alpha{s_}_v = vector.splat %alpha{s_} : vector<8xf32>""")
     if partial:
         A("    %pos_hi_v = vector.splat %pos_hi_i32 : vector<8xi32>")
-    for k in range(8):
+    for k in range(NO):
         A(f"    %os{k} = vector.mulf %a{k}, %alpha_v : vector<8xf32>\n    %osB{k} = vector.mulf %b{k}, %alphaB_v : vector<8xf32>")
-    pvin = ", ".join([f"%pa{k} = %os{k} : vector<8xf32>" for k in range(8)] + [f"%pb{k} = %osB{k} : vector<8xf32>" for k in range(8)])
-    pvout = ", ".join([f"%on{k}" for k in range(8)] + [f"%onB{k}" for k in range(8)])
+    pvin = ", ".join([f"%pa{k} = %os{k} : vector<8xf32>" for k in range(NO)] + [f"%pb{k} = %osB{k} : vector<8xf32>" for k in range(NO)])
+    pvout = ", ".join([f"%on{k}" for k in range(NO)] + [f"%onB{k}" for k in range(NO)])
     A(f"    {pvout} = scf.for %jj = [%c0 to %c4 step %c1]({pvin}) -> ({ty16}) unroll {{")
     VJ = """      %rj_a = scf.select %jj_c2, %rw2, %rw3 : index
       %rj_b = scf.select %jj_c1, %rw1, %rj_a : index
@@ -224,7 +231,7 @@ def rewrite_b2(text, kvh, d, partial):
       %jj_c1 = index.cmp eq, %jj, %c1 : index
       %jj_c2 = index.cmp eq, %jj, %c2 : index
       %jj_c0 = index.cmp eq, %jj, %c0 : index
-{VJ}      %vj = buffer.view %arena[%vj_o] : buffer -> view<128x16xf16, %vt_g_layout>
+{VJ}      %vj = buffer.view %arena[%vj_o] : buffer -> view<{d // 4}x16xf16, %vt_g_layout>
       %prA = vector.load %pl_view[%c0_i, %c0_i, %jj_a, %lane, %c0] : view<1x2x{waves}x32x8xf16> -> vector<8xf16>
       %pfA = vector.fragment<rhs> %prA shape [%c16, %c16] : vector<8xf16>
       %prB = vector.load %pl_view[%c0_i, %c1_i, %jj_a, %lane, %c0] : view<1x2x{waves}x32x8xf16> -> vector<8xf16>
@@ -236,18 +243,18 @@ def rewrite_b2(text, kvh, d, partial):
       %vkb_v = vector.splat %vkb : vector<8xi32>
       %vkp = vector.addi %vkb_v, %row_off : vector<8xi32>
       %vok = vector.cmpi sle, %vkp, %pos_hi_v : vector<8xi32> -> vector<8xi1>""")
-    for k in range(8):
-        A(f"      %vc{k} = vector.fragment.load<lhs> %vj[%kcol{k}, %c0] shape [%c16, %c16] : view<128x16xf16, %vt_g_layout> -> vector<8xf16>")
-    for k in range(8):
+    for k in range(NO):
+        A(f"      %vc{k} = vector.fragment.load<lhs> %vj[%kcol{k}, %c0] shape [%c16, %c16] : view<{d // 4}x16xf16, %vt_g_layout> -> vector<8xf16>")
+    for k in range(NO):
         vname = f"%vc{k}"
         if partial:
             A(f"      %vs{k} = vector.select %vok, %vc{k}, %zv8 : vector<8xf16>\n      %vm{k} = vector.fragment<lhs> %vs{k} shape [%c16, %c16] : vector<8xf16>")
             vname = f"%vm{k}"
         A(f"      %bn{k} = vector.mma {vname}, %pfA, %pa{k} : vector<8xf16>, vector<8xf16>, vector<8xf32>\n"
           f"      %bnB{k} = vector.mma {vname}, %pfB, %pb{k} : vector<8xf16>, vector<8xf16>, vector<8xf32>")
-    A("      scf.yield " + ", ".join([f"%bn{k}" for k in range(8)] + [f"%bnB{k}" for k in range(8)]) + f" : {ty16}")
+    A("      scf.yield " + ", ".join([f"%bn{k}" for k in range(NO)] + [f"%bnB{k}" for k in range(NO)]) + f" : {ty16}")
     A("    }")
-    A("    scf.yield %m_new, %l_new, %mB_new, %lB_new, " + ", ".join([f"%on{k}" for k in range(8)] + [f"%onB{k}" for k in range(8)]) + f" : f32, f32, f32, f32, {ty16}\n  }}\n")
+    A("    scf.yield %m_new, %l_new, %mB_new, %lB_new, " + ", ".join([f"%on{k}" for k in range(NO)] + [f"%onB{k}" for k in range(NO)]) + f" : f32, f32, f32, f32, {ty16}\n  }}\n")
     loop = "".join(x if x.endswith("\n") else x + "\n" for x in L)
     text = text[:h0] + alloc + defs + qst + loop + epilogue + epi_b + tail
     return text
