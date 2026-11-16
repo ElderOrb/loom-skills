@@ -4,6 +4,7 @@ The fixture job (tests/data/regen/job_e2b) is a downloaded R9700 job of this cam
 (perf_r9700_aa.json) is what ab_jobs.py wrote for it."""
 import contextlib
 import io
+import importlib.util
 import json
 import os
 import shutil
@@ -407,6 +408,7 @@ class SdkAbTest(Base):
         self.assertEqual(d, "promote")
         self.assertTrue(any("only on the new SDK" in x for x in r))
 
+    @unittest.skipUnless(importlib.util.find_spec("huggingface_hub"), "needs huggingface_hub")
     def test_old_sdk_revision_walks_the_history(self):
         from huggingface_hub.utils import EntryNotFoundError
         commits = [mock.Mock(commit_id=c) for c in ("c3", "c2", "c1", "c0")]
