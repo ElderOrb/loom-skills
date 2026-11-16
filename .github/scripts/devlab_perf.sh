@@ -329,7 +329,7 @@ if rules:
     for ln in open(p).read().split("\n"):
         m = re.match(r"command\.(program\.)?def\b.*\s@(\w+)\(", ln)
         if m:
-            prog = m.group(1)
+            prog = m.group(2)
         out.append(ln)
         if re.match(r"\s*(kernel\.launch @|template\.apply<@)", ln) and any(pr in ("*", prog) and re.search(rx, ln) for pr, rx in rules):
             out.append(ln); n += 1
