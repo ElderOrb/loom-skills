@@ -99,7 +99,11 @@ class FuseVerify(unittest.TestCase):
         for i, (f, orig) in enumerate(fused):
             self.assertNotIn("@g_silu_mul", f)
             self.assertEqual(f.count("@g_pmv_mxfp4s_k5120_t4_swq_r32["), 1, i)
-            self.assertEqual(len(re.findall(r"kernel\.launch", orig)) - len(re.findall(r"kernel\.launch", f)), 1 + 1 + 1 + 4 - 1 + 4, i)
+            # gate: 4 branch launches -> 1, up: 4, g_silu_mul, the f quant block (row scale | quant), and each
+            # post_add_norm + quant(h) pair (2 per layer, layer 0's first is the embedding's quant: kept)
+            pairs = len(re.findall(r"@g_post_add_norm_q8\[", f))
+            self.assertEqual(pairs, 1 if i == 0 else 2, i)
+            self.assertEqual(len(re.findall(r"kernel\.launch", orig)) - len(re.findall(r"kernel\.launch", f)), 3 + 4 + 1 + 2 + pairs, i)
         self.assertIn('export("g_pmv_mxfp4s_k5120_t4_swq_r32")', self.swq)
 
     def test_hout_where_f32_projections_read_h(self):

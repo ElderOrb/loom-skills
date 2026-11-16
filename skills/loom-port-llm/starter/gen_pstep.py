@@ -260,7 +260,7 @@ def _statements(lines):
     return out
 
 
-def fuse_verify(program, src, eps, hidden, G=0, n_of=None, mode="full"):
+def fuse_verify(program, src, eps, hidden, G=0, n_of=None, mode="full", norm_src=None):
     """llm_verify with every layer duplicated: scf.if %pz {fused} else {as generated}, %pz = an epoch of at most 4 tokens
     off the GEMM path and not a single token. The fused layer:
       input projections that read the int8 rows of h (qkv + z, q|gate + k + v, gate + up): one g_pmv_*_norm_* launch whose
@@ -271,7 +271,8 @@ def fuse_verify(program, src, eps, hidden, G=0, n_of=None, mode="full"):
       the down projection: the silu prologue (g_silu_mul + g_quant_q8 gone), accumulate into x; the last layer stores y
           (the program's final g_post_add_norm adds it).
     mode "swq": the layer stays as generated except gate + up + g_silu_mul + g_quant_q8 of the FFN, which become one
-    swiglu_q8 launch (src must also give the 32-row kernel) writing the down projection's int8 input.
+    swiglu_q8 launch (src must also give the 32-row kernel) writing the down projection's int8 input; with norm_src (the
+    text of g_post_add_norm) every g_post_add_norm + g_quant_q8(h) pair becomes one g_post_add_norm_q8 launch.
     src(name) -> kernel text of the int8 matvec `name` (gen_llm.mv). n_of(view type, K) -> rows. Returns (program, kernels)."""
     start = program.index("@llm_verify()")
     end = program.index("\n}\n", start)
@@ -296,7 +297,7 @@ def fuse_verify(program, src, eps, hidden, G=0, n_of=None, mode="full"):
         hoist = [s for s in stmts if "\n" == s[-1] and s.count("\n") == 1 and _DEF.match(s)]
         rest = [s for s in stmts if s not in hoist]
         if mode == "swq":
-            new = _swq_layer(rest, src, kernels, li)
+            new = _swq_layer(rest, src, kernels, li, norm_src)
             ind = lambda s: "".join("  " + ln if ln.strip() else ln for ln in s.splitlines(True))
             out.append(mk.group(0) + "".join(hoist) + "  scf.if %pz {\n" + ind("".join(new)) + "  } else {\n" + ind("".join(rest)) + "  }\n")
             continue
@@ -456,7 +457,7 @@ def swiglu_q8(text):
     return head + ROW_LOOP + loop + ROW_LOOP + loop2 + bar + epi_new
 
 
-def _swq_layer(rest, src, kernels, li):
+def _swq_layer(rest, src, kernels, li, norm_src=None):
     """mode swq of fuse_verify: the FFN's gate + up + silu + quant statements -> one swiglu_q8 launch; the rest verbatim."""
     sil = [_SILU.search(s) for s in rest]
     si = [i for i, m in enumerate(sil) if m]
@@ -480,4 +481,38 @@ def _swq_layer(rest, src, kernels, li):
     launch = (f"  kernel.launch @{kname}[{n}, %t]({n}, %t, %zero_i32, {xin}, {g.group(6)}, {g.group(7)}, {u.group(6)}, {u.group(7)}, {fq}) : "
               f"[index, index](index, index, i32, buffer, {g.group(9)}, {g.group(10)}, {u.group(9)}, {u.group(10)}, buffer)\n")
     drop = {ui, si[0], qi[0]}
-    return [launch if i == gi else s for i, s in enumerate(rest) if i not in drop]
+    out = [launch if i == gi else s for i, s in enumerate(rest) if i not in drop]
+    if norm_src:   # the residual norms write their int8 rows themselves (norm_q8)
+        nk = norm_q8(norm_src)
+        kernels["g_post_add_norm_q8"] = nk
+        pat = re.compile(r"(kernel\.launch @g_post_add_norm)(\[%t\]\(%t, %y, %\w+, %x, %\w+, %h)\) : \[index\]\(index, buffer, (view<\d+xf32>), buffer, (view<\d+xf32>), buffer\)\n"
+                         r"(\s*)kernel\.launch @g_quant_q8\[%t, %nH\]\(%t, %nH, %h, (%\w+)\) : [^\n]*\n")
+        out = [pat.sub(lambda m: f"{m.group(1)}_q8{m.group(2)}, {m.group(6)}) : [index](index, buffer, {m.group(3)}, buffer, {m.group(4)}, buffer, buffer)\n", s) for s in out]
+    return out
+
+
+def norm_q8(text):
+    """g_post_add_norm (x += y; h = rmsnorm(x) * w) -> g_post_add_norm_q8: the lane that writes its 32 values of h also writes
+    their g_quant_q8 codes + (d, code sum) to a last argument %hq (the int8 matvecs' input): the g_quant_q8 launch after
+    it goes away, every code bit-identical (the same per-lane ops on the same f32 values)."""
+    name = "g_post_add_norm"
+    text = _one(text, f'kernel.def export("{name}") @{name}(', f'kernel.def export("{name}_q8") @{name}_q8(', "name")
+    text = _one(text, "%w_next: buffer, %h: buffer)", "%w_next: buffer, %h: buffer, %hq: buffer)", "args")
+    G = int(re.search(r"%h_view = buffer\.view %h\[%zero\] : buffer -> view<\[%tokens\]x(\d+)x32xf32>", text).group(1))
+    st = f"    vector.store %hv, %h_view[%token, %bl, %c0] : vector<32xf32>, view<[%tokens]x{G}x32xf32>\n"
+    q = "\n".join("    " + ln[2:] if ln.startswith("  ") else ln for ln in quant_lines(0, "hv").splitlines())
+    text = _one(text, st, st + f"""    %pq_c127 = scalar.constant 127.0 : f32
+    %pq_ones8 = vector.constant 1 : vector<32xi8>
+    %zero_i = scalar.constant 0 : i32
+    %zero8i = vector.constant 0 : vector<8xi32>
+{q}
+    %hq_view = buffer.view %hq[%zero] : buffer -> view<[%tokens]x{G}x8xi32>
+    %hm_k = index.constant {G * 32} : offset
+    %hm_off = index.scale %tokens, %hm_k : index, offset -> offset
+    %hm_view = buffer.view %hq[%hm_off] : buffer -> view<[%tokens]x{G}x2xf32>
+    %qw0 = vector.bitcast %q0 : vector<32xi8> to vector<8xi32>
+    vector.store %qw0, %hq_view[%token, %bl, %c0] : vector<8xi32>, view<[%tokens]x{G}x8xi32>
+    %meta0 = vector.from_elements %da0, %xs0 : vector<2xf32>
+    vector.store %meta0, %hm_view[%token, %bl, %c0] : vector<2xf32>, view<[%tokens]x{G}x2xf32>
+""", "h store")
+    return text
