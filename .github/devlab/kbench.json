@@ -138,6 +138,29 @@
       ]
     },
     {
+      "suite": "pstep_r9700",
+      "runner": "r9700",
+      "dir": "pstep_r9700",
+      "gen": "pstep_r9700/gen_bench.py",
+      "gen_variants": [
+        "base"
+      ],
+      "files": [
+        "bench.loom"
+      ],
+      "tests": [
+        "test.loom"
+      ],
+      "case_timing": true,
+      "config": [],
+      "args": [
+        "--measure=dispatch_complete",
+        "--batch-size=8",
+        "--profile-final-batch=true"
+      ],
+      "repeats": 3
+    },
+    {
       "suite": "gdn_fused",
       "runner": "r9700",
       "dir": "gdn_fused",
