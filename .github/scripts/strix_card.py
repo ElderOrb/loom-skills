@@ -48,6 +48,9 @@ ap.add_argument("--gates-job", help="a later job of the same package that ran th
                 "their evidence (device, run, time) comes from it instead of --job")
 ap.add_argument("--gates-run", help="that job's Actions run id (with --gates-job)")
 ap.add_argument("--accept-gate-failure", action="append", help="a failed gate a person accepted (e.g. ktest:staging); it stays failed on the card")
+ap.add_argument("--revision", help="the staging revision the job measured (default: the staging head); a card built on it is checked against "
+                "the job's programs. When the head moved on since (a later upload changed only other GPUs' programs), build on the measured revision "
+                "and carry the Strix entry over with make_info.py build --perf-from plus make_info.py equivalent")
 ap.add_argument("--upload", action="store_true")
 a = ap.parse_args()
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download  # noqa: E402
@@ -59,16 +62,17 @@ shutil.rmtree(W, ignore_errors=True)
 os.makedirs(W)
 api = HfApi()
 stg = f"loom-fun-staging/{slug}"
-sha = api.model_info(stg).sha
+sha = a.revision or api.model_info(stg).sha
 snapshot_download(stg, revision=sha, local_dir=out)
 shutil.rmtree(os.path.join(out, ".cache"), ignore_errors=True)
 shutil.copy(os.path.join(out, "info.json"), os.path.join(W, "info_prev.json"))
-shutil.copy(hf_hub_download(f"loom-fun/{slug}", "info.json"), os.path.join(W, "fun_info.json"))
 job_name = json.load(open(os.path.join(J, "summary.json")))["job"]
 jobs = json.loads(run("gh", "run", "view", a.run, "-R", GH, "--json", "jobs", capture=True))["jobs"]
 job = next(j for j in jobs if j["name"] == job_name)
 url, end = job["url"], job["completedAt"]
-rev = re.search(r"resolve/([0-9a-f]{40})", json.dumps(json.load(open(os.path.join(J, "model_fun.json"))))).group(1)
+# the old package the job compared against ("fun"): the loom-fun card, or a pinned staging revision (a campaign's A/B of its own card)
+fun_repo, rev = re.search(r"huggingface\.co/([^/\"]+/[^/\"]+)/resolve/([0-9a-f]{40})", json.dumps(json.load(open(os.path.join(J, "model_fun.json"))))).groups()
+shutil.copy(hf_hub_download(fun_repo, "info.json", revision=rev), os.path.join(W, "fun_info.json"))   # its published Strix table
 fetched = open(os.path.join(J, "programs_sha256.txt")).read().strip()
 dev, hrx = os.path.join(W, "dev.json"), os.path.join(W, "hrx.json")
 run(PY, f"{C}/pull_devlab.py", "--identity", J, "--gpu", "strix-halo", "--device-out", dev, "--hrx-out", hrx)
@@ -79,7 +83,7 @@ if a.first_cmp:
              next(j for j in fjobs if j["name"] == job_name or j["name"].startswith(re.sub(r"-r\d+$", "", job_name)))["url"]]
              # the first run's job has no -rN suffix; ab_jobs truncates names to 40 characters, so the confirming job's stem is a prefix
 src = ["--run", a.run, "--url", url, "--device", dev, "--hrx-loom", hrx, "--source-kind", "devlab"]
-run(PY, f"{C}/make_info.py", "remeasure", "--cmp", a.cmp, "--package", out, "--compared-repo", f"loom-fun/{slug}", "--compared-revision", rev,
+run(PY, f"{C}/make_info.py", "remeasure", "--cmp", a.cmp, "--package", out, "--compared-repo", fun_repo, "--compared-revision", rev,
     "--fetched-programs", fetched, *first, *[x for g in (a.accept_gate_failure or []) for x in ("--accept-gate-failure", g)], "--date", end[:10], *src, "-o", f"{W}/ev_rm.json")
 GJ, gsrc, gend = J, src, end
 if a.gates_job:

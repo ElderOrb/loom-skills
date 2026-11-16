@@ -232,6 +232,9 @@ CHOICE("decode.mv.wg4", "int", 128, "MV_WG4", doc="Workgroup target of 4-token m
 CHOICE("decode.mv.wg_long", "int", 640, "MV_WG_LONG", doc="Workgroup target of 1-token matvecs with K >= 8192.", **_MV)
 CHOICE("decode.mv.q8_r16", "bool", True, "MV_Q8_R16", doc="Int8 multi-token matvecs with 16 rows when n % 16 == 0.", **_MV)
 CHOICE("decode.mv.q8_r32", "bool", True, "MV_Q8_R32", doc="Int8 16-token matvecs with 32 rows (pair kernels / K >= 8192).", **_MV)
+CHOICE("decode.spec.gdn_copy_split", "int", 1, "GDN_COPY_SPLIT", kernels=["g_gdn_capture*", "g_gdn_restore*"], rows=ROWS_DECODE, devices=["rdna4"], per_target=True,
+       doc="Workgroups per token of the gated delta-net capture / restore copies of a drafted step (gfx12 twin; 1 = the one-workgroup-per-token "
+           "kernel on both targets). R9700 Qwen3.8-27B MTP 3: 8 = -0.8 ms of a 40 ms step.")
 CHOICE("decode.mv.pair_proj", "str", "qg", "PAIR_PROJ", kernels=["g_mv*_pair"], rows=ROWS_DECODE + ROWS_STREAMS,
        doc="Paired projections: qg (q + gate), kv (k + v), 1 (both), 0 (off). k + v measured no faster end to end.")
 
@@ -358,6 +361,10 @@ CHOICE("hybrid.gdn.row_lanes", "int", 16, "GDN_ROW_LANES", derive=_mtp_rows, fro
        doc="Lanes per value column of the row-split recurrence (MTP-drafted hybrids: 8, one form for every span).", **_GD)
 CHOICE("hybrid.gdn.cols", "int", 2, "GDN_COLS", derive=_mtp_cols, from_pr="#350",
        doc="Value-column width of the row-split recurrence (MTP-drafted hybrids: 4).", **_GD)
+CHOICE("hybrid.gdn.chunk", "bool", False, "GDN_CHUNK", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_chunk_rdna4", "g_gdn_recurrence*"],
+       from_pr="q38r9700 gdnpf",
+       doc="gfx12 chunked (WY) gated delta-net prefill (gen_gdn_chunk.py): spans of 64+ tokens run g_gdn_chunk_rdna4 (f16 WMMA, f32 state), the "
+           "sequential kernel's gfx12 twin the shorter ones; the gfx11 kernels do not change (128 x 128 heads only).")
 
 # ======================================================================================================================
 # Speculative decoding (gen_llm.py, draft/)
