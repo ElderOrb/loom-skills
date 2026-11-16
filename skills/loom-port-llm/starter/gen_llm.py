@@ -4817,19 +4817,6 @@ def moe_kernels(row_scale, gemm_fn):
     return "".join(parts)
 
 
-def ab_q8(text, first):
-    """GDN_AB_Q8 (mxfp4s, GEMM-shape epochs): the alpha / beta projections as the 16-token int8 matvec on h quantized once to int8
-    (g_quant_q8 before alpha) instead of the f32 4-token matvec over h (two reads of the f32 rows)."""
-    if os.environ.get("GDN_AB_Q8", "") in ("", "0") or "@g_mv_mxfp4s_k5120_t4[" not in text:
-        return text
-    def sub(m):
-        ind, line = m.group(1), m.group(2)
-        new = line.replace("@g_mv_mxfp4s_k5120_t4[", "@g_mv_mxfp4s_k5120_t16_q8[", 1).replace("%zero_i32, %h,", "%zero_i32, %h16q,", 1)
-        q = f"{ind}kernel.launch @g_quant_q8[%t, %nH](%t, %nH, %h, %h16q) : [index, index](index, index, buffer, buffer)\n" if first else ""
-        return q + ind + new
-    return re.sub(r"^( *)(kernel\.launch @g_mv_mxfp4s_k5120_t4\[.*)$", sub, text, count=1, flags=re.M)
-
-
 def gdn_layer(i, b, nm, sz, par):
     """Gated delta-net token mixer of layer i: h -> o (VD wide), then o16 for the output GEMM."""
     g = GDN
@@ -4860,8 +4847,13 @@ def gdn_layer(i, b, nm, sz, par):
         # only; the `// gdn-capture:` marker places the same capture at the head of the GEMM branch: a verify epoch can pack another
         # request's prompt with the speculative spans (t >= 64), and its replay restores these inputs.
         ind = lambda t: "\n".join("  " + l for l in t.split("\n"))
-        MIX = (f"  scf.if %gemm {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
-               f"  }} else {{\n{FRONT}\n{REC0}\n{GATE}\n  }}")
+        # GDN_FUSED2_MIN (choice prefill.gdn.fused2_min): the fused pair runs in epochs of at least this many rows (64 = every GEMM epoch, 128 =
+        # %big: a 64-row epoch, i.e. a prompt or tail under 64 tokens, keeps the chain, whose spans under 64 run the exact sequential kernel)
+        fmin = int(os.environ.get("GDN_FUSED2_MIN", "64"))
+        assert fmin in (64, 128), "GDN_FUSED2_MIN: 64 or 128"
+        cond, rest = ("%gemm", f"{FRONT}\n{REC0}\n{GATE}") if fmin == 64 else ("%big", f"{FRONT}\n{REC}\n{GATE}")
+        MIX = (f"  scf.if {cond} {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
+               f"  }} else {{\n{rest}\n  }}")
     else:
         MIX = f"{FRONT}\n{REC}\n{GATE}"
     T = P + [
@@ -4876,6 +4868,19 @@ def gdn_layer(i, b, nm, sz, par):
 """,
         "  " + lin(fmt_of(nm("ssm_out")), "%o", "%s_o", f"%wout_{i}", sz("ssm_out"), "%y", "%nVD", "%nH", VD) + "\n"]
     return "".join(T)
+
+
+def ab_q8(text, first):
+    """GDN_AB_Q8 (mxfp4s, GEMM-shape epochs): the alpha / beta projections as the 16-token int8 matvec on h quantized once to int8
+    (g_quant_q8 before alpha) instead of the f32 4-token matvec over h (two reads of the f32 rows)."""
+    if os.environ.get("GDN_AB_Q8", "") in ("", "0") or "@g_mv_mxfp4s_k5120_t4[" not in text:
+        return text
+    def sub(m):
+        ind, line = m.group(1), m.group(2)
+        new = line.replace("@g_mv_mxfp4s_k5120_t4[", "@g_mv_mxfp4s_k5120_t16_q8[", 1).replace("%zero_i32, %h,", "%zero_i32, %h16q,", 1)
+        q = f"{ind}kernel.launch @g_quant_q8[%t, %nH](%t, %nH, %h, %h16q) : [index, index](index, index, buffer, buffer)\n" if first else ""
+        return q + ind + new
+    return re.sub(r"^( *)(kernel\.launch @g_mv_mxfp4s_k5120_t4\[.*)$", sub, text, count=1, flags=re.M)
 
 
 def gelu_scalar(o, x, ind="      "):
@@ -5877,6 +5882,11 @@ if __name__ == "__main__":
         from gen_mxfp4s import fuse_mxfp4s_f8 as _f8s_fuse
         text, _nf8s = _f8s_fuse(text)
         print("mxfp4s fp8 groups:", _nf8s)
+        from gen_mxfp4s import ab_f8_enabled as _abf8_on
+        if GDN and _abf8_on():   # gfx12: the GDN alpha / beta projections as one paired skinny fp8 GEMM (choice prefill.gdn.ab_f8)
+            from gen_mxfp4s import ab_f8 as _abf8
+            text, _nab = _abf8(text, GDN["HV"], H)
+            print("alpha/beta fp8 layers:", _nab)
     if seg_tokens():
         text = seg_attention(text)
     SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in text}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")
