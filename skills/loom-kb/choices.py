@@ -326,9 +326,10 @@ CHOICE("prefill.attn.flash2_b2", "str", None, "FLASH2_B", derive=_flash_b, from_
            "(Qwen3.5-class 27B, three head pairs per KV head). 3: three heads per wave at head_dim 256 / 6 (256 VGPRs: measured slower than 2).", **_FLR4)
 CHOICE("prefill.attn.flash2_b2_fm", "bool", None, "FLASH2_B2_FM", from_pr="mxfp4st-oattn2",
        doc="With prefill.attn.flash2_b2 = 2 at head_dim 256 / 6 query heads per KV head: the whole-tile key-split loop uses a fixed softmax reference "
-           "(the max of the first and the diagonal page; no running max, no per-block max exchange or O rescale, one barrier per 64 keys; a tile "
-           "with a later score above the reference + 15 in log2 units reruns with the running-max loop), V^T prefetch, exp2 and an unmasked loop "
-           "below the diagonal (flash2_b2.py fmax).", **_FLR4)
+           "(the max of the first and the diagonal page; no running max, no per-block max exchange or O rescale, one barrier per 64 keys; when a "
+           "lane has a later score above its reference + 15 in log2 units the workgroup reruns the loops with that lane's true max and every other "
+           "lane's reference unchanged, so a token's bits depend on that token only), V^T prefetch, exp2 and an unmasked loop below the diagonal; "
+           "whole- and partial-tile kernels alike (flash2_b2.py fmax).", **_FLR4)
 CHOICE("prefill.attn.rope_qg", "bool", False, "ROPE_QG", kernels=["g_qk_rope_store*", "g_split_qgate"], rows=ROWS_ALL,
        doc="Gated attention with a fused q|gate projection (qwen35 family): the norm + RoPE kernel reads the query heads from the projection's rows and copies the gate half "
            "(g_qk_rope_store_qg), so g_split_qgate and a pass over q disappear. Full-attention layers only; no projection biases, no sliding layers.")

@@ -40,10 +40,10 @@ B_MODE = "2" if os.environ.get("FLASH2_B") in ("2", "3", "6") and os.environ.get
 # heads of a KV head per workgroup, no workgroup memory); the partial-tile kernel keeps the key-split loop of FLASH2_B=2.
 G6 = B_MODE == "2" and os.environ.get("FLASH2_B") == "6" and (D, G) == (256, 6) and os.environ.get("FLASH2_ROLE") != "partial"
 B2_OPTS = json.loads(os.environ.get("FLASH2_B2_OPTS") or "{}")   # flash2_b2.py experiment options
-# FLASH2_B2_FM=1 (head_dim 256 / 6 heads per KV head, whole-tile kernel): the key-split loop with a fixed softmax reference (flash2_b2.py fmax:
-# m0 from the first and the diagonal page, exact running-max fallback), V^T prefetch, exp2 domain and an unmasked loop below the diagonal
-if os.environ.get("FLASH2_B2_FM") == "1" and os.environ.get("FLASH2_ROLE") != "partial" and (D, G) == (256, 6):
-    B2_OPTS = {"fmax": 1, "vpf": "top2", "e2": 1, "peel": 1, "ovl": 1, **B2_OPTS}
+# FLASH2_B2_FM=1 (head_dim 256 / 6 heads per KV head, whole- and partial-tile kernels alike: cut invariance): the key-split loop with a fixed softmax reference (flash2_b2.py fmax:
+# m0 from the first and the diagonal page; a lane with a later score above m0 + 15 reruns with its true max), V^T prefetch, exp2, an unmasked loop below the diagonal
+if os.environ.get("FLASH2_B2_FM") == "1" and (D, G) == (256, 6):
+    B2_OPTS = {"fmax": 1, "vpf": "top2", "e2": 1, "peel": 1, **B2_OPTS}
 # B2_OPTS wg = 3 (head_dim 256 / 6 heads per KV head): one workgroup of 12 waves holds the three head pairs of a KV head (the pairs share every
 # K / V line in lockstep: the same-quarter waves of the three pairs read the same keys / dims between the same barriers)
 WG3 = B_MODE == "2" and B2_OPTS.get("wg") == 3 and (D, G) == (256, 6)

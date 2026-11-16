@@ -189,23 +189,23 @@ class FlashKeySplitD256(unittest.TestCase):
         self.assertIn("view<3x32x136xf16>", t3)
         self.assertIn("%head2 = index.assume", t3)
 
-    def test_fixed_reference_whole_tile_only(self):
-        """FLASH2_B2_FM=1: the whole-tile kernel gets the fixed-reference loops (unmasked + masked tail) and the running-max fallback;
-        the partial-tile kernel is unchanged."""
+    def test_fixed_reference(self):
+        """FLASH2_B2_FM=1: both gfx12 kernels (whole and partial tiles: cut invariance) get the fixed-reference loops (unmasked + masked tail)
+        and the per-lane second pass; the gfx11 kernel is unchanged."""
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             t2 = self.gen(tmp, FLASH2_B="2")
             fm = self.gen(tmp, FLASH2_B="2", FLASH2_B2_FM="1")
-        cut = 'export("g_attention_flash2_partial_rdna4")'
-        self.assertEqual(t2[t2.index(cut):], fm[fm.index(cut):])
-        self.assertEqual(t2[:t2.index('export("g_attention_flash2_rdna4")')], fm[:fm.index('export("g_attention_flash2_rdna4")')])   # gfx11 kernel
-        w = fm[fm.index('export("g_attention_flash2_rdna4")'):fm.index(cut)]
-        self.assertIn("%sinitA = vector.fragment<init> %fm_nmv", w)                 # S^T accumulated onto -m0
-        self.assertIn("[%c0 to %fm_nfull step %c1]", w)                              # unmasked loop below the diagonal
-        self.assertIn("[%fm_nfull to %nblk step %c1]", w)
-        self.assertIn("scf.if %fm_any", w)                                           # running-max fallback
-        self.assertIn("vector.exp2f<afn>", w)
-        self.assertNotIn("vector.expf<afn>", w)
+        r4 = 'export("g_attention_flash2_rdna4")'
+        self.assertEqual(t2[:t2.index(r4)], fm[:fm.index(r4)])
+        cut = fm.index('export("g_attention_flash2_partial_rdna4")')
+        for w in (fm[fm.index(r4):cut], fm[cut:]):
+            self.assertIn("%sinitA = vector.fragment<init> %fm_nmv", w)              # S^T accumulated onto -m0
+            self.assertIn("%sinit2A = vector.fragment<init> %fm2_nmv", w)            # second pass: overflowed lanes at their true max
+            self.assertIn("[%c0 to %fm_nfull step %c1]", w)                           # unmasked loop below the diagonal
+            self.assertIn("[%fm_nfull to %nblk step %c1]", w)
+            self.assertIn("scf.if %fm_any", w)
+            self.assertNotIn("vector.expf<afn>", w)
 
 
 class RopeQg(unittest.TestCase):
