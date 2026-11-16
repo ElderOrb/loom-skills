@@ -5816,6 +5816,10 @@ if __name__ == "__main__":
         text = re.sub(r"^( *)kernel\.launch @(\w+)_attention_flash2(_h\d+)?\[(.*)$",
                       r"\g<0>\n\1kernel.launch @\2_attention_flash2_deep\3[\4",
                       text, flags=re.M)
+    if FUSED_Q and os.environ.get("ROPE_QG") == "1" and "g_qk_rope_store_h" not in text and "g_qk_rope_store_swa" not in text:   # choice prefill.attn.rope_qg (rope_qg.py)
+        from rope_qg import fuse as _rope_qg
+        text, _nqg = _rope_qg(text)
+        print("rope_qg launches:", _nqg)
     if os.environ.get("LIVE_ROW_SKIP", "1") != "0":   # =0 A/B it off
         text = live_row_skip(text)
     from gen_gemm_rdna4 import f16o_swiglu as _f16o_on
