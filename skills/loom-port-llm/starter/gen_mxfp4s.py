@@ -71,7 +71,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     NWV = WR * WC
     NT = NWV * 32                 # threads = waves * 32 (256 for the 256 x 128 tile)
     HALVES = NT // TW             # staging threads per weight row
-    assert RF in (2, 4, 8) and WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2) and NT <= 1024
+    assert RF in (2, 4, 8) and WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2, 4) and NT <= 1024
     assert a_direct or (NT == BM == 256 and TW == 128)
     wave_cols = 16 * cfr
     YT = 'f16' if yf16 else 'f32'   # the output element type (f16: a measured option for the SwiGLU output, whose consumer is the down projection's row-scale producer)
@@ -170,7 +170,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %chalves = index.constant {HALVES} : index
   %stage_row = index.div %workitem, %chalves : index
   %stage_half = index.rem %workitem, %chalves : index
-  %stage_col = index.mul %stage_half, %cks2 : index''')
+{'' if HALVES < 4 else f'  %cnb32 = index.constant {NB * 32} : index' + chr(10)}  %stage_col = index.mul %stage_half, {'%cks2' if HALVES < 4 else '%cnb32'} : index''')
     if two_w:
         A(f'''  %half_tw = index.constant {TN} : index
   %w_is_up = index.cmp uge, %stage_row, %half_tw : index
