@@ -4856,8 +4856,11 @@ def gdn_layer(i, b, nm, sz, par):
               f" : [index, index](index, index, index, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer, buffer, view<{HV}xf32>, view<{HV}xf32>, buffer)")
         FB = (f"kernel.launch @g_gdn_fb_rdna4[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %gs, %ssm_norm_{i}, %gz, %o)"
               f" : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{DV}xf32>, buffer, buffer)")
-        ind = lambda t: "\n".join("  " + l for l in t.split("\n"))   # the GEMM branch indented: draft/gen_draft.py captures before the 2-space conv launch (verify: else branch)
-        MIX = (f"  scf.if %gemm {{\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
+        # The GEMM branch is indented, so draft/gen_draft.py's verify capture (before each 2-space g_gdn_conv launch) lands in the else branch
+        # only; the `// gdn-capture:` marker places the same capture at the head of the GEMM branch: a verify epoch can pack another
+        # request's prompt with the speculative spans (t >= 64), and its replay restores these inputs.
+        ind = lambda t: "\n".join("  " + l for l in t.split("\n"))
+        MIX = (f"  scf.if %gemm {{\n    // gdn-capture: %layer_{i}\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
                f"  }} else {{\n{FRONT}\n{REC0}\n{GATE}\n  }}")
     else:
         MIX = f"{FRONT}\n{REC}\n{GATE}"

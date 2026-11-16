@@ -1092,66 +1092,78 @@ if cfg.get("recurrent_layers") and _chunk:
   check.return
 }}
 """)
-# 4d. g_gdn_fa_rdna4 + g_gdn_fb_rdna4 (gfx12 fused prefill, gen_gdn_fused.py) on four spans from the raw projection rows: a fresh 130-token span,
-# a 64-token span that continues a stored state and conv history, a fresh 97-token span and a 2-token continuing span (the history commit shifts
-# the stored rows); the conv, norms, recurrence and norm-gate of the whole chain against float64, f16-operand tolerances as gdn_chunk_spans.
+# 4d. g_gdn_fa_rdna4 + g_gdn_fb_rdna4 (gfx12 fused prefill, gen_gdn_fused.py) against float64 (conv, norms, recurrence, norm-gate of the whole
+# chain; f16-operand tolerances as gdn_chunk_spans). gdn_fused_spans: four prompt spans packed back to back (fresh 130, continuing 64, fresh 97,
+# continuing 2: the history commit shifts the stored rows). gdn_fused_serve: the serving shape of a mixed epoch: 8 span packets of which 6 are
+# live (the 2 stale ones must be ignored), 1- and 3-token decode / verify spans beside prompt spans, rows packed in another order than the
+# packets with gaps and padding rows (the workspace slots must not collide for any packing order).
 from gen_gdn import fused_mode as _fm
 if cfg.get("recurrent_layers") and _fm(gdn_geometry(cfg)):
     from gen_gdn_fused import nslots_bytes as _nsb
-    spans_ = [(130, 0, False), (64, 10, True), (97, 0, False), (2, 20, True)]; t = sum(L for L, _, _ in spans_); ns = len(spans_)
-    x = (1.5 * rng.standard_normal((t, C))).astype(np.float32)
-    alpha = rng.standard_normal((t, HV)).astype(np.float32); beta = rng.standard_normal((t, HV)).astype(np.float32)
-    z = rng.standard_normal((t, VD)).astype(np.float32)
-    arena = np.zeros(2 * ns * LB // 4, np.float32); meta = np.zeros(4 + 9 * ns, np.int32); meta[0] = ns
-    origins = np.zeros((ns, 5), np.int64); raw_o = np.zeros((t, HV, DV)); first = 0; finals = []
-    for si, (L, p0, cont) in enumerate(spans_):
-        rd, wr = 2 * si * LB, (2 * si + 1) * LB
-        origins[si] = [rd, wr, 0, p0, 0]; meta[4 + 9 * si:4 + 9 * si + 5] = [L, p0, 0, si, first]
-        S = np.zeros((HV, DV, DK)); hist = np.zeros((K - 1, C))
-        if cont:
-            S0 = (0.3 * rng.standard_normal((HV, DV, DK))).astype(np.float32); h0 = rng.standard_normal((K - 1, C)).astype(np.float32)
-            arena[rd // 4:rd // 4 + SB // 4] = S0.reshape(-1); arena[rd // 4 + SB // 4:rd // 4 + SB // 4 + (K - 1) * C] = h0.reshape(-1)
-            S = S0.astype(np.float64); hist = h0.astype(np.float64)
-        full = np.concatenate([hist, x[first:first + L].astype(np.float64)], 0)
-        cv = np.stack([(full[i:i + K] * conv_w.T).sum(0) for i in range(L)]); sv = cv / (1 + np.exp(-cv))
-        qs, ks, vs = sv[:, :HK * DK].reshape(L, HK, DK), sv[:, HK * DK:2 * HK * DK].reshape(L, HK, DK), sv[:, 2 * HK * DK:].reshape(L, HV, DV)
-        qs = qs / np.sqrt((qs ** 2).sum(-1, keepdims=True) + eps) / np.sqrt(DK); ks = ks / np.sqrt((ks ** 2).sum(-1, keepdims=True) + eps)
-        for i in range(L):
-            for h in range(HV):
-                kh = (h // (HV // HK) if G_GROUPED else h % HK)
-                St = S[h] * np.exp(np.log1p(np.exp(float(alpha[first + i, h]) + dt[h])) * a_log[h])
-                d = (vs[i, h] - St @ ks[i, kh]) / (1 + np.exp(-float(beta[first + i, h])))
-                S[h] = St + np.outer(d, ks[i, kh]); raw_o[first + i, h] = S[h] @ qs[i, kh]
-        finals.append((wr, S, full[-(K - 1):])); first += L
-    zz = z.reshape(t, HV, DV).astype(np.float64)
-    o = raw_o / np.sqrt((raw_o ** 2).mean(-1, keepdims=True) + eps) * nw * (zz / (1 + np.exp(-zz)))
-    expect = arena.copy()
-    for wr, S, h1 in finals:
-        expect[wr // 4:wr // 4 + SB // 4] = S.astype(np.float32).reshape(-1)
-        expect[wr // 4 + SB // 4:wr // 4 + SB // 4 + (K - 1) * C] = h1.astype(np.float32).reshape(-1)
-    for n, a in [("gf_meta", meta), ("gf_orig", origins.reshape(-1).view(np.int32)), ("gf_arena", arena), ("gf_expect", expect), ("gf_x", x),
-                 ("gf_alpha", alpha), ("gf_beta", beta), ("gf_z", z), ("gf_o", o.reshape(t, VD).astype(np.float32))]:
-        save(n, a)
-    AT = f"tensor<{2 * ns * LB // 4}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * ns}xi32>"
-    WT = f"tensor<{((t + 31) // 32 + ns + 1) * _nsb(gdn_geometry(cfg)) // 4}xf32>"
-    _oscale = float(np.abs(o).max()); _sscale = float(max(np.abs(S).max() for _, S, _ in finals))
-    cases.append(f"""check.case public @gdn_fused_spans {{
+
+    def _gdn_fused_case(name, spans_, firsts, t, ncfg, stale, r):
+        """spans_: (length, start, continuing) per live packet; firsts: each one's first row; t rows (gaps and padding are zero rows);
+        ncfg span packets, live ones first, then `stale` (length, start, first) packets past the header count."""
+        ns = len(spans_)
+        x = (1.5 * r.standard_normal((t, C))).astype(np.float32)
+        alpha = r.standard_normal((t, HV)).astype(np.float32); beta = r.standard_normal((t, HV)).astype(np.float32)
+        z = r.standard_normal((t, VD)).astype(np.float32)
+        arena = (0.1 * r.standard_normal(2 * ncfg * LB // 4)).astype(np.float32); meta = np.zeros(4 + 9 * ncfg, np.int32); meta[0] = ns
+        origins = np.zeros((ncfg, 5), np.int64); raw_o = np.zeros((t, HV, DV)); finals = []; live = np.zeros(t, bool)
+        for si in range(ncfg):
+            origins[si] = [2 * si * LB, (2 * si + 1) * LB, 0, 0, 0]
+        for k, (L, p0, f0) in enumerate(stale):
+            si = ns + k; origins[si, 3] = p0; meta[4 + 9 * si:4 + 9 * si + 5] = [L, p0, 0, si, f0]
+        for si, ((L, p0, cont), first) in enumerate(zip(spans_, firsts)):
+            rd, wr = 2 * si * LB, (2 * si + 1) * LB
+            origins[si, 3] = p0; meta[4 + 9 * si:4 + 9 * si + 5] = [L, p0, 0, si, first]; live[first:first + L] = True
+            S = np.zeros((HV, DV, DK)); hist = np.zeros((K - 1, C))
+            if cont:
+                S0 = (0.3 * r.standard_normal((HV, DV, DK))).astype(np.float32); h0 = r.standard_normal((K - 1, C)).astype(np.float32)
+                arena[rd // 4:rd // 4 + SB // 4] = S0.reshape(-1); arena[rd // 4 + SB // 4:rd // 4 + SB // 4 + (K - 1) * C] = h0.reshape(-1)
+                S = S0.astype(np.float64); hist = h0.astype(np.float64)
+            full = np.concatenate([hist, x[first:first + L].astype(np.float64)], 0)
+            cv = np.stack([(full[i:i + K] * conv_w.T).sum(0) for i in range(L)]); sv = cv / (1 + np.exp(-cv))
+            qs, ks, vs = sv[:, :HK * DK].reshape(L, HK, DK), sv[:, HK * DK:2 * HK * DK].reshape(L, HK, DK), sv[:, 2 * HK * DK:].reshape(L, HV, DV)
+            qs = qs / np.sqrt((qs ** 2).sum(-1, keepdims=True) + eps) / np.sqrt(DK); ks = ks / np.sqrt((ks ** 2).sum(-1, keepdims=True) + eps)
+            for i in range(L):
+                for h in range(HV):
+                    kh = (h // (HV // HK) if G_GROUPED else h % HK)
+                    St = S[h] * np.exp(np.log1p(np.exp(float(alpha[first + i, h]) + dt[h])) * a_log[h])
+                    d = (vs[i, h] - St @ ks[i, kh]) / (1 + np.exp(-float(beta[first + i, h])))
+                    S[h] = St + np.outer(d, ks[i, kh]); raw_o[first + i, h] = S[h] @ qs[i, kh]
+            finals.append((wr, S, full[-(K - 1):]))
+        zz = z.reshape(t, HV, DV).astype(np.float64)
+        o = raw_o / np.sqrt((raw_o ** 2).mean(-1, keepdims=True) + eps) * nw * (zz / (1 + np.exp(-zz)))
+        o[~live] = 0.0   # rows of no live span (gaps, padding) are never written: the output buffer keeps its zero fill
+        expect = arena.copy()
+        for wr, S, h1 in finals:
+            expect[wr // 4:wr // 4 + SB // 4] = S.astype(np.float32).reshape(-1)
+            expect[wr // 4 + SB // 4:wr // 4 + SB // 4 + (K - 1) * C] = h1.astype(np.float32).reshape(-1)
+        tg = name.replace("gdn_fused_", "gf")
+        for n, a in [("meta", meta), ("orig", origins.reshape(-1).view(np.int32)), ("arena", arena), ("expect", expect), ("x", x),
+                     ("alpha", alpha), ("beta", beta), ("z", z), ("o", o.reshape(t, VD).astype(np.float32))]:
+            save(f"{tg}_{n}", a)
+        AT = f"tensor<{2 * ncfg * LB // 4}xf32>"; MT = f"tensor<{4 + 9 * ncfg}xi32>"; OT = f"tensor<{10 * ncfg}xi32>"
+        WT = f"tensor<{((t + 31) // 32 + ncfg + 1) * _nsb(gdn_geometry(cfg)) // 4}xf32>"
+        _oscale = float(np.abs(o).max()); _sscale = float(max(np.abs(S).max() for _, S, _ in finals))
+        cases.append(f"""check.case public @{name} {{
   %t = check.literal value({t}) : index
-  %spans = check.literal value({ns}) : index
+  %spans = check.literal value({ncfg}) : index
   %layer = check.literal value(0) : index
-  %meta = check.file.read.npy path("gf_meta.npy") : {MT}
-  %orig = check.file.read.npy path("gf_orig.npy") : {OT}
-  %arena = check.file.read.npy path("gf_arena.npy") : {AT}
-  %expect = check.file.read.npy path("gf_expect.npy") : {AT}
-  %x = check.file.read.npy path("gf_x.npy") : tensor<{t}x{C}xf32>
+  %meta = check.file.read.npy path("{tg}_meta.npy") : {MT}
+  %orig = check.file.read.npy path("{tg}_orig.npy") : {OT}
+  %arena = check.file.read.npy path("{tg}_arena.npy") : {AT}
+  %expect = check.file.read.npy path("{tg}_expect.npy") : {AT}
+  %x = check.file.read.npy path("{tg}_x.npy") : tensor<{t}x{C}xf32>
   %w = check.file.read.npy path("g_conv_w.npy") : tensor<{C * K}xf32>
-  %alpha = check.file.read.npy path("gf_alpha.npy") : tensor<{t}x{HV}xf32>
-  %beta = check.file.read.npy path("gf_beta.npy") : tensor<{t}x{HV}xf32>
+  %alpha = check.file.read.npy path("{tg}_alpha.npy") : tensor<{t}x{HV}xf32>
+  %beta = check.file.read.npy path("{tg}_beta.npy") : tensor<{t}x{HV}xf32>
   %a = check.file.read.npy path("g_a.npy") : tensor<{HV}xf32>
   %dt = check.file.read.npy path("g_dt.npy") : tensor<{HV}xf32>
   %nw = check.file.read.npy path("g_nw.npy") : tensor<{DV}xf32>
-  %z = check.file.read.npy path("gf_z.npy") : tensor<{t}x{VD}xf32>
-  %eo = check.file.read.npy path("gf_o.npy") : tensor<{t}x{VD}xf32>
+  %z = check.file.read.npy path("{tg}_z.npy") : tensor<{t}x{VD}xf32>
+  %eo = check.file.read.npy path("{tg}_o.npy") : tensor<{t}x{VD}xf32>
   %work = check.generate.fill value(0.0) : {WT}
   %o = check.generate.fill value(0.0) : tensor<{t}x{VD}xf32>
   kernel.launch @g_gdn_fa_rdna4[%t, %spans](%t, %spans, %layer, %meta, %orig, %arena, %x, %w, %alpha, %beta, %a, %dt, %work) : [index, index](index, index, index, {MT}, {OT}, {AT}, tensor<{t}x{C}xf32>, tensor<{C * K}xf32>, tensor<{t}x{HV}xf32>, tensor<{t}x{HV}xf32>, tensor<{HV}xf32>, tensor<{HV}xf32>, {WT})
@@ -1161,6 +1173,11 @@ if cfg.get("recurrent_layers") and _fm(gdn_geometry(cfg)):
   check.return
 }}
 """)
+    _sp = [(130, 0, False), (64, 10, True), (97, 0, False), (2, 20, True)]
+    _gdn_fused_case("gdn_fused_spans", _sp, [0, 130, 194, 291], 293, 4, [], rng)
+    # packets: decode 1, prompt 150, verify 3, continuing prompt 64, decode 1, prompt 33; rows: 33 | gap 2 | 1 | 64 | gap 1 | 150 | 1 | 3 | pad 7
+    _sp = [(1, 37, True), (150, 0, False), (3, 12, True), (64, 50, True), (1, 9, True), (33, 0, False)]
+    _gdn_fused_case("gdn_fused_serve", _sp, [35, 101, 252, 36, 251, 0], 262, 8, [(40, 5, 0), (17, 0, 100)], np.random.default_rng(42))
 # g_row_scale_f16 (the GEMM A operand): per-row power-of-two scale 2^-e, e = clamp(floor(log2 max|x|) - 13, 0, 100),
 # x16 = f16(x * scale); rows of very different magnitude, width = the FFN width (the widest the model uses).
 if os.environ.get("GEMM_TESTS", "1") == "1":

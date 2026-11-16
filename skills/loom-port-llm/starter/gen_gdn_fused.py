@@ -16,7 +16,8 @@ g_gdn_chunk_rdna4 and g_gdn_norm_gate. The chunked (WY) form is that of gen_gdn_
 The serial pass in g_gdn_chunk_rdna4 ran the 32-row triangular solve, the staging loads and five barriers per chunk on 48 workgroups; here
 the solve runs once per chunk in parallel, and the serial chain is three WMMA products per chunk with one LDS round trip (the norm).
 
-Workspace slot of chunk c of span s: first_s / 32 + s + c (distinct over the epoch's spans; at most ceil(tokens / 32) + spans slots).
+Workspace slot of chunk c of span s: first_s / 32 + rank_s + c, rank_s = the span's rank by first row among the live spans (distinct for any
+packing order; at most ceil(tokens / 32) + spans slots).
 Padding rows of a chunk (beyond the span's end) have q = k = v = 0, beta = 0 and g = 0, so W, U, P, Q, K^T are zero there and change nothing.
 """
 
@@ -435,7 +436,8 @@ kernel.def {tgt}export("{kname}") @{kname}(%tokens: index, %spans: index) {{
   %nslots = index.add %ns_a, %k1 : index
 {_region_text(G)}
   %fdiv = index.div %first, %k32 : index
-  %slot_a = index.add %fdiv, %span : index
+  %rank = func.call @g_gdn_fused_rank(%metadata, %spans, %first) : (buffer, index, index) -> (index)
+  %slot_a = index.add %fdiv, %rank : index
   %slot = index.add %slot_a, %chunk : index
   %sv_v = index.mul %slot, {ci(HV)} : index
   %svh = index.add %sv_v, %vh : index
@@ -800,7 +802,8 @@ kernel.def {tgt}export("{kname}") @{kname}(%spans: index) {{
   %nslots = index.add %ns_a, %k1 : index
 {_region_text(G)}
   %fdiv = index.div %first, %k32 : index
-  %slot0 = index.add %fdiv, %span : index
+  %rank = func.call @g_gdn_fused_rank(%metadata, %spans, %first) : (buffer, index, index) -> (index)
+  %slot0 = index.add %fdiv, %rank : index
   %ob = index.constant {CN * OS * 4} : offset
   %o_buf = buffer.alloca<workgroup> align(16) %ob : buffer
   %o_lds = buffer.view %o_buf[%zero] : buffer -> view<{CN}x{OS}xf32>
@@ -845,5 +848,40 @@ kernel.def {tgt}export("{kname}") @{kname}(%spans: index) {{
             + guard_open + "\n".join(stores) + "\n" + guard_close + "\n  }\n  kernel.return\n}\n")
 
 
+RANK = """
+// Rank of a live span (length > 0) among the epoch's live spans ordered by first row: the workspace slots of span s are
+// floor(first_s / 32) + rank_s + chunk, distinct for any packing order of the spans (rows of different spans never overlap).
+func.def inline @g_gdn_fused_rank(%metadata: buffer, %spans: index, %first: index) -> (index) {
+  %zero = index.constant 0 : offset
+  %c16 = index.constant 16 : offset
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %header = buffer.view %metadata[%zero] : buffer -> view<4xi32>
+  %count32 = view.load %header[0] : view<4xi32> -> i32
+  %count_bound = scalar.assume %count32 [range(%count32, 0, 8192)] : i32
+  %count_raw = index.cast %count_bound : i32 to index
+  %count = index.min %count_raw, %spans : index
+  %packets = buffer.view %metadata[%c16] : buffer -> view<[%spans]x9xi32>
+  %rank = scf.for %j = [%c0 to %count step %c1](%acc = %c0 : index) -> (index) {
+    %jb = index.assume %j [lt(%j, %spans)] : index
+    %len32 = view.load %packets[%jb, 0] : view<[%spans]x9xi32> -> i32
+    %fst32 = view.load %packets[%jb, 4] : view<[%spans]x9xi32> -> i32
+    %len_b = scalar.assume %len32 [range(%len32, 0, 8192)] : i32
+    %fst_b = scalar.assume %fst32 [range(%fst32, 0, 8191)] : i32
+    %len = index.cast %len_b : i32 to index
+    %fst = index.cast %fst_b : i32 to index
+    %ne = index.cmp ugt, %len, %c0 : index
+    %lt = index.cmp ult, %fst, %first : index
+    %before = scalar.andi %ne, %lt : i1
+    %inc = scf.select %before, %c1, %c0 : index
+    %acc_n = index.add %acc, %inc : index
+    scf.yield %acc_n : index
+  }
+  %rank_b = index.assume %rank [range(%rank, 0, 8191)] : index
+  func.return %rank_b : index
+}
+"""
+
+
 def fused_kernels(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", target=True):
-    return phase_a(G, NG, LB, eps, grouped, ratio, target) + "\n" + phase_b(G, NG, LB, eps, grouped, ratio, guard_open, guard_close, target)
+    return RANK + phase_a(G, NG, LB, eps, grouped, ratio, target) + "\n" + phase_b(G, NG, LB, eps, grouped, ratio, guard_open, guard_close, target)

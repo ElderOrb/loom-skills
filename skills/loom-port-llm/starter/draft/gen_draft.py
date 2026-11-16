@@ -841,6 +841,20 @@ def copy_split_twin(text, name, spl):
     return t
 
 
+def gdn_capture(body):
+    """Verify program: capture each gated delta-net layer's pre-conv inputs (%gq, %galpha, %gbeta) for the replay, before its 2-space
+    g_gdn_conv launch, or at a `// gdn-capture: %layer_N` marker (gen_llm's fused GDN prefill puts one at the head of its GEMM branch,
+    whose conv launches are indented: a verify epoch can pack another request's prompt rows with the speculative spans, t >= 64)."""
+    out = []
+    for line in body.split("\n"):
+        mk = re.match(r"^( *)// gdn-capture: %layer_(\w+)$", line)
+        if line.startswith("  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_") or mk:
+            layer, ind = (mk.group(2), mk.group(1)) if mk else (line.split("%layer_")[1].split(",")[0], "  ")
+            out.append(f"{ind}scf.if %not_gated {{\n{ind}  kernel.launch @g_gdn_capture[%t](%t, %layer_{layer}, %gq, %galpha, %gbeta, %capture) : [index](index, index, buffer, buffer, buffer, buffer)\n{ind}}}")
+        out.append(line)
+    return "\n".join(out)
+
+
 def verify_program(program, g):
     body, _ = _split_head(advance_program(program, g))
     body = body[body.index("command.program.def public @llm_advance()"):]   # config decls are emitted once (advance)
@@ -863,13 +877,7 @@ def verify_program(program, g):
                "  %capture = buffer.alloca<global> align(256) %cap_size : buffer\n")
         anchor = "  kernel.launch @g_token_info[%t]"
         body = body.replace(anchor, cap + anchor, 1)
-        out = []
-        for line in body.split("\n"):
-            if line.startswith("  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_"):
-                layer = line.split("%layer_")[1].split(",")[0]
-                out.append(f"  scf.if %not_gated {{\n    kernel.launch @g_gdn_capture[%t](%t, %layer_{layer}, %gq, %galpha, %gbeta, %capture) : [index](index, index, buffer, buffer, buffer, buffer)\n  }}")
-            out.append(line)
-        body = "\n".join(out)
+        body = gdn_capture(body)
     # Generic recurrent replay (kits register it in gen_llm.MODEL_PARTS["replay"]; e.g. LFM2 short-conv,
     # reference/lfm2moe-example/gen_sconv.py): {"name", "match": prefix of the trunk launch that reads the
     # span's inputs, "buffers": [(ssa, f32 width per token)], "replay": f(layer) -> text}. The buffers are
