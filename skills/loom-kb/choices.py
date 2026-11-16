@@ -241,6 +241,13 @@ CHOICE("decode.spec.gdn_fold", "bool", False, "GDN_FOLD", enc=("1", None),
            "step's fold factors (raw conv input + key, update scalar per value column, decay per head) and, after acceptance, one launch "
            "folds the accepted steps into every layer's state and one commits the conv histories (gen_gdn.fold_kernels). Published state "
            "bit-identical to the replay's; the verify scratch holds 8 rows per span instead of every epoch token's replay inputs.")
+CHOICE("decode.spec.gdn_fold_defer", "bool", False, "GDN_FOLD_DEFER", enc=("1", None),
+       kernels=["g_gdn_recurrence_rec*", "g_gdn_fold*", "g_gdn_pend*", "g_gdn_flush"], rows=ROWS_DECODE, from_pr="mxfp4st-defold",
+       doc="With decode.spec.gdn_fold: the fold of a drafted verification is deferred. The accepted steps' factors become the writer "
+           "slot's pending fold (each slot layer holds 8 steps of keys + dk + decay); the next verification's recurrence applies them in "
+           "registers and writes the folded state back (one state read per drafted step instead of two), and every other reader (advance "
+           "epochs, publishing spans, forks) applies them first (g_gdn_flush + g_gdn_pend_clear at the program start). Bit-identical to "
+           "the eager fold (gen_gdn.defer_kernels).")
 CHOICE("decode.mv.pair_proj", "str", "qg", "PAIR_PROJ", kernels=["g_mv*_pair"], rows=ROWS_DECODE + ROWS_STREAMS,
        doc="Paired projections: qg (q + gate), kv (k + v), 1 (both), 0 (off). k + v measured no faster end to end.")
 
