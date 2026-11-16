@@ -675,6 +675,10 @@ PY
         LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
       fi
       export LOOM_KIT=${KIT[$p1]}
+      # "reference_cache": "PATH.tgz" (a job field, relative to the checkout): references an earlier job recorded (its gates_V/llama_cache.tgz), keyed by checkpoint
+      # revision + vLLM version + request, so a runner that cannot serve the reference (or a rerun) only serves Loom
+      rcache=$(q "print(j.get('reference_cache') or '')")
+      [ -n "$rcache" ] && { mkdir -p "$D/$p1/bench" && tar -xzf "$here/$rcache" -C "$D/$p1/bench" && echo "reference cache restored from $rcache"; }
       step "gates $p1 LEVEL=$p2"
       ( unset LLAMA_SPEC; FORCE=1 LEVEL=$p2 "$B/gates.sh" "$D/$p1/pkg" "$url" "$gguf" "$D/$p1/bench" "$LLAMA_PORT" ) > "$out/gates_$p1.out" 2>&1; rc=$?
       mkdir -p "$out/gates_$p1"; cp "$D/$p1"/bench/gates.json "$D/$p1"/bench/gates_*.log "$out/gates_$p1/" 2>/dev/null
