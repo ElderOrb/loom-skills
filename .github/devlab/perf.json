@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st defold exp1: decode.spec.gdn_fold_defer (variant defer: this branch + GDN_FOLD_DEFER=1 on the AMD node) vs origin/mxfp4st (eager fold): ktest + func + per-kernel profile of a drafted decode; ABBA decode; long + 4-stream. Evidence branch, not for merge. Served context 110592.",
+ "_comment": "mxfp4st defold exp2: decode.spec.gdn_fold_defer, pending blocks per layer (A: GDN_PEND_TAIL=0, exp1 layout) vs after every layer's state (B: default) vs origin/mxfp4st (eager fold): c4 undrafted (exp1: A -0.7 %), decode ABBA, ktest + profile. Evidence branch, not for merge. Served context 110592.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
@@ -7,109 +7,12 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "defold-kt-prof",
+   "name": "defold2-c4",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
    "repeat_rows": 3,
    "variants": [
-    {
-     "name": "base",
-     "ref": "origin/mxfp4st",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592
-    },
-    {
-     "name": "defer",
-     "build": {
-      "GDN_FOLD_DEFER": "1"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592
-    }
-   ],
-   "steps": [
-    "ktest:defer",
-    "func:defer",
-    "profile:base:dec",
-    "profile:defer:dec",
-    "profile:defer:dec",
-    "profile:base:dec"
-   ]
-  },
-  {
-   "name": "defold-abba",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
-   "kit": null,
-   "llamacpp": "b1375",
-   "repeat_rows": 3,
-   "variants": [
-    {
-     "name": "base",
-     "ref": "origin/mxfp4st",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592
-    },
-    {
-     "name": "defer",
-     "build": {
-      "GDN_FOLD_DEFER": "1"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592
-    }
-   ],
-   "steps": [
-    "perf:base:1",
-    "perf:defer:1",
-    "perf:defer:1",
-    "perf:base:1",
-    "perf:base:1",
-    "perf:defer:1"
-   ]
-  },
-  {
-   "name": "defold-long-c4",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
-   "kit": null,
-   "llamacpp": "b1375",
-   "repeat_rows": 3,
-   "variants": [
-    {
-     "name": "base",
-     "ref": "origin/mxfp4st",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592
-    },
-    {
-     "name": "defer",
-     "build": {
-      "GDN_FOLD_DEFER": "1"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592
-    },
     {
      "name": "base_nd",
      "ref": "origin/mxfp4st",
@@ -124,7 +27,22 @@
      }
     },
     {
-     "name": "defer_nd",
+     "name": "a_nd",
+     "build": {
+      "GDN_FOLD_DEFER": "1",
+      "GDN_PEND_TAIL": "0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592,
+     "execution": {
+      "draft_depth": 0
+     }
+    },
+    {
+     "name": "b_nd",
      "build": {
       "GDN_FOLD_DEFER": "1"
      },
@@ -139,14 +57,101 @@
     }
    ],
    "steps": [
-    "perf:base:1:long",
-    "perf:defer:1:long",
-    "perf:defer:1:long",
-    "perf:base:1:long",
     "c4:base_nd",
-    "c4:defer_nd",
-    "c4:defer_nd",
+    "c4:a_nd",
+    "c4:b_nd",
+    "c4:b_nd",
+    "c4:a_nd",
     "c4:base_nd"
+   ]
+  },
+  {
+   "name": "defold2-dec",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
+   "kit": null,
+   "llamacpp": "b1375",
+   "repeat_rows": 3,
+   "variants": [
+    {
+     "name": "base",
+     "ref": "origin/mxfp4st",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    },
+    {
+     "name": "a",
+     "build": {
+      "GDN_FOLD_DEFER": "1",
+      "GDN_PEND_TAIL": "0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    },
+    {
+     "name": "b",
+     "build": {
+      "GDN_FOLD_DEFER": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    }
+   ],
+   "steps": [
+    "perf:base:1",
+    "perf:a:1",
+    "perf:b:1",
+    "perf:b:1",
+    "perf:a:1",
+    "perf:base:1",
+    "perf:base:1",
+    "perf:a:1",
+    "perf:b:1"
+   ]
+  },
+  {
+   "name": "defold2-kt-prof",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
+   "kit": null,
+   "llamacpp": "b1375",
+   "repeat_rows": 3,
+   "variants": [
+    {
+     "name": "base",
+     "ref": "origin/mxfp4st",
+     "build": {},
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    },
+    {
+     "name": "b",
+     "build": {
+      "GDN_FOLD_DEFER": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 110592
+    }
+   ],
+   "steps": [
+    "ktest:b",
+    "func:b",
+    "profile:base:dec",
+    "profile:b:dec"
    ]
   }
  ]
