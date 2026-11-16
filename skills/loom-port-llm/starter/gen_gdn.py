@@ -579,7 +579,7 @@ kernel.def export("g_gdn_norm_gate") @g_gdn_norm_gate(%tokens: index) {{
     fold = spec and fold_enabled(G)
     if fold:   # GDN_FOLD: the verification variants and the fold launches (draft/gen_draft.verify_program)
         main_class = "short" if recurrence_pf(G) else None
-        text += "\n" + _conv_bank(text, G, CU) + "\n" + _recurrence_rows(G, NG, LB, *RL, guard_open, guard_close, main_class, record=True)
+        text += "\n" + FOLD_RANK + "\n" + _conv_bank(text, G, CU) + "\n" + _recurrence_rows(G, NG, LB, *RL, guard_open, guard_close, main_class, record=True)
         text += "\n" + fold_kernels(G, NG, LB)
     mode = chunk_mode(G)
     if mode:
@@ -599,7 +599,44 @@ kernel.def export("g_gdn_norm_gate") @g_gdn_norm_gate(%tokens: index) {{
     return text
 
 
-FOLD_W = 8   # bank rows per span of the fold factors: the verify width's bound (config @llm.width <= 8; g_spec_accept: span length 1..8)
+FOLD_W = 8   # bank rows per speculative span of the fold factors: the verify width's bound (config @llm.width <= 8; g_spec_accept: span length 1..8)
+FOLD_SPANS = 32   # speculative spans per verification the banks hold (one per drafting row; build.py refuses GDN_FOLD with more rows). The banks are
+                  # sized min(spans, FOLD_SPANS) * FOLD_W rows: the runtime prepares @llm_verify for every packing shape, (1024, 1024) included,
+                  # so spans * FOLD_W rows would be 29 GB there (DevLab run 43821931908: RESOURCE_EXHAUSTED); this cap keeps the largest
+                  # verification scratch below the capture it replaces.
+
+FOLD_RANK = r"""
+// Rank of span `span` among the epoch's speculative spans (flag bit 4): its block of the fold banks (gen_gdn.fold_kernels).
+func.def inline @g_gdn_spec_rank(%metadata: buffer, %spans: index, %span: index) -> (index) {
+  %c16 = index.constant 16 : offset
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %packets = buffer.view %metadata[%c16] : buffer -> view<[%spans]x9xi32>
+  %four = scalar.constant 4 : i32
+  %zero32 = scalar.constant 0 : i32
+  %rank = scf.for %s = [%c0 to %span step %c1](%n = %c0 : index) -> (index) {
+    %sb = index.assume %s [lt(%s, %spans)] : index
+    %flags = view.load %packets[%sb, 6] : view<[%spans]x9xi32> -> i32
+    %bit = scalar.andi %flags, %four : i32
+    %is = scalar.cmpi ne, %bit, %zero32 : i32
+    %inc = scf.select %is, %c1, %c0 : index
+    %n1 = index.add %n, %inc : index
+    scf.yield %n1 : index
+  }
+  func.return %rank : index
+}
+"""
+
+
+def _rank_text(meta="%metadata", ok_extra=None):
+    """%rank (the span's speculative rank) and %rank_ok (speculative and rank < FOLD_SPANS) for the kernel's %span."""
+    return (f"  %rank_pub = func.call @g_gdn_publish({meta}, %spans, %span) : (buffer, index, index) -> (i1)\n"
+            "  %rank_true = scalar.constant true : i1\n"
+            "  %rank_spec = scalar.xori %rank_pub, %rank_true : i1\n"
+            f"  %rank = func.call @g_gdn_spec_rank({meta}, %spans, %span) : (buffer, index, index) -> (index)\n"
+            f"  %rank_cap = index.constant {FOLD_SPANS} : index\n"
+            "  %rank_in = index.cmp ult, %rank, %rank_cap : index\n"
+            "  %rank_ok = scalar.andi %rank_spec, %rank_in : i1\n")
 
 
 def fold_enabled(G=None):
@@ -610,10 +647,12 @@ def fold_enabled(G=None):
 
 
 def _bank_view(name, buf, width, define_rows=True):
-    """`%{name}` = view<[%bank_rows]x{width}xf32> of layer %layer's block of a fold bank ([layer][span * FOLD_W + step][width] f32);
-    define_rows: also define %bank_rows = %spans * FOLD_W (once per kernel)."""
+    """`%{name}` = view<[%bank_rows]x{width}xf32> of layer %layer's block of a fold bank ([layer][rank * FOLD_W + step][width] f32);
+    define_rows: also define %bank_rows = min(%spans, FOLD_SPANS) * FOLD_W (once per kernel)."""
     rows = (f"  %bank_rows_w = index.constant {FOLD_W} : index\n"
-            f"  %bank_rows = index.mul %spans, %bank_rows_w : index\n") if define_rows else ""
+            f"  %bank_rows_c = index.constant {FOLD_SPANS} : index\n"
+            f"  %bank_rows_s = index.min %spans, %bank_rows_c : index\n"
+            f"  %bank_rows = index.mul %bank_rows_s, %bank_rows_w : index\n") if define_rows else ""
     return (rows + f"  %{name}_rb = index.constant {width * 4} : offset\n"
             f"  %{name}_lb = index.scale %bank_rows, %{name}_rb : index, offset -> offset\n"
             f"  %{name}_at = index.scale %layer, %{name}_lb : index, offset -> offset\n"
@@ -646,8 +685,8 @@ def _conv_bank(text, G, CU):
     sub("%weight: buffer, %out: buffer) {", "%weight: buffer, %out: buffer, %bankx: buffer, %bankk: buffer) {")
     rel = "    %rel = index.assume %rel_value [range(%rel_value, 0, 8191)] : index\n"
     sub(rel, rel + "\n".join("  " + l for l in (_bank_view("bx_view", "bankx", C) + _bank_view("bk_view", "bankk", HK * DK, False)
-                                                  + _bank_row("bank_row", "%span", "%rel", "%bank_rows")).rstrip("\n").split("\n"))
-        + f"\n    %bank_cw = index.constant {FOLD_W} : index\n    %bank_ok = index.cmp ult, %rel, %bank_cw : index\n"
+                                                  + _rank_text() + _bank_row("bank_row", "%rank", "%rel", "%bank_rows")).rstrip("\n").split("\n"))
+        + f"\n    %bank_cw = index.constant {FOLD_W} : index\n    %bank_rel = index.cmp ult, %rel, %bank_cw : index\n    %bank_ok = scalar.andi %bank_rel, %rank_ok : i1\n"
         f"    %bank_k0 = index.constant {HK * DK} : index\n    %bank_k1 = index.constant {2 * HK * DK} : index\n")
     stores = []
     for u in range(CU):
@@ -685,7 +724,7 @@ def _record_rows(text, G, NG, CW, RL):
     sub('kernel.def export("g_gdn_recurrence") @g_gdn_recurrence(', 'kernel.def export("g_gdn_recurrence_rec") @g_gdn_recurrence_rec(')
     sub("%dt_bias: buffer, %out: buffer) {", "%dt_bias: buffer, %out: buffer, %bank: buffer) {")
     view = f"  %out_view = buffer.view %out[%zero] : buffer -> view<[%tokens]x{VD}xf32>\n"
-    sub(view, view + _bank_view("bd_view", "bank", VD + HV))
+    sub(view, view + _bank_view("bd_view", "bank", VD + HV) + _rank_text())
     head = [l for l in text.split("\n") if "= scf.for %step = [%c0 to %length step %c1i](" in l]
     assert len(head) == 1
     h = head[0]
@@ -701,9 +740,10 @@ def _record_rows(text, G, NG, CW, RL):
     st = f"        vector.store %ob_next, %out_view[%ob_row, %out_channel] : {VC}, view<[%tokens]x{VD}xf32>\n"
     rec = (st + "        %rb_step = index.add %ob_step0, %r : index\n"
            f"        %rb_cw = index.constant {FOLD_W} : index\n"
-           "        %rb_ok = index.cmp ult, %rb_step, %rb_cw : index\n"
+           "        %rb_in = index.cmp ult, %rb_step, %rb_cw : index\n"
+           "        %rb_ok = scalar.andi %rb_in, %rank_ok : i1\n"
            "        scf.if %rb_ok {\n"
-           + "\n".join("  " + l for l in _bank_row("rb_row", "%span", "%rb_step", "%bank_rows").rstrip("\n").split("\n")) + "\n"
+           + "\n".join("  " + l for l in _bank_row("rb_row", "%rank", "%rb_step", "%bank_rows").rstrip("\n").split("\n")) + "\n"
            f"          vector.store %db_next, %bd_view[%rb_row, %out_channel] : {VC}, view<[%bank_rows]x{VD + HV}xf32>\n"
            "          %rb_t0 = index.cmp eq, %tile, %c0 : index\n"
            "          %rb_g0 = index.cmp eq, %cg, %c0 : index\n"
@@ -746,7 +786,11 @@ def fold_kernels(G, NG, LB):
   %publish = func.call @g_gdn_publish(%metadata, %spans, %span) : (buffer, index, index) -> (i1)
   %true = scalar.constant true : i1
   %spec = scalar.xori %publish, %true : i1
-  %mine = scalar.andi %active, %spec : i1
+  %mine_s = scalar.andi %active, %spec : i1
+  %rank = func.call @g_gdn_spec_rank(%metadata, %spans, %span) : (buffer, index, index) -> (index)
+  %rank_cap = index.constant {FOLD_SPANS} : index
+  %rank_in = index.cmp ult, %rank, %rank_cap : index
+  %mine = scalar.andi %mine_s, %rank_in : i1
 """
     NP = 4   # 8-column passes per workgroup: every pass's state is loaded before the step loop, stored after it
     loads, stores, dks, upd = [], [], [], []
@@ -772,7 +816,7 @@ def fold_kernels(G, NG, LB):
         stores.append(f"    vector.store %s{p}_f, %next_view[%si{p}] : vector<4xf32>, view<{NS}xf32>")
     V4 = ", ".join(["vector<4xf32>"] * NP)
     steps = f"""    %{"_f, %".join(f"s{p}" for p in range(NP))}_f = scf.for %step = [%c0 to %length step %c1]({", ".join(f"%s{p} = %s{p}_0 : vector<4xf32>" for p in range(NP))}) -> ({V4}) {{
-{chr(10).join("    " + l for l in _bank_row("br", "%span", "%step", "%bank_rows").rstrip(chr(10)).split(chr(10)))}
+{chr(10).join("    " + l for l in _bank_row("br", "%rank", "%step", "%bank_rows").rstrip(chr(10)).split(chr(10)))}
       %kv = vector.load %bk_view[%br, %krow] : view<[%bank_rows]x{HK * DK}xf32> -> vector<4xf32>
 {chr(10).join(dks)}
       %dec = view.load %bd_view[%br, %dcol] : view<[%bank_rows]x{VD + HV}xf32> -> f32
@@ -843,7 +887,7 @@ kernel.def export("g_gdn_fold") @g_gdn_fold(%spans: index, %layers: index) {{
       %has{k} = index.cmp uge, %length, %need{k} : index
       %val{k} = scf.if %has{k} -> (f32) {{
         %st{k} = index.sub %length, %need{k} : index
-{chr(10).join("    " + l for l in _bank_row(f"hr{k}", "%span", f"%st{k}", "%bank_rows").rstrip(chr(10)).split(chr(10)))}
+{chr(10).join("    " + l for l in _bank_row(f"hr{k}", "%rank", f"%st{k}", "%bank_rows").rstrip(chr(10)).split(chr(10)))}
         %v{k} = view.load %bx_view[%hr{k}, %ch] : view<[%bank_rows]x{C}xf32> -> f32
         scf.yield %v{k} : f32
       }} else {{

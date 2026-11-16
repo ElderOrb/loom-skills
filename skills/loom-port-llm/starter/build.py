@@ -190,6 +190,10 @@ env = dict(os.environ, LLM_CONFIG=os.path.abspath(a.config), LLM_OUT=gen, LLM_TO
            LLM_DRAFT=json.dumps(DRAFT))
 sys.path.insert(0, os.path.join(HERE, "draft"))
 import build_draft  # noqa: E402
+if DRAFT and cfg.get("recurrent_layers") and env.get("GDN_FOLD", "").strip().lower() not in ("", "0", "false", "no", "off"):
+    from gen_gdn import FOLD_SPANS  # noqa: E402
+    if a.rows > FOLD_SPANS:   # the fold banks hold FOLD_SPANS speculative spans (one per drafting row)
+        sys.exit(f"decode.spec.gdn_fold holds {FOLD_SPANS} drafting rows; --rows {a.rows} needs it off")
 subprocess.run([sys.executable, os.path.join(HERE, "gen_llm.py"), os.path.abspath(a.config)], check=True, env=env, stdout=subprocess.DEVNULL)
 os.replace(os.path.join(gen, "model.loom"), os.path.join(pkg, "program", "llm.loom"))
 # Load-time weight policies of drafting (draft/prep_weights.py): a BF16/F16 drafter as Q8_0, the proposals' Q4_0 head.

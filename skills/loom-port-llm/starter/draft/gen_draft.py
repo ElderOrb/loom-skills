@@ -863,20 +863,21 @@ def verify_program(program, g):
     # every drafted token feeds the head: no last-layer output-row selection (gen_llm.last_out_select)
     body = body.replace("%outsel_on = scalar.constant true : i1", "%outsel_on = scalar.constant false : i1")
     GDN = g["GDN"]
-    from gen_gdn import fold_enabled, FOLD_W
+    from gen_gdn import fold_enabled, FOLD_W, FOLD_SPANS
     fold = bool(GDN) and fold_enabled(GDN)
     if fold:
         # decode.spec.gdn_fold: no capture / restore / replay. The verification's conv keeps each speculative step's raw input and key
         # (g_gdn_conv_bank), its recurrence each step's update factors (g_gdn_recurrence_rec); after acceptance one g_gdn_fold launch
         # applies the accepted steps to every layer's state and one g_gdn_fold_hist launch commits the conv histories (gen_gdn.fold_kernels).
-        # Banks: [layer][span * FOLD_W + step][width] f32, FOLD_W rows per span (not per epoch token).
+        # Banks: [layer][rank * FOLD_W + step][width] f32 (rank among the epoch's speculative spans), min(spans, FOLD_SPANS) * FOLD_W rows.
         banks = ""
         for name, width in (("x", GDN["C"]), ("k", GDN["HK"] * GDN["DK"]), ("d", GDN["VD"] + GDN["HV"])):
             banks += (f"  %gbank{name}_row = index.constant {width * 4 * g['NG']} : offset\n"
                       f"  %gbank{name}_size = index.scale %gbank_rows, %gbank{name}_row : index, offset -> offset\n"
                       f"  %gbank{name} = buffer.alloca<global> align(256) %gbank{name}_size : buffer\n")
         anchor = "  kernel.launch @g_token_info[%t]"
-        body = body.replace(anchor, f"  %gbank_w = index.constant {FOLD_W} : index\n  %gbank_rows = index.mul %spans, %gbank_w : index\n" + banks + anchor, 1)
+        body = body.replace(anchor, f"  %gbank_w = index.constant {FOLD_W} : index\n  %gbank_cap = index.constant {FOLD_SPANS} : index\n"
+                            "  %gbank_s = index.min %spans, %gbank_cap : index\n  %gbank_rows = index.mul %gbank_s, %gbank_w : index\n" + banks + anchor, 1)
         out, nconv, nrec = [], 0, 0
         for line in body.split("\n"):
             if line.startswith("  kernel.launch @g_gdn_conv[%t](%t, %spans, %layer_"):
