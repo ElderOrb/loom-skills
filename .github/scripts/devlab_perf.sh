@@ -358,6 +358,7 @@ pkg_preset() {   # pkg_preset MODEL_JSON -> the preset this runner serves ("" fo
   "$T" -c "import json,sys; p=list(json.load(open(sys.argv[1]))['presets']); r=p[0] + sys.argv[3]; print((r if sys.argv[2] and r in p else p[0]) if len(p) > 1 else '')" "$1" "$RDEV" "$RSUF"
 }
 serve_alone() { # serve_alone VARIANT
+  vllm_down
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
   "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1; VLLM_STATE=$D/vllm-state "$B/vllm_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
   local aw sa rp vmem; aw=$(qv "$1" "print(0 if v.get('active_wait') is False else 1)")
@@ -445,6 +446,8 @@ llama_up() {   # llama_up [N_MAX]: llama.cpp with the experiment's llama_spec (n
 }
 vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned wheel in a venv) serving the card's checkpoint as an OpenAI server, out of the box
   # (--max-model-len and, for "on", the job's "vllm_spec" --speculative-config are the only arguments); one engine at a time on the GPU.
+  # A server already up in the same mode is reused (vllm:N and vllm:N:long are one load: 27B takes minutes to load); any other engine stops it.
+  [ -f "$vpid" ] && [ "${VLLM_MODE:-}" = "$1" ] && kill -0 "$(cat "$vpid")" 2>/dev/null && curl -sf "$vurl/v1/models" >/dev/null 2>&1 && return 0
   vllm_down
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
   "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
@@ -462,7 +465,7 @@ vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned 
   step "vllm serve $ck@${rev:0:8}: $args"
   eval env VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} ${VLLM_EXTRA_ENV:-} setsid nohup "$vpy" -m vllm.entrypoints.openai.api_server --model "$ck" --revision "$rev" \
     --served-model-name vllm-card --port "$VPORT" $args > "$out/vllm_serve.log" 2>&1 &
-  echo $! > "$vpid"
+  echo $! > "$vpid"; VLLM_MODE=$1
   for _ in $(seq 1800); do
     curl -sf "$vurl/v1/models" >/dev/null 2>&1 && { echo "vLLM ready"; return 0; }
     kill -0 "$(cat "$vpid")" 2>/dev/null || { echo "vLLM died:"; tail -15 "$out/vllm_serve.log" | cut -c1-250; return 1; }
@@ -546,7 +549,6 @@ print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', 
         (cd "$out" && "$T" "$B/perf.py" "$vurl" vllm --kind vllm --model vllm-card --no-campaign --thinking "$TH" --repeat-rows "$rrows" --log "perf_vllm_n$p1.jsonl" ${p2:+--long} | tail -1)
         echo "{\"session_end\": \"vllm\"}" >> "$out/perf_vllm_n$p1.jsonl"
       done
-      vllm_down
       res[$s]=$("$T" -c "
 import json,statistics as st; r=[json.loads(l) for l in open('$out/perf_vllm_n$p1.jsonl') if l.startswith('{\"label')]
 k='decode_tps_32k' if '${p2:-}' else 'decode_tps'
@@ -557,7 +559,6 @@ print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v)
       cn=${p1:-3}
       for i in $(seq 1 "$cn"); do (cd "$out" && "$T" "$B/c4_steady.py" "$vurl" 4 --model vllm-card --thinking "$TH" | tail -1 | tee -a "c4_vllm_n$cn.txt"); done
       echo "{\"session_end\": \"vllm\"}" >> "$out/c4_vllm_n$cn.txt"
-      vllm_down
       res[$s]=$("$T" -c "import json,statistics as st; print('vllm c4 median', st.median(r['agg_tps'] for l in open('$out/c4_vllm_n$cn.txt') if 'agg_tps' in (r := json.loads(l))))");;
     llamac4)   # llamac4[:N_MAX]
       llama_up "${p1:-}" || { res[$s]=ERROR; continue; }

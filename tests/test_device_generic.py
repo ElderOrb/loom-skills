@@ -78,6 +78,7 @@ class DeviceJobs(unittest.TestCase):
         (j,) = json.loads(buf.getvalue())["jobs"]
         self.assertIn("gates:card:dev", j["steps"])
         self.assertEqual(j["vllm_spec"], '{"method": "mtp", "num_speculative_tokens": 3}')   # the card's MTP, depth 3 as Loom's
+        self.assertEqual(j["vllm_max_len"], device_jobs.VLLM_MAX_LEN)   # a 32k document + its answer: the model's native 262144 does not fit 32 GB
         n = j["steps"].count("perf:card:1")
         self.assertEqual([x for x in j["steps"] if x.startswith("vllm")], [f"vllm:{n}", f"vllm:{n}:long", f"vllmc4:{n}"])
         self.assertTrue(any(x.startswith("vllmc4") for x in j["steps"]))
