@@ -23,7 +23,7 @@ script on their own tree; a campaign uses the whole procedure.
 
 | Request | Do |
 |---|---|
-| Migrate one package or tree I own to a newer SDK | Read `versions/<from>-to-<to>.md`, run its rewrite script, then `sweep.py` (sections 3 and 4 of the procedure) |
+| Migrate one package or tree I own to a newer SDK | Read `versions/<from>-to-<to>.md`, section 3a: install the new wheel, `rewrite_<from>_<to>.py`, the manual items, `sweep.py`, serve and chat. (A package the repo's kit generated: regenerate it with the kit instead) |
 | Migrate the fleet of cards | The whole procedure; run it as a campaign (`loom-fleet` `reference/campaign.md`) |
 | The next release is out and there is no entry for the pair | Procedure step 1 (research), write the entry from `versions/TEMPLATE.md`, then continue |
 | A package fails with `unknown op`, `unknown model field`, a publish/prepare signature error on the new SDK | Find the symptom in the entry's "Gotchas" and "Breaking changes" |

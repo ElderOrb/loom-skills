@@ -222,6 +222,18 @@ class Wiring(unittest.TestCase):
             self.assertIn(s, (self.SK / "SKILL.md").read_text())
             self.assertTrue((self.SK / "scripts" / s).exists())
 
+    def test_single_package_recipe_commands_exist(self):
+        """The entry's section 3a is the self-sufficient recipe: every script it calls is in the repo."""
+        import re
+        text = (self.SK / "versions/v0.1.0-to-v0.2.0.md").read_text()
+        s3 = text[text.index("### 3a."):text.index("### 3b.")]
+        for name in set(re.findall(r'\$LOOM_SETUP_DIR/scripts/([\w.]+)', s3)):
+            self.assertTrue((ROOT / "skills/loom-setup/scripts" / name).exists(), name)
+        for name in set(re.findall(r'\$LOOM_SKILL_DIR/scripts/([\w.]+)', s3)):
+            self.assertTrue((self.SK / "scripts" / name).exists(), name)
+        for pr in ("#979", "#980", "#981", "#986", "#987", "#990"):
+            self.assertIn(pr, text)
+
 
 if __name__ == "__main__":
     unittest.main()
