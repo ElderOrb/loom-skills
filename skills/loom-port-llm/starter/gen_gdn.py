@@ -560,6 +560,18 @@ kernel.def export("g_gdn_norm_gate") @g_gdn_norm_gate(%tokens: index) {{
     text = "\n".join(T)
     if not RL and os.environ.get("GDN_PREFETCH", "1") not in ("", "0"):
         text = _prefetch_recurrence(text, RK)
+    mode = chunk_mode(G)
+    if mode:
+        from gen_gdn_chunk import chunk_kernel
+        ck = chunk_kernel(G, NG, LB, guard_open, guard_close)
+        if mode == "pf":
+            ck = ck.replace("g_gdn_chunk_rdna4", "g_gdn_recurrence_pf_rdna4")
+        else:   # the sequential kernel's gfx12 twin runs the spans shorter than the chunk kernel's minimum
+            twin = _recurrence_rows(G, NG, LB, *RL, guard_open, guard_close, "short")
+            twin = twin.replace('kernel.def export("g_gdn_recurrence") @g_gdn_recurrence(', 'kernel.def target(@rdna4) export("g_gdn_recurrence_rdna4") @g_gdn_recurrence_rdna4(', 1)
+            assert "g_gdn_recurrence_rdna4" in twin
+            ck = twin + "\n" + ck
+        text = text + "\n" + ck
     return text
 
 
@@ -579,6 +591,17 @@ def recurrence_pf(G):
     """True when prefill epochs launch g_gdn_recurrence_pf (the 8 x 4 split) beside the decode form g_gdn_recurrence."""
     RL = _row_lanes(G["DK"], G["DV"])
     return bool(RL) and "GDN_ROW_LANES" not in os.environ and RL != (8, 4) and _row_fits(G["DK"], G["DV"], 8, 4)
+
+
+def chunk_mode(G):
+    """The gfx12 chunked prefill kernel (gen_gdn_chunk.py): None (off: env GDN_CHUNK unset/0, LOOM_RDNA4=0, other head dims), "pf" (it
+    is the gfx12 twin of g_gdn_recurrence_pf) or "group" (single-form models: g_gdn_recurrence's gfx12 twin takes the spans shorter than
+    PF_SPAN and a dual-group launch adds g_gdn_chunk_rdna4 for the longer ones)."""
+    if os.environ.get("GDN_CHUNK", "") in ("", "0", "off", "no", "false") or os.environ.get("LOOM_RDNA4", "1") in ("", "0", "false", "no"):
+        return None
+    if G["DK"] != 128 or G["DV"] != 128 or G["HV"] % G["HK"] or not _row_lanes(G["DK"], G["DV"]):
+        return None
+    return "pf" if recurrence_pf(G) else "group"
 
 
 def _row_fits(DK, DV, rl, cw):

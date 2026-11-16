@@ -54,7 +54,10 @@ def root_sources(cfg, draft):
     DFlash: propose = [embedding, (head), drafter, drafter context projections]; warm = [fc + norm, context]."""
     head = [] if cfg.get("tied_embeddings") else ["model"]
     if draft["kind"] == "mtp":
-        return ["model"] + head + ["model"], ["model"] * (1 + 6 + (2 if cfg.get("qk_norm") else 0))
+        wsrc = ["model"] * (1 + 6 + (2 if cfg.get("qk_norm") else 0))
+        if draft.get("head_policy"):   # PROPOSE_HEAD_ROWS: propose = [embedding, NextN block, the head's Q4_0 copy]; no head root
+            return ["model", "model", "phead"], wsrc
+        return ["model"] + head + ["model"], wsrc
     if draft["kind"] == "ngram":   # prompt lookup reads no weights
         return [], []
     if draft["kind"] == "assist":  # propose = [target embedding, assistant checkpoint]; warm reads no weights
@@ -154,10 +157,11 @@ global.rodata.def @draft_scope = bytes("{hx("draft")}")
   %gated_off = scalar.constant 0 : i64
   %gated_on = scalar.constant 1 : i64
 """)
+    head_pol = "  %head_policy = global.load @head_policy_name : buffer\n" if draft.get("head_policy") else ""
     draft_source = ("  // the drafter checkpoint (card parameter scope \"draft\")\n  %draft_scope = global.load @draft_scope : buffer\n"
                     "  %draft_source = func.call @source_scope(%draft_scope) : (buffer) -> (i32)\n"
                     + ("  %draft_policy = global.load @draft_policy_name : buffer\n" if draft.get("policy") else "")
-                    + ("  %head_policy = global.load @head_policy_name : buffer\n" if draft.get("head_policy") else "")) if "draft" in psrc + wsrc else ""
+                    + head_pol) if "draft" in psrc + wsrc else head_pol if "phead" in psrc else ""
     text = _sub(text, "  %smaller = scalar.cmpi ult, %maximum, %prefill : i64\n", f"""  // Verify and catch-up stages per shape, declared after every advance stage (the first shape_count
   // stages are the shared target stages), then proposal stages for cohorts of 1, 2, 4, ... spans.
 {draft_source}  scf.if %drafting {{

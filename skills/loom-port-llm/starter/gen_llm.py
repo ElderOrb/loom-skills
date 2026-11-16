@@ -15,7 +15,7 @@
 import json, math, os, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate  # noqa: E402
+from gen_gdn import gdn_geometry, gdn_kernels, recurrence_pf, split_qgate, chunk_mode  # noqa: E402
 
 CFG = json.load(open(os.environ.get("LLM_CONFIG") or sys.argv[1]))
 H = CFG["hidden"]; HG = H // 32          # hidden size, 32-value groups per hidden row
@@ -3831,6 +3831,93 @@ kernel.def export("g_head_select") @g_head_select(%spans: index) {{
 """
 
 
+def base_vocab():
+    """The tokenizer's base vocabulary size: the first id of the trailing run of added (special) tokens, read from
+    LLM_TOKENIZER's added_tokens (fleet stubs carry the same list). None without a tokenizer or added tokens."""
+    path = os.environ.get("LLM_TOKENIZER")
+    if not path or not os.path.exists(path):
+        return None
+    ids = sorted({t["id"] for t in json.load(open(path, encoding="utf-8")).get("added_tokens", []) if t["id"] < V})
+    if not ids:
+        return None
+    b = ids[-1]
+    while b - 1 in ids:
+        b -= 1
+    return b
+
+
+def head_select_propose(rows, split, base):
+    """g_head_select_p: the greedy argmax of the proposal head's per-chunk partials, mapped back to a token id (row
+    index below `split` is the token id; from there the tail segment starts at token id `base`). Proposals are always
+    greedy (g_mtp_prepare zeroes the temperature), so the sampling path of g_head_select is not needed."""
+    chunks = (rows + 127) // 128
+    return f"""
+// MTP proposals over the reduced-vocabulary head (PROPOSE_HEAD_ROWS): greedy argmax of {rows} rows, row -> token id.
+kernel.def export("g_head_select_p") @g_head_select_p(%spans: index) {{
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  kernel.launch.config workgroups(%spans, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+}} launch(%spans_arg: index, %metadata: buffer, %partials: buffer, %logits: buffer, %outputs: buffer) {{
+  %spans = index.assume %spans_arg [range(%spans_arg, 1, 8192)] : index
+  %span_id = kernel.workgroup.id<x> : index
+  %span = index.assume %span_id [lt(%span_id, %spans)] : index
+  %lane_id = kernel.workitem.id<x> : index
+  %lane = index.assume %lane_id [range(%lane_id, 0, 255)] : index
+  %zero = index.constant 0 : offset
+  %c16 = index.constant 16 : offset
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  %chunks = index.constant {chunks} : index
+  %c0_i32 = scalar.constant 0 : i32
+  %c1_i32 = scalar.constant 1 : i32
+  %neg_inf = scalar.constant -3.0e38 : f32
+  %big = scalar.constant 2147483647 : i32
+  %header = buffer.view %metadata[%zero] : buffer -> view<4xi32>
+  %count32 = view.load %header[0] : view<4xi32> -> i32
+  %count_bound = scalar.assume %count32 [range(%count32, 0, 8192)] : i32
+  %count = index.cast %count_bound : i32 to index
+  %live_span = index.cmp ult, %span, %count : index
+  scf.if %live_span {{
+    %packets = buffer.view %metadata[%c16] : buffer -> view<[%spans]x9xi32>
+    %flags = view.load %packets[%span, 6] : view<[%spans]x9xi32> -> i32
+    %bits = scalar.andi %flags, %c1_i32 : i32
+    %selected = scalar.cmpi ne, %bits, %c0_i32 : i32
+    scf.if %selected {{
+      %first = index.cmp eq, %lane, %c0 : index
+      %partial_view = buffer.view %partials[%zero] : buffer -> view<[%spans]x{chunks}x2xi32>
+      %bv, %bi = scf.for %c = [%lane to %chunks step %c256](%v = %neg_inf : f32, %i = %big : i32) -> (f32, i32) {{
+        %bounded_c = index.assume %c [range(%c, 0, {chunks - 1})] : index
+        %bits_value = view.load %partial_view[%span, %bounded_c, %c0] : view<[%spans]x{chunks}x2xi32> -> i32
+        %id = view.load %partial_view[%span, %bounded_c, %c1] : view<[%spans]x{chunks}x2xi32> -> i32
+        %value = scalar.bitcast %bits_value : i32 to f32
+        %better = scalar.cmpf ogt, %value, %v : f32
+        %nv = scf.select %better, %value, %v : f32
+        %ni = scf.select %better, %id, %i : i32
+        scf.yield %nv, %ni : f32, i32
+      }}
+      %best = kernel.workgroup.reduce<maxnumf> %bv : f32
+      %is_best = scalar.cmpf oeq, %bv, %best : f32
+      %candidate = scf.select %is_best, %bi, %big : i32
+      %row = kernel.workgroup.reduce<minsi> %candidate : i32
+      scf.if %first {{
+        %split = scalar.constant {split} : i32
+        %shift = scalar.constant {base - split} : i32
+        %in_tail = scalar.cmpi sge, %row, %split : i32
+        %moved = scalar.addi %row, %shift : i32
+        %winner = scf.select %in_tail, %moved, %row : i32
+        %eos = view.load %header[1] : view<4xi32> -> i32
+{eos_text()}
+        %result = buffer.view %outputs[%zero] : buffer -> view<[%spans]xi32>
+        view.store %token, %result[%span] : i32, view<[%spans]xi32>
+      }}
+    }}
+  }}
+  kernel.return
+}}
+"""
+
+
 from gen_gemm import HELPER as GEMM_HELPER   # noqa: E402  formats without a 128/256-row kernel of their own
 GEMM_M256 = os.environ.get("GEMM_M256", "1") not in ("", "0", "false", "no")
 
@@ -4636,6 +4723,8 @@ def gdn_layer(i, b, nm, sz, par):
         # every span runs in exactly one of the two kernels (by its own length), so the pf kernel is only needed when
         # the epoch can hold a long span
         REC = REC + "\n  scf.if %gemm {\n  " + REC.replace("@g_gdn_recurrence[", "@g_gdn_recurrence_pf[") + "\n  }"
+    elif chunk_mode(g) == "group":   # gfx12: spans of 64+ tokens run the chunked kernel (a gfx11 build launches nothing here: its kernel takes every span)
+        REC = REC + "\n  scf.if %gemm {\n  // dual-group: rdna4 " + REC.strip().replace("@g_gdn_recurrence[", "@g_gdn_chunk_rdna4[") + "\n  // dual-group: end\n  }"
     T = P + [
         "  " + lin(fmt_of(nm("attn_qkv")), "%h", "%s_h", f"%wqkv_{i}", sz("attn_qkv"), "%gq", "%nH", "%nC", H) + "\n",
         "  " + lin(fmt_of(nm("attn_gate")), "%h", "%s_h", f"%wz_{i}", sz("attn_gate"), "%gz", "%nH", "%nVD", H) + "\n",
@@ -5374,6 +5463,22 @@ if __name__ == "__main__":
                       head_name=head_name, head_size=tensor_bytes(head_name), esize=tensor_bytes("token_embd.weight"),
                       prologue=MODEL_PARTS.get("prologue"), layer_text=MODEL_PARTS.get("layer_text"), lin=lin, lin2=lin2, pair_kv=PAIR_PROJ in ("1", "kv"),
                       fmt=fmt_of, size=tensor_bytes, mtp_layer=MTP_LAYER, replay=MODEL_PARTS.get("replay", []), rope_bias=rope_bias)
+        # PROPOSE_HEAD_ROWS=N (MTP and DFlash proposals, Q6_K head): the proposals' head pass reads a load-time Q4_0 copy of the head's
+        # rows [0, N) plus the added tokens' rows (a reduced draft vocabulary, prep_weights.subset_entry); verification keeps the head
+        PROWS = int(os.environ.get("PROPOSE_HEAD_ROWS", "0") or 0)
+        HPREP, PHEAD_ROWS = {}, None
+        if PROWS > 0 and gen_draft.DRAFT["kind"] in ("mtp", "dflash") and (gen_draft.DRAFT["kind"] == "dflash" or MTP_LAYER is not None):
+            import prep_weights
+            assert fmt_of(head_name) in prep_weights.SRC_SUPER and ACT_Q8 and H % 32 == 0, \
+                f"PROPOSE_HEAD_ROWS needs a Q6_K head with int8 activations (head {fmt_of(head_name)}, ACT_Q8={ACT_Q8})"
+            PBASE = base_vocab() or V
+            PDST = "q6_k" if os.environ.get("PROPOSE_HEAD", "q4_0") == "q6_k" else "q4_0"   # q6_k: the rows kept as they are (no re-rounding)
+            HPREP = {head_name: prep_weights.subset_entry(fmt_of(head_name), PDST, PROWS, PBASE, V, H)}
+            PHEAD_ROWS = prep_weights.subset_rows(PROWS, PBASE, V)
+            open(os.path.join(out_dir, "head_weights.loom"), "w", newline="\n").write(prep_weights.policy(HPREP, "the proposal head"))
+            gfacts["phead"] = prep_weights.dst_bytes(PDST, HPREP[head_name][2])
+            if PHEAD_ROWS[2] < V:
+                gfacts["phead_rows"] = (PHEAD_ROWS[2], PHEAD_ROWS[0], PHEAD_ROWS[1] - PHEAD_ROWS[0])
         if gen_draft.DRAFT["kind"] == "dflash":
             import gen_dflash
             dcfg = gen_dflash.config(gen_draft.DRAFT["gguf"])
@@ -5385,8 +5490,7 @@ if __name__ == "__main__":
             if DPREP:
                 open(os.path.join(out_dir, "draft_weights.loom"), "w", newline="\n").write(prep_weights.policy(DPREP, "the drafter"))
             # The proposals' head pass reads a load-time Q4_0 copy of the target's head (PROPOSE_HEAD=off: the head)
-            HPREP = {}
-            if os.environ.get("PROPOSE_HEAD", "q4_0") == "q4_0" and fmt_of(head_name) in prep_weights.SRC and ACT_Q8 and H % 32 == 0:
+            if not HPREP and os.environ.get("PROPOSE_HEAD", "q4_0") == "q4_0" and fmt_of(head_name) in prep_weights.SRC and ACT_Q8 and H % 32 == 0:
                 HPREP = {head_name: (fmt_of(head_name), "q4_0", V * H // 32)}
                 open(os.path.join(out_dir, "head_weights.loom"), "w", newline="\n").write(prep_weights.policy(HPREP, "the proposal head"))
                 gfacts["phead"] = prep_weights.dst_bytes("q4_0", V * H // 32)
@@ -5440,8 +5544,12 @@ if __name__ == "__main__":
             program = program[:_wm.start()] + _re.sub(r"%c5_mm = index\.constant \d+ : index", "%c5_mm = index.constant "
                       + os.environ.get("DRAFT_MM_FROM", "5") + " : index", _wm.group(0), count=1) + program[_wm.end():]
         spec_kernels = gen_draft.kernels(gfacts)
+        if gen_draft.DRAFT["kind"] == "mtp" and "phead" in gfacts:
+            spec_kernels += prep_weights.library({e[:2] for e in HPREP.values()})
+        if PHEAD_ROWS and PHEAD_ROWS[2] < V:   # a reduced vocabulary: its own select (row -> token id)
+            spec_kernels += head_select_propose(PHEAD_ROWS[2], PHEAD_ROWS[0], PHEAD_ROWS[1])
         if gen_draft.DRAFT["kind"] == "dflash":
-            spec_kernels += gen_dflash.kernels(gfacts) + prep_weights.library({(a, b) for a, b, _ in list(DPREP.values()) + list(HPREP.values())})
+            spec_kernels += gen_dflash.kernels(gfacts) + prep_weights.library({e[:2] for e in list(DPREP.values()) + list(HPREP.values())})
         if gen_draft.DRAFT["kind"] == "ngram":
             spec_kernels += gen_ngram.kernels(gfacts)
         if gen_draft.DRAFT["kind"] == "assist":
@@ -5457,10 +5565,18 @@ if __name__ == "__main__":
         if head_fmt in IQ_FMTS:
             COMMON += "".join(head_mv(tg, head_fmt, iq=True) for tg in (1, 4, 8, 16))
             program = head_wiring(program)
-            if spec_kernels and "phead" in gfacts:   # the DFlash proposals' head: the Q4_0 copy's variants
-                COMMON += "".join(head_mv(tg, "q4_0", iq=True, suffix="_p40") for tg in (1, 4, 8, 16))
-                _pm = _re.search(r"command\.program\.def public @llm_dflash_propose\(\).*?\n\}\n", program, _re.S)
-                program = program[:_pm.start()] + _re.sub(r"@(g_head_mv\w*_q8)\[", r"@\1_p40[", _pm.group(0)) + program[_pm.end():]
+            if spec_kernels and "phead" in gfacts:   # the proposals' head: the Q4_0 copy's variants
+                _rows = PHEAD_ROWS[2] if PHEAD_ROWS else V   # a reduced draft vocabulary has fewer rows
+                _V, _CH = V, CHUNKS
+                V, CHUNKS = _rows, (_rows + 127) // 128
+                _pf, _ps = ("q6_k", "_pq6") if PHEAD_ROWS and HPREP[head_name][1] == "q6_k" else ("q4_0", "_p40")
+                COMMON += "".join(head_mv(tg, _pf, iq=True, suffix=_ps) for tg in (1, 4, 8, 16))
+                V, CHUNKS = _V, _CH
+                _pm = _re.search(r"command\.program\.def public @llm_" + gen_draft.DRAFT["kind"] + r"_propose\(\).*?\n\}\n", program, _re.S)
+                _pt = _re.sub(r"@(g_head_mv\w*_q8)\[", r"@\1" + _ps + "[", _pm.group(0))
+                if PHEAD_ROWS and PHEAD_ROWS[2] < V:
+                    _pt = _pt.replace("@g_head_select[", "@g_head_select_p[")
+                program = program[:_pm.start()] + _pt + program[_pm.end():]
     if os.environ.get("ROW_SCALE_LIVE", "1") != "0":   # after quant_wiring (it matches g_row_scale_f16); =0 A/B it off
         program = live_row_scale(program)
         COMMON += ROW_SCALE_LIVE

@@ -380,6 +380,8 @@ kernel.def export("{name}") @{name}(%tokens: index) {{
   kernel.return
 }}
 """)
+            if copy_split() > 1 and os.environ.get("LOOM_RDNA4", "1").strip().lower() not in ("0", "off", "no", "false"):
+                T.append(copy_split_twin(T[-1], name, copy_split()))
     for W in sorted({w for r in g.get("replay", []) for _, w in r["buffers"]}):
         T.append(replay_kernels(W))
     if DRAFT and DRAFT.get("kind") == "mtp":
@@ -812,6 +814,33 @@ def advance_program(program, g=None):
     return program.replace(ADVANCE_SIG, ADVANCE_SIG.replace("%residual: buffer", "%h: buffer")).replace(H_ALLOCA, "", 1)
 
 
+# gfx12 twin of the GDN capture / restore copies (g_gdn_capture / g_gdn_restore): one workgroup per (token, 1/COPY_SPLIT of the
+# columns) instead of one per token. The copy is a scalar loop of ~41 dependent iterations per token on 4 workgroups, ~10 us per
+# launch x 96 launches per drafted step (R9700, doubling: capture +0.45 ms, restore +0.54 ms of 40 ms). The values moved are the same.
+def copy_split():
+    """The twin's workgroups per token (loom-kb per_target choice decode.spec.gdn_copy_split: <ENV>__RDNA4 is the twin's value); the gfx11 kernel never changes."""
+    from flash2_rdna4 import twin_env
+    env = {"GDN_COPY_SPLIT": os.environ.get("GDN_COPY_SPLIT", "1")}
+    env.update({k: v for k, v in os.environ.items() if k == "GDN_COPY_SPLIT" + "__RDNA4"})
+    return int(twin_env(env)["GDN_COPY_SPLIT"])
+
+
+def copy_split_twin(text, name, spl):
+    for anchor in (f'kernel.def export("{name}") @{name}(', "  kernel.launch.config workgroups(%tokens, %c1, %c1)",
+                   "  %token_id = kernel.workgroup.id<x> : index\n", "  %lane = index.assume %lane_id [range(%lane_id, 0, 255)] : index\n"):
+        assert text.count(anchor) == 1, f"{name}: the copy kernel's template moved ({anchor.strip()[:40]}): the twin would launch or index wrongly"
+    t = text.replace(f'kernel.def export("{name}") @{name}(', f'kernel.def target(@rdna4) export("{name}_rdna4") @{name}_rdna4(', 1)
+    t = t.replace("  kernel.launch.config workgroups(%tokens, %c1, %c1)",
+                  f"  %c_spl = index.constant {spl} : index\n  %tokens_spl = index.mul %tokens, %c_spl : index\n  kernel.launch.config workgroups(%tokens_spl, %c1, %c1)", 1)
+    t = t.replace("  %token_id = kernel.workgroup.id<x> : index\n",
+                  f"  %c_spl = index.constant {spl} : index\n  %wg_id = kernel.workgroup.id<x> : index\n  %token_id = index.div %wg_id, %c_spl : index\n  %part = index.rem %wg_id, %c_spl : index\n", 1)
+    t = t.replace("  %lane = index.assume %lane_id [range(%lane_id, 0, 255)] : index\n",
+                  "  %lane0 = index.assume %lane_id [range(%lane_id, 0, 255)] : index\n  %c256p = index.constant 256 : index\n  %poff = index.mul %part, %c256p : index\n  %lane = index.add %lane0, %poff : index\n  %c_step = index.constant " + str(256 * spl) + " : index\n", 1)
+    t = re.sub(r"(step )%c256(\] \{)", r"\1%c_step\2", t)
+    assert t.count("step %c_step") == 3, name
+    return t
+
+
 def verify_program(program, g):
     body, _ = _split_head(advance_program(program, g))
     body = body[body.index("command.program.def public @llm_advance()"):]   # config decls are emitted once (advance)
@@ -1044,10 +1073,13 @@ command.program.def public @llm_mtp_warm() launch(%w_embed: buffer, %weights: bu
     Pp += "  %attn_tiles = index.cmp uge, %t, %c_never : index\n"
     head_name, hsize = g["head_name"], g["head_size"]
     head_root = "" if head_name == "token_embd.weight" else "%w_head: buffer, "
+    head_ref, phead_root = "%w_embed" if head_name == "token_embd.weight" else "%w_head", ""
+    if g.get("phead"):   # PROPOSE_HEAD_ROWS: the proposals read a load-time Q4_0 copy of (a row subset of) the head, the last root
+        head_ref, hsize, phead_root, head_root = "%w_phead", g["phead"], ", %w_phead: buffer", ""
     propose = (f"""
 // MTP proposals: draft_depth autoregressive rounds of the NextN block for the PROPOSE spans; each round's
 // greedy token goes straight into the verifier's input slot and feeds the next round.
-command.program.def public @llm_mtp_propose() launch(%w_embed: buffer, {head_root}%weights: buffer, %epoch: buffer, %target_tokens: buffer, %origins: buffer, %arena: buffer, %carry: buffer) {{
+command.program.def public @llm_mtp_propose() launch(%w_embed: buffer, {head_root}%weights: buffer{phead_root}, %epoch: buffer, %target_tokens: buffer, %origins: buffer, %arena: buffer, %carry: buffer) {{
 {Pp}  %owners = index.constant 1 : index
   %epoch_spans = config.get @llm.epoch_spans : index
   %epoch_tokens = config.get @llm.epoch_tokens : index
@@ -1061,7 +1093,7 @@ command.program.def public @llm_mtp_propose() launch(%w_embed: buffer, {head_roo
   %slots = buffer.alloca<global> align(256) %word_size : buffer
   %proposals = buffer.alloca<global> align(256) %word_size : buffer
   %hidden = buffer.alloca<global> align(256) %x_size : buffer
-  %head = command.parameter {"%w_embed" if head_name == "token_embd.weight" else "%w_head"}, "{head_name}" : view<{hsize}xi8>
+  %head = command.parameter {head_ref}, "{head_name}" : view<{hsize}xi8>
   %head_norm = command.parameter %weights, "blk.{M}.nextn.shared_head_norm.weight" : view<{H}xf32>
   kernel.launch @g_mtp_prepare(%epoch_spans, %t, %epoch_tokens, %epoch, %target_tokens, %metadata, %tokens, %slots) : (index, index, index, buffer, buffer, buffer, buffer, buffer)
   kernel.launch @g_mtp_gather[%t](%t, %owners, %metadata, %carry, %hidden) : [index](index, index, buffer, buffer, buffer)
