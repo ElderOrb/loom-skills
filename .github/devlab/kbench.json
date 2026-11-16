@@ -10,13 +10,15 @@
         "base",
         "vtop2+e2",
         "fm",
-        "fmt"
+        "fmt",
+        "fmp"
       ],
       "files": [
         "bench.loom",
         "bench_vtop2+e2.loom",
         "bench_fm.loom",
-        "bench_fmt.loom"
+        "bench_fmt.loom",
+        "bench_fmp.loom"
       ],
       "tests": [
         "test.loom"

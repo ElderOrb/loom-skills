@@ -439,6 +439,18 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
   %sinit{x} = vector.fragment<init> %fm_nmv{s_} shape [%c16, %c16] : vector<8xf32>""")
         P.append("  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
         fast = renamed(gen_loop(True), "_fa")
+        if opts.get("peel"):   # blocks wholly at or below the tile's first position need no mask: an unmasked loop, then the masked tail
+            un = renamed(gen_loop(True), "_fu")
+            un = un.replace("[%c0 to %nblk step %c1]", "[%c0 to %fm_nfull step %c1]", 1)
+            un = re.sub(r"(%masked\w*) = vector\.select %valid, (%s\w+_f), %neg_v : vector<8xf32>", r"\1 = vector.addf \2, %zero8 : vector<8xf32>", un)
+            mu, lu, ou = fres("_fu")
+            init = ", ".join(f"%m{SUF[hh]} = {mu[hh]} : f32, %l{SUF[hh]} = {lu[hh]} : f32" for hh in range(nh)) + ", " + ", ".join(
+                f"%{AP[hh]}{k} = {ou[hh * NO + k]} : vector<8xf32>" for hh in range(nh) for k in range(NO))
+            h, rest = fast.split("\n", 1)
+            h = h.replace("[%c0 to %nblk step %c1]", "[%fm_nfull to %nblk step %c1]").replace(f"({mli}, {acc})", f"({init})")
+            assert "%fm_nfull" in h and init in h
+            fast = (f"  %fm_span = index.sub %pos0, %key_low : index\n  %fm_span1 = index.add %fm_span, %c1 : index\n"
+                    f"  %fm_nf_v = index.div %fm_span1, %c64 : index\n  %fm_nfull = index.min %fm_nf_v, %nblk : index\n" + un + h + "\n" + rest)
         mf, lf, of = fres("_fa")
         C = []
         for hh, s_ in enumerate(SUF):
