@@ -1576,7 +1576,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %h16 = check.generate.fill value(0.0) : tensor<{rows}x{n_use}xf16>
   %s8 = check.generate.fill value(7.0) : tensor<{rows}x2xf32>
   %q8 = check.generate.fill value(0) : tensor<{rows}x{n_use}xi8>
-  kernel.launch @g_gemm_mxfp4s_swiglu_f8_bf16_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %w, %ws, %u, %us, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {ty(Wr)}, {ty(Ws_)}, {ty(Ur)}, {ty(Us_)}, tensor<{rows}x{n_use}xi16>)
+  kernel.launch @g_gemm_mxfp4s_swiglu_f8{'_f16s' if os.environ.get('X_FMT') == 'f16s' else '_bf16'}_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %w, %ws, %u, %us, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {ty(Wr)}, {ty(Ws_)}, {ty(Ur)}, {ty(Us_)}, tensor<{rows}x{n_use}xi16>)
   kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %n, %y, %s16, %h16, %q8, %s8, %w16, %fl) : [index](index, tensor<{rows}x4xi32>, index, tensor<{rows}x{n_use}xi16>, tensor<{rows}x2xf32>, tensor<{rows}x{n_use}xf16>, tensor<{rows}x{n_use}xi8>, tensor<{rows}x2xf32>, index, index)
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<{rows}x2xf32>
   check.expect.close actual(%h16) expected(%eh16) atol(2.0e-1) rtol(2.0e-2) nan(different) : tensor<{rows}x{n_use}xf16>
