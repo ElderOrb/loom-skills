@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st ogemm final: node with prefill.gemm.mxfp4s_f8_kernel=lvs (head) vs origin/mxfp4st 2defa325 (base): ktest, func, ABBA prefill/decode, dev gates vs vLLM on head only (cached vLLM references from integ exp3). Evidence branch: not for merge.",
+ "_comment": "mxfp4st ogemm: dev gates on base (origin/mxfp4st 9903c8cd) and head (node lvs) in one job, twice each (head failed consistency once in 43875399332: judge against the base in the same job). Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
@@ -7,7 +7,7 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "amd-q38-ogemm-final",
+   "name": "amd-q38-ogemm-gates",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
    "kit": null,
    "llamacpp": "b1375",
@@ -20,7 +20,7 @@
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
      "context": 110592,
-     "ref": "2defa325"
+     "ref": "9903c8cd"
     },
     {
      "name": "head",
@@ -33,19 +33,13 @@
     }
    ],
    "steps": [
-    "ktest:head",
+    "func:base",
+    "gates:base:dev",
     "func:head",
-    "perf:base:1",
-    "perf:base:1:long",
-    "perf:head:1",
-    "perf:head:1:long",
-    "perf:head:1",
-    "perf:head:1:long",
-    "perf:base:1",
-    "perf:base:1:long",
+    "gates:head:dev",
+    "gates:base:dev",
     "gates:head:dev"
-   ],
-   "reference_cache": ".github/devlab/ogemm_vllm_refs.tgz"
+   ]
   }
  ]
 }
