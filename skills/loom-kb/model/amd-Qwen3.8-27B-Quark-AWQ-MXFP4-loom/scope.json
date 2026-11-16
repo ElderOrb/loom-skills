@@ -70,6 +70,13 @@
     "decode.spec.gdn_fold": true
    },
    "evidence": "ogdn (PR mxfp4st-ogdn): the drafted verification records fold factors and one g_gdn_fold + one g_gdn_fold_hist launch replace the GDN capture / restore / replay (289 launches per step -> 2). kbench gdn_fold (run 43820013544): fold path == replay path bit-exact on gfx1201, GDN part of a step 3.07 -> 1.54 ms. DevLab R9700, one job each, base = this node with gdn_copy_split 8 + Q4_0 block: drafted step 33.94 -> 33.45 ms device (GDN 2.00 -> 1.48 ms/step) (run 43830461301); decode 71.72 -> 73.15 tok/s (+2.0 %, 3 ABBA sessions each, run 43840095234; 71.77 -> 73.05 in 43830461301), decode_2k 73.4 -> 74.2, decode_32k 54.4 vs 54.0 (tie); ktest incl. gdn_fold_vs_replay PASS, spec gate PASS 6/6 (drafted == undrafted), consistency PASS; verify scratch at the largest packing shape 4.73 -> 3.68 GiB."
+  },
+  {
+   "when": {},
+   "set": {
+    "decode.head.verify": "q8_0"
+   },
+   "evidence": "vhead (#960; DECISIONS D21, BRIEF exception: A/B + gates + decision record): the verified head reads a pieced load-time Q8_0 copy of the bf16 lm_head (int8 activations). DevLab R9700, one job each, ABBA, repeat-rows 3 (43854018704, 43864913856), with the N 65536 proposal pieces: decode 73.75 -> 75.28 / 75.23 (+2 %), decode_2k +2.4..+2.8 %, decode_32k +2.4 %; the bf16 head is no longer resident (VRAM peak 33.05 -> 31.86 GB at 98304); fresh-VM first load passes at 106496 and 114688; dev gates vs vLLM 8/8 PASS (consistency, spec, agent, agent_think_off, golden, sampling, compare, vision; 43854018704), golden matched prefix / gaps identical to the bf16-head build (14 prompts, 0 bad)."
   }
  ]
 }
