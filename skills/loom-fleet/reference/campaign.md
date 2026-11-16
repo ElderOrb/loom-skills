@@ -99,8 +99,10 @@ separately. Tools: `fleet/README.md`; process: [targeted-fix.md](targeted-fix.md
   GPU** (it is scarce, sequential and shared). Where it must be decided locally, keep the local GPU busy only with agent-in-the-loop
   work, never idle waiting on DevLab; local and DevLab work are decoupled.
 - Runner labels: Strix Halo `[strix-halo, devlab-dispatch, Linux, self-hosted]` (always include `Linux`); Radeon R9700
-  `[self-hosted, devlab-dispatch, radeon-r9700]` (about 3 concurrent runners, 31 GB host RAM, no HIP headers). Other devices: the
-  `runner.labels` field of `skills/loom-kb/device/<family>/<device>/device.json`.
+  `[self-hosted, devlab-dispatch, radeon-r9700]` (31 GB host RAM, no HIP headers). The runner count of a device is
+  `runner.concurrent_runners` in its `device.json` (the R9700: 8, measured 2026-11-16 over 156 jobs: 5.6 busy on average, queue median
+  1 min, p90 20 min; the runners are not the bottleneck, a job's own length is). Other devices: the `runner.labels` field of
+  `skills/loom-kb/device/<family>/<device>/device.json`.
 - Iterate by labelling a draft PR: `devlab-perf` (workflow `devlab-perf.yml`, jobs from `.github/devlab/perf.json`), `devlab-debug`,
   `nightly-gates`. Labels and base changes go through the REST API (`gh pr edit` fails in this repo; re-adding a present label
   fires no event, so remove then add): `gh api -X POST repos/loom-fun/loom-skills/issues/N/labels -f 'labels[]=devlab-perf'`.
@@ -112,6 +114,23 @@ separately. Tools: `fleet/README.md`; process: [targeted-fix.md](targeted-fix.md
   one central poller, not one per agent. Queue wait on a runner pool (10+ min on the R9700) is normal: do not re-trigger.
   Download with `gh run download RUN -D FRESH_DIR` (a fresh directory each time; unzip collides).
 - Smoke tests use tight timeouts and log the server status endpoints while waiting, so a hang shows its cause.
+- **Job anatomy and the iteration rule.** Measured on 156 R9700 jobs (2026-11-16), a typical 95-minute experiment job is: setup + the 3
+  builds 2.5 min (3 %), func 15 min (16 %), ktest 1 min (1 %), perf 9 min (10 %), gates against the vLLM reference about 70 min (72 %),
+  including a gate of the unchanged base every time. Cost-wise a round is almost all gates, so:
+  - **Iterate on perf only.** An optimization round runs the `iterate` preset (`ab_jobs.py` / `device_jobs.py --preset iterate`,
+    `.github/scripts/job_presets.py`): build + ktest + perf + c4 (+ the A/B text match), no gates, and `smoke:V` (one served chat request:
+    the model loads and answers) instead of func. About 15 minutes instead of 95.
+  - **Gates once, on the winner.** Only the change that is going to merge gets the `final` preset: func + ktest + `gates:V:dev` once on the
+    new variant, no perf (the iterations measured it) and the unchanged base variant is not built or gated (a base that already passed is
+    never gated again). Hand-written experiment files follow the same two shapes. `full` (the generators' default; `regen.py` always uses it,
+    a card needs every step) stays for card regeneration.
+  - **The vLLM reference is cached, not loaded.** A safetensors package's gates restore the references recorded once per checkpoint
+    revision + vLLM version + request from the committed `.github/devlab/reference_cache/<org>__<repo>__vllm-<VERSION>.tgz`
+    (`skills/loom-benchmark/scripts/reference_cache.py`), so a gate run whose requests are all cached never starts vLLM (the job line
+    says `references: N cached before gates, 0 recorded in this job, vLLM loaded: no`). A request that is not cached (a new prompt set,
+    a new checkpoint revision, a changed vision case) is recorded by that job as before; add its `gates_V/llama_cache.tgz` to the store
+    with `reference_cache.py merge --repo ORG/REPO --vllm VERSION TGZ` in the same PR. Job field `"reference_cache": "none"` forces a cold
+    recording.
 
 ## Regenerating many cards: `fleet/regen.py`
 

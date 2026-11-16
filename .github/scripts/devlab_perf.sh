@@ -691,6 +691,21 @@ print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v)
       EXTRA_GUFO_ARGS="${gp:+--loom-preset $gp}" BUNDLE=$GUFO_BUNDLE "$GUFO_BUNDLE/validation/devlab/run_conformance.sh" "$D/$p1/pkg" "$out/gufo_$p1" 8181 > "$out/gufo_$p1.log" 2>&1; rc=$?
       tail -4 "$out/gufo_$p1.log" | cut -c1-300
       res[$s]=$("$T" "$here/.github/scripts/gufo_gate.py" "$out/gufo_$p1" "$out/conformance_$p1.json" "$rc" 2>&1 | tail -1 | cut -c1-300);;
+    smoke)   # smoke:V  one served chat request (the iterate preset's whole functional check: build, serve, answer; func:V is the full list)
+      serve_alone "$p1" || { res[$s]=ERROR; continue; }
+      step "smoke $p1"
+      "$T" - "$url" "$cardid" > "$out/smoke_$p1.log" 2>&1 <<'PY'
+import json, sys, urllib.request
+url, model = sys.argv[1:3]
+req = urllib.request.Request(url + "/v1/chat/completions", json.dumps({"model": model, "max_tokens": 16, "temperature": 0,
+        "messages": [{"role": "user", "content": "Reply with one short sentence about the sea."}]}).encode(), {"Content-Type": "application/json"})
+r = json.load(urllib.request.urlopen(req, timeout=300))
+m = r["choices"][0]["message"]
+t = (m.get("content") or m.get("reasoning_content") or m.get("reasoning") or "").strip()
+print("SMOKE", "PASS" if t else "FAIL", repr(t[:80]))
+sys.exit(0 if t else 1)
+PY
+      res[$s]=$(tail -1 "$out/smoke_$p1.log" | cut -c1-200); [ -n "${res[$s]}" ] || res[$s]=ERROR;;
     func)
       serve_alone "$p1" || { res[$s]=ERROR; continue; }
       step "functional checks $p1"
@@ -732,18 +747,35 @@ PY
         LLAMACPP_DIR=${LLAMACPP_DIR:-$("$B/fetch_llamacpp.sh" "$WORK/llamacpp" "$tag" | tail -1)}; export LLAMACPP_DIR LLAMA_CACHE_BUILD=$tag
       fi
       export LOOM_KIT=${KIT[$p1]}
-      # "reference_cache": "PATH.tgz" (a job field, relative to the checkout): references an earlier job recorded (its gates_V/llama_cache.tgz), keyed by checkpoint
-      # revision + vLLM version + request, so a runner that cannot serve the reference (or a rerun) only serves Loom
-      rcache=$(q "print(j.get('reference_cache') or '')")
-      [ -n "$rcache" ] && { mkdir -p "$D/$p1/bench" && tar -xzf "$here/$rcache" -C "$D/$p1/bench" && echo "reference cache restored from $rcache"; }
+      # The vLLM references are restored before gates.sh runs, so a run whose requests are all cached never loads vLLM (72 % of a typical job):
+      #  - the committed store .github/devlab/reference_cache/<org>__<repo>__vllm-<VERSION>.tgz for the package's checkpoint (skills/loom-benchmark/scripts/reference_cache.py),
+      #    automatically, for every safetensors package;
+      #  - "reference_cache": "PATH.tgz" (a job field, relative to the checkout) in addition: references an earlier job recorded (its gates_V/llama_cache.tgz);
+      #    "reference_cache": "none" skips both (a deliberate cold recording).
+      # Keyed by checkpoint revision + vLLM version + request: a miss is recorded by this job (its llama_cache.tgz: `reference_cache.py merge` adds it to the store).
+      rcache=$(q "print(j.get('reference_cache') or '')"); nref0=0; nref_hit=0
+      mkdir -p "$D/$p1/bench"
+      if [ -n "$safetensors" ] && [ "$rcache" != none ]; then
+        rrepo=$("$T" -c "import json,sys; print((json.load(open(sys.argv[1])).get('source') or {}).get('repo', ''))" "$D/$p1/pkg/llm_config.json")
+        [ -n "$rrepo" ] && nref_hit=$("$T" "$B/reference_cache.py" restore --repo "$rrepo" --vllm "${VLLM_VERSION:-0.18.0}" --into "$D/$p1/bench" 2>/dev/null || echo 0)
+        echo "reference cache: $nref_hit entries restored from the committed store for $rrepo (vLLM ${VLLM_VERSION:-0.18.0})"
+      fi
+      if [ -n "$rcache" ] && [ "$rcache" != none ]; then
+        tar -xzf "$here/$rcache" -C "$D/$p1/bench" && echo "reference cache restored from $rcache"
+      fi
+      nref0=$("$T" "$B/reference_cache.py" count "$D/$p1/bench" 2>/dev/null || echo 0)
       step "gates $p1 LEVEL=$p2"
       ( unset LLAMA_SPEC; FORCE=1 LEVEL=$p2 "$B/gates.sh" "$D/$p1/pkg" "$url" "$gguf" "$D/$p1/bench" "$LLAMA_PORT" ) > "$out/gates_$p1.out" 2>&1; rc=$?
       mkdir -p "$out/gates_$p1"; cp "$D/$p1"/bench/gates.json "$D/$p1"/bench/gates_*.log "$out/gates_$p1/" 2>/dev/null
       if [ -n "$safetensors" ]; then   # the recorded references (reusable: keyed by checkpoint revision + vLLM version + request), the card's reference statement, install/load/memory logs
         cp "$D/$p1"/bench/reference.json "$D/vllm-state"/vllm-*.{log,mem,json} "$out/gates_$p1/" 2>/dev/null
-        tar -C "$D/$p1/bench" -czf "$out/gates_$p1/llama_cache.tgz" llama_cache 2>/dev/null
+        tar -C "$D/$p1/bench" -czf "$out/gates_$p1/llama_cache.tgz" llama_cache $([ -f "$D/$p1/bench/reference.json" ] && echo reference.json) 2>/dev/null
+        nref1=$("$T" "$B/reference_cache.py" count "$D/$p1/bench" 2>/dev/null || echo 0)
+        vl=no; [ -f "$D/vllm-state/vllm-$LLAMA_PORT.log" ] && vl=yes   # vllm-PORT.log exists only when vllm_server.sh started the engine
+        echo "references: $nref0 cached before gates, $(( nref1 - nref0 )) recorded in this job, vLLM loaded: $vl" | tee "$out/gates_$p1/reference_cache.txt"
       fi
-      res[$s]=$(grep -h "^GATES" "$out/gates_$p1.out" | tail -1 | cut -c1-300); [ -n "${res[$s]}" ] || res[$s]="rc=$rc";;
+      res[$s]=$(grep -h "^GATES" "$out/gates_$p1.out" | tail -1 | cut -c1-300); [ -n "${res[$s]}" ] || res[$s]="rc=$rc"
+      [ -f "$out/gates_$p1/reference_cache.txt" ] && res[$s]="${res[$s]} [$(cat "$out/gates_$p1/reference_cache.txt")]";;
     *) echo "unknown step $s"; res[$s]=ERROR;;
   esac
   echo "RESULT $job $s: ${res[$s]}"
