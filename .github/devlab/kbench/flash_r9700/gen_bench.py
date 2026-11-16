@@ -2,8 +2,10 @@
 """Generate the flash_r9700 kbench suite: the gfx12 whole-tile prefill flash kernel of the AMD MXFP4 Qwen3.8-27B card (head_dim 256, 24 query
 heads, 4 KV heads, output gate) as gen_flash2s.py builds it, at a 1024-token prefill chunk at the end of an 8k and a 32k context.
 
-usage: gen_bench.py ROOT OUTDIR [VARIANT ...]   VARIANT: base (bench.loom: the key-split loop, FLASH2_B=2, the card's build) or a name of VARIANTS
-(bench_<name>.loom: FLASH2_B=6, flash2_g6.py with the variant's options; a '+'-joined list merges options).
+usage: gen_bench.py ROOT OUTDIR [VARIANT ...]   VARIANT: base (bench.loom: the key-split loop, FLASH2_B=2, without prefill.attn.flash2_b2_fm), a
+name of VARIANTS (bench_<name>.loom: "B" picks the loop, FLASH2_B=6 flash2_g6.py with FLASH2_G6_OPTS, else flash2_b2.py with FLASH2_B2_OPTS;
+fmp = what prefill.attn.flash2_b2_fm builds; a '+'-joined list merges options, "abl" ablations concatenate) or mm<K>[l<KB>][w<W>]
+(a WMMA throughput microbenchmark: K independent accumulator chains, KB of workgroup memory, W waves per workgroup).
 Writes bench*.loom (timing: k_fa8k / k_fa32k, random K/V/Q, identity page map) and test.loom (check.cases of every TESTED variant and the base
 against a float64 numpy reference: 2048-key context, 128 tokens, permuted page map, sharp scores; a tile whose later key outweighs page 0 and its
 own page by more than 2^15 (the g6 fast path's fallback); run by devlab_kbench.sh's "tests" step with loom-test)."""
