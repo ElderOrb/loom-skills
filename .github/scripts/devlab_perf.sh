@@ -589,7 +589,9 @@ print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v)
       serve_alone "$p1" >/dev/null 2>&1; for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
       step "kernel tests $p1"; kt=$D/$p1/ktest; rm -rf "$kt"
       kenv=$(qv "$p1" "print(' '.join(f'{k}={x}' for k, x in (v.get('build') or {}).items()))")   # the variant's build env (e.g. GEMM_F16O) shapes the test cases too
-      ( cd "${KIT[$p1]}" && env $kenv LLM_DRAFT="$("$T" -c "import json, sys; print(json.dumps(json.load(open(sys.argv[1])).get('draft')))" "$D/$p1/pkg/llm_config.json")" \
+      # the choices the knowledge base resolved for the rebuilt package (resolved.env of its llm_config.json: a model node's rules, not only the variant's build env) shape the cases too
+      renv=$("$T" -c "import json, sys; print(' '.join(f'{k}={x}' for k, x in ((json.load(open(sys.argv[1])).get('resolved') or {}).get('env') or {}).items() if x is not None))" "$D/$p1/pkg/llm_config.json" 2>/dev/null)
+      ( cd "${KIT[$p1]}" && env $renv $kenv LLM_DRAFT="$("$T" -c "import json, sys; print(json.dumps(json.load(open(sys.argv[1])).get('draft')))" "$D/$p1/pkg/llm_config.json")" \
           "$T" make_kernel_tests.py "$([ -f "$D/$p1/cfg.json" ] && echo "$D/$p1/cfg.json" || echo "$D/cfg.json")" "$kt" ) > "$out/ktest_make_$p1.log" 2>&1 || { tail "$out/ktest_make_$p1.log"; res[$s]=ERROR; continue; }
       "${KIT[$p1]}/run_kernel_tests.sh" "$D/$p1/pkg" "$kt" > "$out/ktest_$p1.log" 2>&1; rc=$?
       grep -v "^PASS" "$out/ktest_$p1.log" | tail -15
