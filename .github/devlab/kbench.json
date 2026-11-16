@@ -9,24 +9,24 @@
       "gen_variants": [
         "base",
         "lvs",
-        "lvfb",
-        "lvsfb",
-        "lvs2fb",
+        "lvs2pf1",
+        "lvk2s",
         "lvs2",
         "r1024",
-        "lvs2fb+r1024",
-        "lvsfb+r1024"
+        "lvs+r1024",
+        "lvs2pf1+r1024",
+        "lvs2+r1024"
       ],
       "files": [
         "bench.loom",
         "bench_lvs.loom",
-        "bench_lvfb.loom",
-        "bench_lvsfb.loom",
-        "bench_lvs2fb.loom",
+        "bench_lvs2pf1.loom",
+        "bench_lvk2s.loom",
         "bench_lvs2.loom",
         "bench_r1024.loom",
-        "bench_lvs2fb+r1024.loom",
-        "bench_lvsfb+r1024.loom"
+        "bench_lvs+r1024.loom",
+        "bench_lvs2pf1+r1024.loom",
+        "bench_lvs2+r1024.loom"
       ],
       "tests": [
         "test.loom"
