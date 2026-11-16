@@ -68,7 +68,7 @@
 #          determinism:V:C:R    determinism.py (issue #39's script, when present)
 #          admit:V[:TOKENS]     ctx_admit.py on V served alone: a prompt of TOKENS (default: its context minus the answer) is admitted or refused (admit_V*.txt)
 #          vllm:N[:long]        vLLM ROCm (vllm_server.sh --install) serving the card's checkpoint, the card's drafting (job "vllm_spec" = the --speculative-config JSON), perf.py --kind vllm N times
-#                               (job "vllm_max_len": --max-model-len, default the served context); perf_vllm_nN.jsonl, vllm_args.txt, vllm_version.txt (a card with no llama.cpp baseline)
+#                               (job "vllm_max_len": --max-model-len, default the served context); perf_vllm_nN.jsonl, vllm_args_on.txt, vllm_kv_on.txt, vllm_version.txt (a card with no llama.cpp baseline)
 #          vllmc4[:N]           4 streams on vLLM without drafting, N (default 3) runs of c4_steady.py: c4_vllm_nN.txt
 #          fullctx:V[:TOKENS]   ctx_admit.py --complete: a request of ~the served context (or TOKENS) is prefilled to the end and answered (fullctx_V*.txt)
 #          func:V               V served alone: the functional checks the card claims (chat, tool calling, image input;
@@ -393,6 +393,7 @@ serve_alone() { # serve_alone VARIANT
     vmem=none
   fi
   [ -n "${PROFILE_SA:-}" ] && sa="$sa $PROFILE_SA"   # the profile step: --print_device_statistics
+  "$B/wait_vram.sh" "serve $1" 1024 180 "$out/vram_log.txt"
   local try fl=(); [ -n "$safetensors" ] && [ -z "${REFERENCE_CHECKPOINT:-}" ] && grep -q '"vision"' "$D/$1/pkg/llm_config.json" 2>/dev/null && fl=(--vision)
   for try in 1 2 3; do
     step "serve $1${try:+ (try $try)}"; LOOM_ACTIVE_WAIT=$aw "$SV/serve.sh" "perf-$1" "$PORT" amdgpu "$vmem" "$D/$1/pkg/model.json" ${sa:+-- $sa} > "$out/serve_$1.out" 2>&1; tail -2 "$out/serve_$1.out"
@@ -469,6 +470,10 @@ vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned 
   # A server already up in the same mode is reused (vllm:N and vllm:N:long are one load: 27B takes minutes to load); any other engine stops it.
   [ -f "$vpid" ] && [ "${VLLM_MODE:-}" = "$1" ] && kill -0 "$(cat "$vpid")" 2>/dev/null && curl -sf "$vurl/v1/models" >/dev/null 2>&1 && return 0
   vllm_down
+  # the old server must be gone (its port closed) before the next one starts: a server that is still shutting down answered the new one's
+  # readiness probe and the c4 rows ran on it (with drafting on)
+  for _ in $(seq 180); do curl -sf "$vurl/v1/models" >/dev/null 2>&1 || break; sleep 1; done
+  curl -sf "$vurl/v1/models" >/dev/null 2>&1 && { echo "the previous vLLM server still answers on $VPORT"; return 1; }
   for f in "$LOOM_SERVE_STATE"/*.pid; do [ -f "$f" ] && "$SV/stop.sh" "$(basename "$f" .pid)" >/dev/null 2>&1; done
   "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
   [ -x "$B/vllm_server.sh" ] || { echo "no vllm_server.sh in this checkout (vLLM reference engine, PR #875)"; return 1; }
@@ -481,19 +486,20 @@ vllm_up() {   # vllm_up on|off: vLLM ROCm (vllm_server.sh --install: the pinned 
   spec=$(q "print(j.get('vllm_spec') or '')")
   read -r ck rev < <("$T" -c "import json; s=json.load(open('$card/llm_config.json'))['source']; print(s['repo'], s.get('revision') or 'main')")
   args="--max-model-len $ml"; [ "$1" = on ] && [ -n "$spec" ] && args="$args --speculative-config '$spec'"
-  echo "$args" > "$out/vllm_args.txt"; "$vpy" -c "import vllm; print(vllm.__version__.split('+')[0])" > "$out/vllm_version.txt" 2>/dev/null
+  echo "$args" > "$out/vllm_args_$1.txt"; "$vpy" -c "import vllm; print(vllm.__version__.split('+')[0])" > "$out/vllm_version.txt" 2>/dev/null
+  "$B/wait_vram.sh" "vllm serve ($1)" 1024 180 "$out/vram_log.txt"
   step "vllm serve $ck@${rev:0:8}: $args"
   eval env VLLM_ROCM_USE_AITER=${VLLM_ROCM_USE_AITER:-0} ${VLLM_EXTRA_ENV:-} setsid nohup "$vpy" -m vllm.entrypoints.openai.api_server --model "$ck" --revision "$rev" \
-    --served-model-name vllm-card --port "$VPORT" $args > "$out/vllm_serve.log" 2>&1 &
+    --served-model-name vllm-card --port "$VPORT" $args > "$out/vllm_serve_$1.log" 2>&1 &
   echo $! > "$vpid"; VLLM_MODE=$1
   for _ in $(seq 1800); do
     curl -sf "$vurl/v1/models" >/dev/null 2>&1 && {
       echo "vLLM ready"
       # what the engine can hold at once (a request longer than the KV cache never finishes) and what it spent its memory on
-      { grep -m1 -o "GPU KV cache size: [0-9,]* tokens" "$out/vllm_serve.log"; grep -m1 -o "Model loading took [0-9.]* GiB" "$out/vllm_serve.log"
-        grep -m1 -o "Available KV cache memory: [0-9.]* GiB" "$out/vllm_serve.log"; } | tee "$out/vllm_kv.txt"
+      { grep -m1 -o "GPU KV cache size: [0-9,]* tokens" "$out/vllm_serve_$1.log"; grep -m1 -o "Model loading took [0-9.]* GiB" "$out/vllm_serve_$1.log"
+        grep -m1 -o "Available KV cache memory: [0-9.]* GiB" "$out/vllm_serve_$1.log"; } | tee "$out/vllm_kv_$1.txt"
       return 0; }
-    kill -0 "$(cat "$vpid")" 2>/dev/null || { echo "vLLM died:"; tail -15 "$out/vllm_serve.log" | cut -c1-250; return 1; }
+    kill -0 "$(cat "$vpid")" 2>/dev/null || { echo "vLLM died:"; tail -15 "$out/vllm_serve_$1.log" | cut -c1-250; return 1; }
     sleep 1
   done
   echo "vLLM did not come up in 30 min"; return 1
@@ -514,6 +520,7 @@ while [ "$qi" -lt "${#queue[@]}" ]; do
       "$B/llamacpp_server.sh" --stop "$LLAMA_PORT" >/dev/null 2>&1
       ms=(); ids=(); for v in $variants; do ms+=("$D/$v/pkg/model_ab.json"); ids+=("$cardid-$v"); done
       nv=${#ms[@]}; abmem=$(( 11000000000 * nv + 4000000000 )); [ -n "$RDEV" ] && [ "$abmem" -gt "$mem" ] && abmem=$mem
+      "$B/wait_vram.sh" "ab serve" 1024 180 "$out/vram_log.txt"
       step "ab: one loom-serve with $nv packages ($abmem bytes)"
       "$SV/serve.sh" abserve "$PORT" amdgpu "$abmem" "${ms[@]}" | tail -2
       "$T" "$here/.github/scripts/ab_decode.py" "$url" "${ids[@]}" --rounds "$p1" --think "${p2:-$TH}" --log "$out/ab.jsonl" 2>&1 | tee "$out/ab.log"
@@ -583,8 +590,8 @@ import json,statistics as st; r=[json.loads(l) for l in open('$out/$lf')]
 k='decode_tps_32k' if '${p2:-}' else 'decode_tps'
 print('llamacpp$bkt n-max $nm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v), 2) if (v := [x[k] for x in r if x.get(k)]) else 'n/a (no row served: beyond the served context)')");;
     vllm)   # vllm:N[:long]: the vLLM baseline of a safetensors card, N serve-session-less runs on one server (the card's drafting config), perf.py --kind vllm
-      vllm_up on || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
-      vkv=$(grep -o "cache size: [0-9][0-9,]* tokens" "$out/vllm_kv.txt" 2>/dev/null | grep -o "[0-9][0-9,]*" | tr -d ',')
+      vllm_up on || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve_on.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
+      vkv=$(grep -o "cache size: [0-9][0-9,]* tokens" "$out/vllm_kv_on.txt" 2>/dev/null | grep -o "[0-9][0-9,]*" | tr -d ',')
       if [ -n "${p2:-}" ] && [ -n "$vkv" ] && [ "$vkv" -lt 40000 ]; then   # the long rows (8k/16k/32k documents, decode after 32k) can never finish: vLLM would wait for KV blocks forever
         echo "vLLM's KV cache holds $vkv tokens: the 8k/16k/32k rows are not measured" | tee "$out/vllm_note.txt"
         res[$s]="SKIP (vLLM KV cache $vkv tokens)"; continue
@@ -599,10 +606,12 @@ import json,statistics as st; r=[json.loads(l) for l in open('$out/perf_vllm_n$p
 k='decode_tps_32k' if '${p2:-}' else 'decode_tps'
 print('vllm', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v), 2) if (v := [x[k] for x in r if x.get(k)]) else 'n/a')");;
     vllmc4)   # vllmc4:N: 4 streams on vLLM without drafting (the same load-time exception as Loom's c4), N runs of c4_steady.py
-      vllm_up off || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
+      vllm_up off || { res[$s]=ERROR; echo "vllm: $(tail -2 "$out/vllm_serve_off.log" 2>/dev/null | tr '\n' ' ' | cut -c1-300)" > "$out/vllm_error.txt"; continue; }
       step "vllm c4"
       cn=${p1:-3}
-      for i in $(seq 1 "$cn"); do (cd "$out" && timeout 1800 "$T" "$B/c4_steady.py" "$vurl" 4 --model vllm-card --thinking "$TH" | tail -1 | tee -a "c4_vllm_n$cn.txt"); done
+      for i in $(seq 1 "$cn"); do (cd "$out" && timeout 1800 "$T" "$B/c4_steady.py" "$vurl" 4 --model vllm-card --thinking "$TH" 2> "c4_vllm_err.txt" | tail -1 | tee -a "c4_vllm_n$cn.txt"); done
+      # 4 streams that never decode together (the engine serves fewer at a time: KV / state blocks): the engine's own message is the card's note
+      grep -q agg_tps "$out/c4_vllm_n$cn.txt" 2>/dev/null || { echo "vLLM could not run 4 concurrent streams: $(tail -1 "$out/c4_vllm_err.txt" | cut -c1-200)" > "$out/vllm_note_c4.txt"; res[$s]="no 4-stream rate (vllm_note_c4.txt)"; vllm_down; continue; }
       echo "{\"session_end\": \"vllm\"}" >> "$out/c4_vllm_n$cn.txt"
       res[$s]=$("$T" -c "import json,statistics as st; print('vllm c4 median', st.median(r['agg_tps'] for l in open('$out/c4_vllm_n$cn.txt') if 'agg_tps' in (r := json.loads(l))))");;
     llamac4)   # llamac4[:N_MAX]

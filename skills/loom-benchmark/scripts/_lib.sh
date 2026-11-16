@@ -51,6 +51,8 @@ loom_up() {
   local f; f=$(grep -lx "$loom_port" "$state"/*.port 2>/dev/null | head -1); [ -n "$f" ] && name=$(basename "$f" .port)
   [ -n "${loom_name:-}" ] && name=$loom_name
   mkdir -p "$state"
+  # the VRAM of the process that was just stopped (the reference engine of the fill) must be released before the weights load
+  bash "$(dirname "${BASH_SOURCE[0]}")/wait_vram.sh" "loom restart ($name)" 1024 180 "$state/vram_restarts.log"
   # exec: the background subshell becomes loom-serve, so no shell is left holding the caller's stdout
   # (`qualify.sh ... | tail` otherwise never ends: the subshell kept the pipe open while it waited) and $! is
   # the server's own PID.
