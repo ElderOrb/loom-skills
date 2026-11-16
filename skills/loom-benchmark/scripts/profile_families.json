@@ -32,8 +32,8 @@
   "^g_gdn_norm_gate|^g_gdn_qk_norm"
  ],
  [
-  "GDN state capture/restore (spec rollback)",
-  "^g_gdn_(capture|restore)"
+  "GDN state capture/restore/fold (spec rollback)",
+  "^g_gdn_(capture|restore|fold|pend|flush)"
  ],
  [
   "alpha/beta matvecs (in_proj_a/b)",
