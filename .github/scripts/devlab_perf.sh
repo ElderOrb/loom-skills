@@ -157,6 +157,12 @@ vllm_down() {   # stop the vLLM OpenAI server this job started (its process grou
   local p; p=$(cat "$vpid"); kill -- -"$p" 2>/dev/null || kill "$p" 2>/dev/null
   for _ in $(seq 120); do kill -0 "$p" 2>/dev/null || break; sleep 0.5; done
   kill -9 -- -"$p" 2>/dev/null; rm -f "$vpid"
+  # the recorded pid can be a launcher that already exited (the final MXFP4 card job: the spec-on server kept answering for 180 s after vllm_down, and the
+  # no-draft c4 row failed): stop whatever serves this port by its command line, then the engine core it leaves behind
+  pkill -TERM -f "vllm.entrypoints.openai.api_server.*--port $VPORT( |\$)" 2>/dev/null
+  for _ in $(seq 60); do curl -sf "$vurl/v1/models" >/dev/null 2>&1 || break; sleep 1; done
+  pkill -9 -f "vllm.entrypoints.openai.api_server.*--port $VPORT( |\$)" 2>/dev/null; pkill -9 -f "VLLM::EngineCore" 2>/dev/null
+  return 0
 }
 cleanup() {
   vllm_down
