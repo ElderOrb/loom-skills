@@ -7,26 +7,26 @@
       "dir": "gemm_mxfp4s",
       "gen": "gemm_mxfp4s/gen_bench.py",
       "gen_variants": [
-        "base",
-        "lvs",
-        "lvs2pf1",
-        "lvk2s",
-        "lvs2",
         "r1024",
         "lvs+r1024",
-        "lvs2pf1+r1024",
-        "lvs2+r1024"
+        "w16a+r1024",
+        "w16b+r1024",
+        "w16v+r1024",
+        "base",
+        "lvs",
+        "w16a",
+        "w16b"
       ],
       "files": [
-        "bench.loom",
-        "bench_lvs.loom",
-        "bench_lvs2pf1.loom",
-        "bench_lvk2s.loom",
-        "bench_lvs2.loom",
         "bench_r1024.loom",
         "bench_lvs+r1024.loom",
-        "bench_lvs2pf1+r1024.loom",
-        "bench_lvs2+r1024.loom"
+        "bench_w16a+r1024.loom",
+        "bench_w16b+r1024.loom",
+        "bench_w16v+r1024.loom",
+        "bench.loom",
+        "bench_lvs.loom",
+        "bench_w16a.loom",
+        "bench_w16b.loom"
       ],
       "tests": [
         "test.loom"

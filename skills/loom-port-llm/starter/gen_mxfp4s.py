@@ -30,6 +30,7 @@ def f8_enabled():
 
 # kernel designs of the fp8 GEMM (choice prefill.gemm.mxfp4s_f8_kernel, env GEMM_MXFP4S_F8_KERNEL): name -> (store kwargs, swiglu kwargs) of gemm_mxfp4s_f8_m256
 F8_KERNELS = {"v1": ({}, {}),
+              "lvs": ({"lv": True, "lvs": 1}, {}),     # ogemm: store GEMMs -5..-6 % at 1024 rows (kbench 43869957328); the SwiGLU pair keeps v1 (lvs at rf 4 ties it)
               "lv": ({"lv": True}, {"lv": True, "rf": 4}),
               "ws": ({"ws": 4}, {"ws": 4})}
 
@@ -46,7 +47,7 @@ def mxfp4_f8_range(blocks_e):
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, lv=False, lvpf=0, lvs=False, ws=0):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, pair=False, lv=False, lvpf=0, lvs=False, ws=0):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -55,10 +56,14 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     a_pf (with a_direct, not dbuf): the next step's activation fragments are loaded during this step (carried in registers).
     a_direct (default): the activation fragments are loaded from global memory straight into registers (no LDS staging of the activations): -11 % GEMM time on
     the R9700 against the staged variant (a_direct=False). rf: 16-row activation fragments per wave (default 4 for store, 2 for swiglu: measured best, see
-    device/rdna4/prefill.md); kmult 2 doubles the K step; nt 128 halves the workgroup; a_pf / dbuf are measured non-wins kept for the record."""
+    device/rdna4/prefill.md); kmult 2 doubles the K step; nt 128 halves the workgroup; a_pf / dbuf are measured non-wins kept for the record.
+    pair (store only): two projections of the same activation in one launch: output tiles [0, n / tn) multiply %w into %y, tiles
+    [n / tn, 2 n / tn) multiply %w2 into %y2 (both n rows; the skinny GDN alpha / beta projections, ab_f8 below)."""
     if ws:   # the wave-specialized design (ws = producer waves)
+        assert not pair
         return gemm_mxfp4s_f8_ws(mode, prefix, order, npw=ws, rf=rf, pad=pad, lvs=lvs)
     two_w = mode == "swiglu"
+    assert not (pair and two_w)
     BM = bm or nt                 # rows of the workgroup tile (default 256; 128 / 256 with a wider tn: the tile shapes of the prefill GEMM sweep)
     TN = tn or (64 if two_w else 128)     # output columns per tile (swiglu: of each of gate and up)
     TW = TN * (2 if two_w else 1)         # weight rows staged per tile (swiglu: TN gate + TN up)
@@ -70,7 +75,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     NWV = WR * WC
     NT = NWV * 32                 # threads = waves * 32 (256 for the 256 x 128 tile)
     HALVES = NT // TW             # staging threads per weight row
-    assert RF in (2, 4, 8) and WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2) and NT <= 1024
+    assert RF in (2, 4, 8) and WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2, 4) and NT <= 1024
     assert a_direct or (NT == BM == 256 and TW == 128)
     wave_cols = 16 * cfr
     YT = 'f16' if yf16 else 'f32'   # the output element type (f16: a measured option for the SwiGLU output, whose consumer is the down projection's row-scale producer)
@@ -80,7 +85,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     PX = KS + pad                 # LDS pitch (bytes) of both stages: KS data + pad (16)
     NB = (KS // 32) // HALVES     # blocks one staging thread decodes per step (a half of a row's step; the whole step with 128 threads)
     assert kmult == 1 or a_direct
-    name = f"{prefix}_gemm_mxfp4s_{mode}_f8_m256_rdna4"
+    name = f"{prefix}_gemm_mxfp4s_{mode}{'_pair' if pair else ''}_f8_m256_rdna4"
     weights = ["w", "w2"] if two_w else ["w"]
     accs = [f"{wi}r{r}c{c}" for wi in range(len(weights)) for r in range(RF) for c in range(cfr)]
     L = []
@@ -91,9 +96,9 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %cnt = index.constant {NT} : index
   %tn = index.constant {TN} : index
   %row_tiles = index.div %rows, %{CBM} : index
-  %out_tiles = index.div %n, %tn : index
-  kernel.launch.config workgroups({"%out_tiles, %row_tiles" if swz else "%row_tiles, %out_tiles"}, %c1) workgroup_size(%cnt, %c1, %c1) : index
-}} launch(%rows_arg: index, %k_arg: index, %n_arg: index, %x: buffer, %scales: buffer, {", ".join(f"%{w}: buffer, %{w}s: buffer" for w in weights)}, %y: buffer) {{
+  %out_tiles = index.div %n, %tn : index{chr(10) + "  %out_tiles2 = index.add %out_tiles, %out_tiles : index" if pair else ""}
+  kernel.launch.config workgroups({"%out_tiles, %row_tiles" if swz else "%row_tiles, %out_tiles"}{"2" if pair else ""}, %c1) workgroup_size(%cnt, %c1, %c1) : index
+}} launch(%rows_arg: index, %k_arg: index, %n_arg: index, %x: buffer, %scales: buffer, {", ".join(f"%{w}: buffer, %{w}s: buffer" for w in weights)}{", %w2: buffer, %w2s: buffer" if pair else ""}, %y: buffer{", %y2: buffer" if pair else ""}) {{
   %rows = index.assume %rows_arg [range(%rows_arg, {BM}, 8192), multiple_of(%rows_arg, {BM})] : index
   %k = index.assume %k_arg [range(%k_arg, {KS}, 65536), multiple_of(%k_arg, {KS})] : index
   %n = index.assume %n_arg [range(%n_arg, {TN}, 262144), multiple_of(%n_arg, {TN})] : index
@@ -122,7 +127,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %row_group_id = kernel.workgroup.id<{"y" if swz else "x"}> : index
   %out_group_id = kernel.workgroup.id<{"x" if swz else "y"}> : index
   %row_group = index.assume %row_group_id [lt(%row_group_id, %row_tile_count)] : index
-  %out_group = index.assume %out_group_id [lt(%out_group_id, %out_tile_count)] : index
+{PAIR_TEXT if pair else "  %out_group = index.assume %out_group_id [lt(%out_group_id, %out_tile_count)] : index"}
   %workitem_id = kernel.workitem.id<x> : index
   %workitem = index.assume %workitem_id [range(%workitem_id, 0, {NT - 1})] : index
   %subgroup = kernel.subgroup.id : index
@@ -169,7 +174,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %chalves = index.constant {HALVES} : index
   %stage_row = index.div %workitem, %chalves : index
   %stage_half = index.rem %workitem, %chalves : index
-  %stage_col = index.mul %stage_half, %cks2 : index''')
+{'' if HALVES < 4 else f'  %cnb32 = index.constant {NB * 32} : index' + chr(10)}  %stage_col = index.mul %stage_half, {'%cks2' if HALVES < 4 else '%cnb32'} : index''')
     if two_w:
         A(f'''  %half_tw = index.constant {TN} : index
   %w_is_up = index.cmp uge, %stage_row, %half_tw : index
@@ -198,8 +203,8 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %m80 = vector.constant -128 : vector<4xi8>
   %m4i = vector.constant 4 : vector<1xi32>
   %m80i = vector.constant -2139062144 : vector<1xi32>''')
-    wsrc = "%wsel" if two_w else "%w"
-    ssrc = "%wssel" if two_w else "%ws"
+    wsrc = "%wsel" if two_w else "%wpsel" if pair else "%w"
+    ssrc = "%wssel" if two_w else "%wspsel" if pair else "%ws"
 
     def loads(sfx, kstep):
         """global loads of step `kstep` (an index value name): activation 8 x vector<16xi8>, weights 2 blocks (e, q)"""
@@ -476,7 +481,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     A(f'''  %y_layout = encoding.layout.strided [%n, %c1] : encoding<layout>
   %tile_first = index.madd %row_origin, %n, %out_origin : index
   %tile_offset = index.scale %tile_first, {'%two' if yf16 else '%four'} : index, offset -> offset
-  %y_view = buffer.view %y[%tile_offset] : buffer -> view<{BM}x{TN}x{YT}, %y_layout>''')
+  %y_view = buffer.view {"%ypsel" if pair else "%y"}[%tile_offset] : buffer -> view<{BM}x{TN}x{YT}, %y_layout>''')
     for r in range(RF):
         for c in range(cfr):
             row = rowv[r]
@@ -832,6 +837,17 @@ def gemm_mxfp4s_f8_ws(mode, prefix="g", order="pairs", npw=4, rf=None, pad=16, k
     return "\n".join(L)
 
 
+PAIR_TEXT = """  %out_tile_count2 = index.add %out_tile_count, %out_tile_count : index
+  %out_group_p = index.assume %out_group_id [lt(%out_group_id, %out_tile_count2)] : index
+  %second = index.cmp uge, %out_group_p, %out_tile_count : index
+  %out_group_s = index.sub %out_group_p, %out_tile_count : index
+  %out_group_v = scf.select %second, %out_group_s, %out_group_p : index
+  %out_group = index.assume %out_group_v [lt(%out_group_v, %out_tile_count)] : index
+  %wpsel = scf.select %second, %w2, %w : buffer
+  %wspsel = scf.select %second, %w2s, %ws : buffer
+  %ypsel = scf.select %second, %y2, %y : buffer"""
+
+
 # -- the producers' fp8 twins ------------------------------------------------------------------------------------------
 F8_SCALE = """  // fp8 activations: per-row power-of-two scale 2^(7 - e) (e: exponent of the row max, so the max lands in [128, 256)), the inverse
   // 2^(e - 7) carries the weights' 2^-%(shift)d too; a dead row (f16 scale 0) gets (0, 0)
@@ -1144,3 +1160,51 @@ func.def inline @g_mxfp4s_icodes(%w: buffer, %ws: buffer, %origin: offset, %scal
   func.return %codes, %d : vector<32xi8>, f32
 }}
 """
+
+
+# -- skinny alpha / beta projections of the gated delta-net on fp8 WMMA ---------------------------------------------------
+def ab_f8_enabled():
+    """GDN_AB_F8 (choice prefill.gdn.ab_f8): with prefill.gdn.ab_q8 and the fp8 GEMMs, the 48-row alpha / beta projections of GEMM-shape epochs
+    run as one paired skinny fp8 GEMM on the producer's fp8 activations (%h8), not g_quant_q8 + two int8 16-token matvecs."""
+    return f8_enabled() and os.environ.get("GDN_AB_F8", "0").lower() not in ("", "0", "false", "no", "off")
+
+
+def ab_f8(text, hv, k):
+    """gfx12, @llm_advance after fuse_mxfp4s_f8: each GDN layer's GEMM-epoch alpha block (gen_llm.ab_q8: g_quant_q8 + g_mv_.._t16_q8 into %galpha)
+    and its beta matvec (into %gbeta) become, in epochs whose rows are a multiple of 32, a dual group whose gfx12 provider is
+    g_ab_gemm_mxfp4s_store_pair_f8_m256_rdna4 (32 x hv tiles, both weights in one launch, K step 256) over %h8 / %s_h8, the fp8 rows the
+    producer twin already wrote for the qkv GEMM. gfx11 and the other epochs keep the int8 launches. Returns (text, layers rewritten)."""
+    a = text.find("command.program.def public @llm_advance(")
+    if a < 0 or "%h8 = buffer.alloca" not in text[a:]:
+        return text, 0
+    b = text.find("\ncommand.program.def ", a + 10)
+    b = len(text) if b < 0 else b + 1
+    body = text[a:b]
+    pat = re.compile(r"(?m)^(?P<ind> *)scf\.if %gemm \{\n(?P=ind)(?P<q>kernel\.launch @g_quant_q8\[%t, %nH\]\(%t, %nH, %h, %h16q\) : [^\n]*)\n"
+                     r"(?P=ind)(?P<al>kernel\.launch @g_mv_mxfp4s_k\d+_t16_q8\[%nHV, %t\]\(%nHV, %t, %zero_i32, %h16q, (?P<wa>%walpha_\d+), (?P=wa)_sc, %galpha\) : \[index, index\]\(index, index, i32, buffer, (?P<va>view<\d+xi8>), (?P<vs>view<\d+xi8>), buffer\))\n")
+    n = 0
+    out, pos = [], 0
+    for m in pat.finditer(body):
+        layer = m.group("wa")[len("%walpha_"):]
+        bl = re.compile(r"(?m)^(?P<ind> *)(?P<bt>kernel\.launch @g_mv_mxfp4s_k\d+_t16_q8\[%nHV, %t\]\(%nHV, %t, %zero_i32, %h16q, %wbeta_" + layer + r", %wbeta_" + layer + r"_sc, %gbeta\) : [^\n]*)\n")
+        bm = bl.search(body, m.end())
+        assert bm and body[bm.start() - len(m.group("ind")) - len("scf.if %gemm {\n"):bm.start()].endswith("scf.if %gemm {\n"), f"ab_f8: layer {layer}: beta block"
+        ind = m.group("ind")
+        pair = (f"kernel.launch @g_ab_gemm_mxfp4s_store_pair_f8_m256_rdna4[%t, %nHV](%t, %k_ab, %nHV, %h8, %s_h8, {m.group('wa')}, {m.group('wa')}_sc, %wbeta_{layer}, "
+                f"%wbeta_{layer}_sc, %galpha, %gbeta) : [index, index](index, index, index, buffer, buffer, {m.group('va')}, {m.group('vs')}, {m.group('va')}, {m.group('vs')}, buffer, buffer)")
+        chain = [m.group("q"), m.group("al"), bm.group("bt")]
+        new = (f"{ind}scf.if %gemm {{\n{ind}scf.if %ab_t32 {{\n{ind}  // dual-group: rdna4 {pair}\n" + "".join(f"{ind}  {c}\n" for c in chain)
+               + f"{ind}  // dual-group: end\n{ind}}} else {{\n" + "".join(f"{ind}  {c}\n" for c in chain) + f"{ind}}}\n")
+        out.append(body[pos:m.start()] + new + body[m.end():bm.start()])
+        pos = bm.end()
+        n += 1
+    if not n:
+        return text, 0
+    body = "".join(out) + body[pos:]
+    anchor = re.search(r"(?m)^  %gemm = index\.cmp uge, %t, %c64 : index\n", body)
+    body = (body[:anchor.end()] + f"  %ab_c32 = index.constant 32 : index\n  %ab_rem = index.rem %t, %ab_c32 : index\n  %ab_t32 = index.cmp eq, %ab_rem, %c0 : index\n"
+            f"  %k_ab = index.constant {k} : index\n" + body[anchor.end():])
+    kern = gemm_mxfp4s_f8_m256("store", prefix="g_ab", bm=32, tn=hv, rf=2, cf=1, kmult=2, pair=True)
+    text = text[:a] + body + text[b:]
+    first = text.index("command.program.def ")   # kernels before the programs (dual_target: a twin is defined before its launches)
+    return text[:first] + kern + "\n" + text[first:], n

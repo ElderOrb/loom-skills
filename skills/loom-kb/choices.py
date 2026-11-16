@@ -278,9 +278,10 @@ CHOICE("prefill.gemm.mxfp4s_f8", "bool", False, "GEMM_MXFP4S_F8", kernels=["g_ge
            "exactly in LDS, activations fp8 e4m3 with a per-row power-of-two scale written by the row-scale producers' _f8_rdna4 twins (lossy activations, gated against the "
            "golden reference). Opt-in per model; every block exponent of the checkpoint must be in 107..132 (scan_mxfp4s_exponents.py). The gfx11 programs are unchanged.")
 CHOICE("prefill.gemm.mxfp4s_f8_kernel", "str", None, "GEMM_MXFP4S_F8_KERNEL", kernels=["g_gemm_mxfp4s_*_f8_*"], rows=ROWS_PREFILL, devices=["rdna4"], from_pr="mxfp4st-ogemm",
-       doc="The design of prefill.gemm.mxfp4s_f8's GEMM kernels (gen_mxfp4s.F8_KERNELS; None = v1, the #879 kernel). lv: lane-vector operand loads, one 16-byte load per lane "
-           "covers two K substeps (activations from global memory with immediate offsets, weights ds_load_b128 from LDS; both operands take K in the same permuted order), the SwiGLU "
-           "pair at 64-row wave tiles; lvpf N: lv and the next step's first N activation pairs loaded before the step's closing barrier; lvk2: lv with a 256-value K step.")
+       doc="The design of prefill.gemm.mxfp4s_f8's GEMM kernels (gen_mxfp4s.F8_KERNELS; None = v1, the #879 kernel). lvs: the store GEMMs load their operands lane-vector "
+           "(one 16-byte load per lane covers two K substeps: activations global_load_b128 with immediate offsets, weights ds_load_b128; both operands in the same permuted K "
+           "order) and issue the next K pair's loads before this pair's WMMAs; the SwiGLU pair stays v1. lv: lane-vector without the pipelining (SwiGLU at 64-row waves); "
+           "ws: wave-specialized (4 producer waves decode the next step into a second LDS buffer). kbench gemm_mxfp4s (R9700): lvs store -5..-6 % at 1024 rows, lv +3..7 %, ws +8..19 %.")
 CHOICE("prefill.attn.no_flash2", "bool", False, "NO_FLASH2", kernels=["*_attention_flash2*"], rows=ROWS_PREFILL, enc=("1", "0"),
        doc="No prefill flash attention (every token takes the listed split-K path).")
 CHOICE("prefill.gemm.off", "bool", False, "NO_GEMM", kernels=["g_gemm_*"], rows=ROWS_PREFILL, enc=("1", None), experiment=True,
@@ -388,6 +389,25 @@ CHOICE("hybrid.gdn.chunk", "bool", False, "GDN_CHUNK", devices=["rdna4"], rows=R
        from_pr="q38r9700 gdnpf",
        doc="gfx12 chunked (WY) gated delta-net prefill (gen_gdn_chunk.py): spans of 64+ tokens run g_gdn_chunk_rdna4 (f16 WMMA, f32 state), the "
            "sequential kernel's gfx12 twin the shorter ones; the gfx11 kernels do not change (128 x 128 heads only).")
+CHOICE("prefill.gdn.fused2", "bool", False, "GDN_FUSED2", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_fa_rdna4", "g_gdn_fb_rdna4"],
+       from_pr="mxfp4st olayer",
+       doc="gfx12 fused gated delta-net prefill in two launches (gen_gdn_fused.py): g_gdn_fa_rdna4 (conv + SiLU, q/k norms, gates, the WY solve "
+           "and W = T beta e^gc K, U = T beta V, P per (value head, 32-token chunk), fully parallel) and g_gdn_fb_rdna4 (the serial state pass "
+           "d = U - W S, O = e^gc Q S + P d, S update, norm-gate epilogue, conv history commit) replace conv, commit, qk_norm, the chunk kernel and "
+           "norm_gate in GEMM-shape epochs; gfx11 and short epochs keep the chain (128 x 128 heads, conv 4).")
+CHOICE("prefill.gdn.fused2_min", "int", 64, "GDN_FUSED2_MIN", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_gdn_fa_rdna4", "g_gdn_fb_rdna4"],
+       from_pr="mxfp4st olayer2",
+       doc="With prefill.gdn.fused2: the smallest epoch (rows) that takes the fused pair: 64 = every GEMM-shape epoch; 128 = 64-row epochs (prompts and "
+           "tails under 64 tokens) keep the chain, whose spans under 64 tokens run the exact sequential recurrence.")
+CHOICE("prefill.gdn.ab_f8", "bool", False, "GDN_AB_F8", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_ab_gemm_mxfp4s_store_pair_f8_m256_rdna4"],
+       from_pr="mxfp4st olayer2",
+       doc="MXFP4 split-plane hybrids with prefill.gdn.ab_q8 and the fp8 GEMMs (gen_mxfp4s.ab_f8): in GEMM-shape epochs whose rows are a multiple of 32 "
+           "the 48-row GDN alpha / beta projections run as ONE paired skinny fp8 WMMA GEMM (32 x 48 tiles, both weights, K step 256) on the fp8 rows the "
+           "producer twin already wrote for the qkv GEMM (%h8), not g_quant_q8 + two int8 16-token matvecs; gfx11 keeps the int8 launches.")
+CHOICE("prefill.gdn.ab_q8", "bool", False, "GDN_AB_Q8", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_quant_q8", "g_mv_mxfp4s_k5120_t16_q8"],
+       from_pr="mxfp4st olayer",
+       doc="MXFP4 split-plane hybrids, GEMM-shape epochs: the 48-row GDN alpha / beta projections run as the 16-token int8 matvec on h quantized "
+           "once to int8, not as the f32 4-token matvec over h (gen_llm.ab_q8).")
 
 # ======================================================================================================================
 # Speculative decoding (gen_llm.py, draft/)
