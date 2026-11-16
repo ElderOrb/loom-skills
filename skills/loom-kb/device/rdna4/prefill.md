@@ -85,3 +85,13 @@ Doubling each kernel family in prefill (2k, ms/token of 0.608; single runs, nois
 GDN recurrence 0.046, post-add norm 0.013, row scale 0.013, f32 mv (ssm alpha/beta) 0.012, conv 0.011, silu_mul 0.020 (one outlier), gated norm 0.007,
 q/k norm 0.004, quant 0.003. Only the recurrence is above the noise: the chunked gfx12 kernel (facet hybrid-gdn prefill) takes it from 0.042 to 0.016
 (+4.4 % prefill). The small kernels (together ~0.06) are individually below what a doubling resolves and below what one fusion could save (<= 1 % each).
+
+## MXFP4 card on the R9700: prefill outside the GEMMs (pfrest, DevLab runs 43787206494 .. 43803850202)
+- Doubling at 2k (ms/token of 0.381, chunk build): fp8 GEMMs 0.247 (swiglu 0.115, store 0.132), producers 0.032, GDN chunk 0.015, alpha/beta matvecs 0.012, conv + commit 0.012, norm_gate 0.008, qk_norm 0.004,
+  split_qgate + rope 0.005, head 0.006, MTP warm 0.005; attention 0.012 at 2k, 0.054 at 16k, 0.105 at 32k. Doubling EVERY launch family is what finds the cost: the first pass named the GEMM, GDN, producer and attention
+  families and left 0.045 ms/token (12 %) unexplained (the alpha/beta matvecs and the conv).
+- **The producers' f16 operand copy was the biggest lever (+8..10 % prefill, one flag argument).** The fp8 twins of the row-scale producers wrote the f16 GEMM operand next to the fp8 one although the fp8 GEMM never reads it (the
+  f16 GEMMs of the epochs whose rows are not a multiple of 256 do). The twin now takes `%w16` (`%huge` ? 0 : 1) and stores the f16 copy only then. A write of an unread copy costs far more than its share of the bytes.
+- Chunked GDN (`hybrid.gdn.chunk`) +5..7 % (grouped value heads through `kh_line`). Flash trims (`prefill.attn.flash2_trim`) at head_dim 256: +0.5 / +0.9 / +1.7 % at 8k / 16k / 32k; `FLASH2_VP`, `FLASH2_PF`, trim + pf and 16-key tiles lose or tie.
+- Prefill chunk: 1536 / 2048 gain +1..2 % (1k +13 %: the tail epoch of a 1140-token prompt is a 116-row epoch on the f16 m128 path) but cost context (neither fits at 113664); the epoch shapes are 1, 2, 4 .. 1024 (the next power of two of
+  the ready tokens, capped at the chunk), so only prompts whose tail is 64..128 rows pay the slow tail.
