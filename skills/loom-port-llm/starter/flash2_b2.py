@@ -19,7 +19,7 @@ Measured on E2B (R9700, vs the staged twin): prefill +7 / +12 / +19 % at 8k / 16
 import re
 
 
-def rewrite_b2(text, kvh, d, partial, qh=None, nh=2):
+def rewrite_b2(text, kvh, d, partial, qh=None, nh=2, opts=None):
     """d = 512 (gemma4 global layers: 8 query heads per KV head) or 256 (Qwen3.5-class 27B: 6 per KV head, three head pairs per KV head).
     A wave owns d / 4 output dims (HALF of gen_flash2s.py: 128 / 64) and sums its 16 keys' S^T over all d dims."""
     assert d in (256, 512) and nh in (2, 3)
@@ -265,5 +265,27 @@ def rewrite_b2(text, kvh, d, partial, qh=None, nh=2):
     A("    }")
     A("    scf.yield " + ", ".join(f"%m{SUF[hh]}_new, %l{SUF[hh]}_new" for hh in range(nh)) + ", " + ", ".join(f"%{ON[hh]}{k}" for hh in range(nh) for k in range(NO)) + f" : {mlt}, {ty16}\n  }}\n")
     loop = "".join(x if x.endswith("\n") else x + "\n" for x in L)
+    loop = _ablate(loop, (opts or {}).get("abl", ""))
     text = text[:h0] + alloc + defs + qst + loop + epilogue + "".join(epis) + tail
     return text
+
+
+def _ablate(loop, abl):
+    """Timing ablations of the loop (kbench only; results are wrong): kv0 every K / V^T page is page 0 (cache-resident), noqk no QK
+    WMMAs (nor K loads), nopv no PV WMMAs (nor V^T loads), nobar no barriers, noexp no exponentials."""
+    for a in [x for x in abl.split(",") if x]:
+        if a == "kv0":
+            loop = re.sub(r"(%rw\d) = index\.assume %rw\d_v \[range\(%rw\d_v,", r"\1 = index.assume %c0 [range(%c0,", loop)
+            loop = re.sub(r"lt\(%rw\d_v, %pl_rows_m\)", "lt(%c0, %pl_rows_m)", loop)
+        elif a in ("noqk", "nopv"):
+            pat = r"^ *(%sq\w+) = vector\.mma \S+, \S+, (%\w+) :.*\n" if a == "noqk" else r"^ *(%bn\w+) = vector\.mma \S+, \S+, (%\w+) :.*\n"
+            for m in list(re.finditer(pat, loop, flags=re.M)):
+                loop = loop.replace(m.group(0), "")
+                loop = re.sub(re.escape(m.group(1)) + r"\b(?!\w)", m.group(2), loop)
+        elif a == "nobar":
+            loop = re.sub(r"^ *kernel\.barrier.*\n", "", loop, flags=re.M)
+        elif a == "noexp":
+            loop = re.sub(r"vector\.expf<afn> (%\w+) : vector<8xf32>", r"vector.addf \1, %zero8 : vector<8xf32>", loop)
+        else:
+            raise ValueError("flash2_b2: unknown ablation " + a)
+    return loop

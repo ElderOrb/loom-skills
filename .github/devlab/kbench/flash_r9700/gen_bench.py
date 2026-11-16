@@ -29,8 +29,15 @@ VARIANTS = {   # name -> flash2_g6.py options (FLASH2_G6_OPTS)
     "g6noqk": {"abl": "noqk"},
     "g6nopv": {"abl": "nopv"},
     "g6noexp": {"abl": "noexp"},
+    # key-split loop (flash2_b2.py, FLASH2_B=2 unless "B" says otherwise; options FLASH2_B2_OPTS)
+    "b3": {"B": "3"},
+    "kv0": {"B": "2", "abl": "kv0"},
+    "noqk": {"B": "2", "abl": "noqk"},
+    "nopv": {"B": "2", "abl": "nopv"},
+    "nobar": {"B": "2", "abl": "nobar"},
+    "noexp": {"B": "2", "abl": "noexp"},
 }
-TESTED = ["g6", "g6o0", "g6slow"]
+TESTED = []
 
 
 def opts_of(v):
@@ -43,8 +50,11 @@ def opts_of(v):
 
 def kernel(variant, name):
     """The whole-tile kernel text of VARIANT ('' = base), renamed NAME."""
-    env = dict(os.environ, LLM_CONFIG=CONFIG, FLASH2_ARCH="rdna4", FLASH2_TRIM="1", FLASH2_B="6" if variant else "2",
-               FLASH2_G6_OPTS=json.dumps(opts_of(variant)) if variant else "{}", FLASH2_OUT=os.path.join(OUT, f".fl_{name}.loom"))
+    o = opts_of(variant) if variant else {}
+    b = o.pop("B", "6" if variant else "2")
+    env = dict(os.environ, LLM_CONFIG=CONFIG, FLASH2_ARCH="rdna4", FLASH2_TRIM="1", FLASH2_B=b,
+               FLASH2_G6_OPTS=json.dumps(o) if b == "6" else "{}", FLASH2_B2_OPTS=json.dumps(o) if b != "6" else "{}",
+               FLASH2_OUT=os.path.join(OUT, f".fl_{name}.loom"))
     subprocess.run([sys.executable, os.path.join(STARTER, "gen_flash2s.py")], check=True, env=env)
     t = open(env["FLASH2_OUT"]).read(); os.remove(env["FLASH2_OUT"])
     t = t[:t.index('kernel.def target(@rdna4) export("g_attention_flash2_partial_rdna4")')]

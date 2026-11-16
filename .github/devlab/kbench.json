@@ -215,23 +215,21 @@
       "gen": "flash_r9700/gen_bench.py",
       "gen_variants": [
         "base",
-        "g6",
-        "g6o0",
-        "g6slow",
-        "g6kv0",
-        "g6noqk",
-        "g6nopv",
-        "g6noexp"
+        "b3",
+        "kv0",
+        "noqk",
+        "nopv",
+        "nobar",
+        "noexp"
       ],
       "files": [
         "bench.loom",
-        "bench_g6.loom",
-        "bench_g6o0.loom",
-        "bench_g6slow.loom",
-        "bench_g6kv0.loom",
-        "bench_g6noqk.loom",
-        "bench_g6nopv.loom",
-        "bench_g6noexp.loom"
+        "bench_b3.loom",
+        "bench_kv0.loom",
+        "bench_noqk.loom",
+        "bench_nopv.loom",
+        "bench_nobar.loom",
+        "bench_noexp.loom"
       ],
       "tests": [
         "test.loom"

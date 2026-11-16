@@ -542,7 +542,7 @@ if R4:
     if B_MODE == "2":
         from flash2_b2 import rewrite_b2
         assert GW == B_HEADS and WPH == 4 and WAVES == 4
-        text = rewrite_b2(text, KVH, D, PARTIAL, QH, B_HEADS)
+        text = rewrite_b2(text, KVH, D, PARTIAL, QH, B_HEADS, json.loads(os.environ.get("FLASH2_B2_OPTS") or "{}"))
     if G6:
         from flash2_g6 import g6_kernel
         assert WINDOW >= 262144, "flash2_g6: no sliding window"
