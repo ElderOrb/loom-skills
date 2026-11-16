@@ -96,7 +96,7 @@ A change can sit in two classes (a pool-size change is card schema *and* program
 | Script | Does |
 |---|---|
 | `"${LOOM_SKILL_DIR}/scripts/sweep.py" --sdk VENV FLEET_DIR [--json OUT] [--no-link]` | version-agnostic: `loom-opt` parse of every program file and `loom-link` link of every variant/service of every package (a fleet dir or one package), the first-error-class histogram, JSON out. Run it with the old venv as control and the new venv as the test |
-| `"${LOOM_SKILL_DIR}/scripts/rewrite_v010_v020.py" [--check] [--json OUT] [--py] PATH...` | the v0.1.0 to v0.2.0 source migration on a file, package or tree: `vector.constant` to `splati`/`splatf` by element type, `command.program.*` to `command.*`, the `publish_epoch` control-state argument, `pool_capacity` out of cards; idempotent; reports what needs a hand edit |
+| `"${LOOM_SKILL_DIR}/scripts/rewrite_v010_v020.py" [--check] [--json OUT] [--py] PATH...` | the v0.1.0 to v0.2.0 source migration on a file, package or tree: `vector.constant` to `splati`/`splatf` by element type, `command.program.*` to `command.*`, the `publish_epoch` control-state argument, the weights-policy import key range, `pool_capacity` out of cards; idempotent; reports what needs a hand edit |
 
 A new pair gets its own `rewrite_<from>_<to>.py` beside these and a row here; keep scripts standard-library only.
 

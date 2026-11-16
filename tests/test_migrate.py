@@ -46,7 +46,7 @@ command.program.decl @x()
 class Rewrite(unittest.TestCase):
     def test_text(self):
         new, c, man = rw.rewrite_text(OLD)
-        self.assertEqual(c, {"splati": 2, "splatf": 2, "command": 3, "publish_epoch": 4})
+        self.assertEqual(c, {"splati": 2, "splatf": 2, "command": 3, "publish_epoch": 4, "weights_key_range": 0})
         self.assertIn("%zero = vector.splatf 0.0 : vector<8xf32>", new)
         self.assertIn("%h = vector.splatf 1.0 : vector<2xbf16>", new)
         self.assertIn("%mask = vector.splati 252645135 : vector<4xi32>", new)
@@ -59,6 +59,23 @@ class Rewrite(unittest.TestCase):
         self.assertIn("@text_publish_epoch_v1(%control_state: buffer, %plan", new)
         self.assertIn("func.call @publish_epoch(%control_state, %plan, %count) : (buffer, buffer, i32) -> ()", new)
         self.assertEqual(man, [])
+
+    def test_weights_key_range(self):
+        old = ('func.decl import("weights") @parameter(%source: i32, %key: buffer) -> (buffer, i64)\n'
+               'func.decl import("weights") @input(%source: i32, %key: buffer, %offset: i64, %length: i64, %alignment: i64) -> (i64)\n'
+               "func.def public @w(%key: buffer) -> (i64) {\n"
+               "    %md, %size = func.call @parameter(%source, %key) : (i32, buffer) -> (buffer, i64)\n"
+               "    %first = func.call @input(%source, %key, %zero, %length, %align) : (i32, buffer, i64, i64, i64) -> (i64)\n}\n")
+        new, c, _ = rw.rewrite_text(old)
+        self.assertEqual(c["weights_key_range"], 4)
+        self.assertIn("@parameter(%source: i32, %key: buffer, %key_offset: i64, %key_length: i64) -> (buffer, i64)", new)
+        self.assertIn("@input(%source: i32, %key: buffer, %key_offset: i64, %key_length: i64, %offset: i64, %length: i64, %alignment: i64)", new)
+        self.assertIn("    %wk1_len = index.cast %wk1_ext : offset to i64\n    %first = func.call @input(%source, %key, %wk1_off, %wk1_len, %zero, %length, %align) : (i32, buffer, i64, i64, i64, i64, i64) -> (i64)", new)
+        self.assertIn("func.call @parameter(%source, %key, %wk2_off, %wk2_len) : (i32, buffer, i64, i64) -> (buffer, i64)", new)
+        self.assertEqual(rw.rewrite_text(new)[0], new)
+        self.assertNotIn("%wk", rw.rewrite_text(old, calls=False)[0])      # generator text: declarations only
+        prep = 'func.call @parameter(%stage, %c0_i32, %c0_source, %checkpoint, %policy) : (i32, i32, i32, i32, buffer)\n'   # the prepare import, not the weights one
+        self.assertEqual(rw.rewrite_text(prep)[0], prep)
 
     def test_idempotent(self):
         once, _, _ = rw.rewrite_text(OLD)

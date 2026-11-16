@@ -69,9 +69,9 @@ def program_files(model):
     out = []
     for prog in model.get("programs", {}).values():
         for i in prog.get("inputs", []) + prog.get("libraries", []):
-            p = i["path"] if isinstance(i, dict) else i
-            if p.endswith(".loom") and p not in out:
-                out.append(p)
+            for p in ([i["path"], *i.get("data", [])] if isinstance(i, dict) else [i]):   # data inputs too: weight policies (head_weights.loom) sit at the package root
+                if p.endswith(".loom") and p not in out:
+                    out.append(p)
     return out
 
 

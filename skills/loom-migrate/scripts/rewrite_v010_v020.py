@@ -8,6 +8,8 @@ PATH is a .loom file, a package (a directory with model.json) or any tree. Rewri
   command.program.{def,decl,launch} -> command.{def,decl,launch}
   publish_epoch (def, decl and call sites of @publish_epoch, @*_publish_epoch, @*_publish_epoch_v1): prepends the retained
       `%control_state: buffer` argument (v0.2 ABI); skipped by --no-publish-epoch
+  weights policy imports (hrx-system 04aafdbe): `weights.parameter` / `weights.input` gain `key_offset, key_length` after the key; their decls and
+      call sites (key = the whole buffer: offset 0, length buffer.length) are rewritten in .loom/.patch files (decls only in .py/.md)
   model.json: removes presets.*.execution.pool_capacity (v0.2 rejects it); skipped by --no-card
 Files: *.loom, *.loom-test, *.patch; with --py also *.py and *.md (generator sources and docs: renames only where the element type is
 literal). `vector.constanti` (the dense-list op) is unchanged in v0.2 and is never touched.
@@ -31,13 +33,17 @@ PE_NAME = r"@(?:\w+_)?publish_epoch(?:_v1)?"
 PE_SIG = re.compile(r"^(func\.(?:def|decl)(?: \w+)* " + PE_NAME + r"\()(?=%plan\s*:)", re.M)
 PE_CALL = re.compile(r"(func\.call " + PE_NAME + r"\()(?=%plan\b)([^\n]*?\)\s*:\s*\()")
 OLD_PREPARE_BATCH = re.compile(r"@text_image_prepare_batch_v1\(%state: buffer, %tags: buffer, %ranges")
+WI_DECL = re.compile(r'(func\.decl import\("weights"\) @input\(%source: i32, %key: buffer, )(%offset: i64, %length: i64, %alignment: i64\))')
+WP_DECL = re.compile(r'(func\.decl import\("weights"\) @parameter\(%source: i32, %key: buffer)(\) -> \(buffer, i64\))')
+WI_CALL = re.compile(r"^([ \t]*)((?:%\w+ = )?)func\.call @input\((%[\w.]+), (%[\w.]+), (%[\w.]+), (%[\w.]+), (%[\w.]+)\) : \(i32, buffer, i64, i64, i64\) -> \(i64\)", re.M)
+WP_CALL = re.compile(r"^([ \t]*)((?:%[\w.]+, %[\w.]+|%[\w.]+) = )func\.call @parameter\((%[\w.]+), (%[\w.]+)\) : \(i32, buffer\) -> \(buffer, i64\)", re.M)
 FLOAT = re.compile(r"^(?:f\d+\w*|bf16)$")
 INT = re.compile(r"^(?:i\d+|index|offset)$")
 
 
-def rewrite_text(text, publish_epoch=True):
+def rewrite_text(text, publish_epoch=True, calls=True):
     """Returns (new_text, counts, manual) for one source text."""
-    counts = {"splati": 0, "splatf": 0, "command": 0, "publish_epoch": 0}
+    counts = {"splati": 0, "splatf": 0, "command": 0, "publish_epoch": 0, "weights_key_range": 0}
     manual = []
 
     def vc(m):
@@ -61,6 +67,31 @@ def rewrite_text(text, publish_epoch=True):
         new, n1 = PE_SIG.subn(r"\1%control_state: buffer, ", new)
         new, n2 = PE_CALL.subn(lambda m: m.group(1) + "%control_state, " + m.group(2) + "buffer, ", new)
         counts["publish_epoch"] = n1 + n2
+    new, n1 = WI_DECL.subn(r"\1%key_offset: i64, %key_length: i64, \2", new)
+    new, n2 = WP_DECL.subn(r"\1, %key_offset: i64, %key_length: i64\2", new)
+    counts["weights_key_range"] = n1 + n2
+    if calls:
+        serial = [0]
+
+        def key_range(m):
+            serial[0] += 1
+            ind, key, k = m.group(1), m.group(4), serial[0]
+            pre = (f"{ind}%wk{k}_off = scalar.constant 0 : i64\n{ind}%wk{k}_ext = buffer.length {key}\n"
+                   f"{ind}%wk{k}_len = index.cast %wk{k}_ext : offset to i64\n")
+            return pre, f"{key}, %wk{k}_off, %wk{k}_len"
+
+        def wi(m):
+            pre, kr = key_range(m)
+            counts["weights_key_range"] += 1
+            return f"{pre}{m.group(1)}{m.group(2)}func.call @input({m.group(3)}, {kr}, {m.group(5)}, {m.group(6)}, {m.group(7)}) : (i32, buffer, i64, i64, i64, i64, i64) -> (i64)"
+
+        def wp(m):
+            pre, kr = key_range(m)
+            counts["weights_key_range"] += 1
+            return f"{pre}{m.group(1)}{m.group(2)}func.call @parameter({m.group(3)}, {kr}) : (i32, buffer, i64, i64) -> (buffer, i64)"
+
+        new = WI_CALL.sub(wi, new)
+        new = WP_CALL.sub(wp, new)
     if OLD_PREPARE_BATCH.search(new):
         manual.append("vision component finite ABI: prepare_batch/run/collect_batch (hand edit)")
     return new, counts, manual
@@ -101,7 +132,7 @@ def main(argv=None):
     ap.add_argument("--py", action="store_true", help="also rewrite .py/.md generator sources and docs")
     a = ap.parse_args(argv)
     exts = LOOM_EXT + (PY_EXT if a.py else ())
-    changed, manual, totals = {}, {}, {"splati": 0, "splatf": 0, "command": 0, "publish_epoch": 0, "pool_capacity": 0}
+    changed, manual, totals = {}, {}, {"splati": 0, "splatf": 0, "command": 0, "publish_epoch": 0, "weights_key_range": 0, "pool_capacity": 0}
     for f in files_under(a.paths, exts):
         with open(f, encoding="utf-8", newline="") as fh:
             text = fh.read()
@@ -112,7 +143,7 @@ def main(argv=None):
             counts = {"pool_capacity": n}
             man = []
         else:
-            new, counts, man = rewrite_text(text, not a.no_publish_epoch)
+            new, counts, man = rewrite_text(text, not a.no_publish_epoch, calls=not f.endswith(PY_EXT))
         for k, v in counts.items():
             totals[k] += v
         if man:
