@@ -85,7 +85,9 @@ GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf
        "lvs2": {"lv": True, "lvs": 2, "sw": {"rf": 4}}, "lvs2pf1": {"lv": True, "lvs": 2, "lvpf": 1, "sw": {"rf": 4}},
        # ogemm round 6: 16-wave workgroups (8 accumulators per wave, ~150 VGPR: 2 workgroups = 32 waves per WGP instead of 24)
        "w16a": {"rf": 2, "cf": 4, "lv": True, "lvs": 1, "sw": {"rf": 2, "cf": 2}}, "w16b": {"rf": 4, "cf": 2, "lv": True, "lvs": 1, "sw": {"rf": 4, "cf": 1}},
-       "w16v": {"rf": 2, "cf": 4, "sw": {"rf": 2, "cf": 2}}}   # variants that are generator parameters (the levers), not text ablations
+       "w16v": {"rf": 2, "cf": 4, "sw": {"rf": 2, "cf": 2}},
+       # ogemm round 7: wider tiles with lvs (A shared by 4 waves): store 128 x 256, SwiGLU 128 x 128 per weight
+       "t2lvs": {"bm": 128, "tn": 256, "lv": True, "lvs": 1, "sw": {"bm": 128, "tn": 128, "rf": 4}}, "swlvs4": {"lv": True, "lvs": 1, "sw": {"rf": 4}}}   # variants that are generator parameters (the levers), not text ablations
 
 
 # the variants whose results are checked against float64 (the others are timing-only levers that lost or tied; hrx-loom 0.1.0 fails to verify a module of ~65k lines
