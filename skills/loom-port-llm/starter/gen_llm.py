@@ -5330,17 +5330,21 @@ def hf_rename(text):
     if not names:
         return text
     # the scale plane of a split-plane weight: a second parameter beside it, <var>_sc, under the internal name "<name>#scale"
+    DRAFTER_ROOTS = ("%w_enc", "%w_ctx", "%w_draft")   # a DFlash drafter's own checkpoint (GGUF names that may equal the target's internal names)
+
     def scale_line(m):
         t = TENS.get(m.group(4))
-        if not (t and t["type"] in SPLIT):
+        if m.group(3) in DRAFTER_ROOTS or not (t and t["type"] in SPLIT):
             return m.group(0)
         return m.group(0) + f'\n{m.group(1)}{m.group(2)}_sc = command.parameter {m.group(3)}, "{m.group(4)}#scale" : view<{int(m.group(5)) // SCALE_DIV[t["type"]]}xi8>'
     text = _re.sub(r'^([ \t]*)(%\w+) = command\.parameter (%\w+), "([^"]+)" : view<(\d+)xi8>$', scale_line, text, flags=_re.M)
     unmapped = set()
-    assert not (gen_draft.enabled() and gen_draft.DRAFT["kind"] in ("dflash", "assist")), \
-        "a safetensors target with a separate drafter checkpoint: the drafter's parameter names would collide with the map"
+    assert not (gen_draft.enabled() and gen_draft.DRAFT["kind"] == "assist"), \
+        "a safetensors target with a separate assistant checkpoint: the assistant's parameter names would collide with the map"
 
     def sub(m):
+        if m.group(2) in DRAFTER_ROOTS:
+            return m.group(0)
         if m.group(3) in names:
             return m.group(1) + names[m.group(3)] + m.group(4)
         if m.group(2) == "%weights":

@@ -67,6 +67,8 @@ loom_up() {
         pid=$(ss -ltnpH "sport = :$loom_port" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
         echo "$pid" > "$state/$name.pid"
       fi
+      # ready = registration; the weights load on the first request and every request is refused until then: wait for the first answer
+      "$T" "$(dirname "${BASH_SOURCE[0]}")/wait_model.py" "$url" --wait 300 || { echo "loom-serve restarted but the model did not load"; return 1; }
       echo "[one model at a time] loom-serve back on :$loom_port (pid $pid)"; loom_argv=(); return 0
     fi
     sleep 1
