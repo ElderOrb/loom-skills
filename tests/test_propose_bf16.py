@@ -71,11 +71,11 @@ class Programs(unittest.TestCase):
         cls.dirs = {}
         # off / q8 / q4: the card's own trunk (int8-activation MXFP4 matvecs); t_off / t_q8: a trunk without them (MXFP4S_Q8=0), where the
         # int8 matvecs exist in the MTP programs alone
-        for tag, env in (("off", {"MTP_BLOCK_PREP": "", "PROPOSE_HEAD_ROWS": "0"}),
-                         ("q8", {"MTP_BLOCK_PREP": "q8_0", "PROPOSE_HEAD_ROWS": "81920"}),
-                         ("q4", {"MTP_BLOCK_PREP": "q4_0", "PROPOSE_HEAD_ROWS": "49152"}),
-                         ("t_off", {"MTP_BLOCK_PREP": "", "PROPOSE_HEAD_ROWS": "0", "MXFP4S_Q8": "0"}),
-                         ("t_q8", {"MTP_BLOCK_PREP": "q8_0", "PROPOSE_HEAD_ROWS": "81920", "MXFP4S_Q8": "0"})):
+        for tag, env in (("off", {"PROPOSE_HEAD_PIECES": "0", "MTP_BLOCK_PREP": "", "PROPOSE_HEAD_ROWS": "0"}),
+                         ("q8", {"PROPOSE_HEAD_PIECES": "0", "MTP_BLOCK_PREP": "q8_0", "PROPOSE_HEAD_ROWS": "81920"}),
+                         ("q4", {"PROPOSE_HEAD_PIECES": "0", "MTP_BLOCK_PREP": "q4_0", "PROPOSE_HEAD_ROWS": "49152"}),
+                         ("t_off", {"PROPOSE_HEAD_PIECES": "0", "MTP_BLOCK_PREP": "", "PROPOSE_HEAD_ROWS": "0", "MXFP4S_Q8": "0"}),
+                         ("t_q8", {"PROPOSE_HEAD_PIECES": "0", "MTP_BLOCK_PREP": "q8_0", "PROPOSE_HEAD_ROWS": "81920", "MXFP4S_Q8": "0"})):
             out = os.path.join(cls.tmp.name, tag)
             p = subprocess.run([sys.executable, os.path.join(ROOT, "fleet", "build_fleet.py"), "--tree", ROOT, "--out", out, "--slugs", SLUG],
                                capture_output=True, text=True, env=dict(os.environ, **env))

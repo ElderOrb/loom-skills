@@ -554,9 +554,51 @@ if cfg.get("sliding_layers") and (cfg.get("head_dim_swa") or D) == D and ((RD_SW
 t = 3
 head_name = "output.weight" if "output.weight" in T else "token_embd.weight"
 Wh = deq(head_name).astype(np.float64)
+def _pkg_llm_text():
+    """The generated llm.loom of the package under test (next to the config, or in a build dir beside it), or None."""
+    import glob
+    d = os.path.dirname(os.path.abspath(sys.argv[1]))
+    cands = [os.path.join(d, g) for g in ("pkg/program/llm.loom", "*/pkg/program/llm.loom")] \
+        + [os.path.join(os.path.dirname(d), g) for g in ("pkg/program/llm.loom", "*/pkg/program/llm.loom")]
+    for c in cands:
+        for f in glob.glob(c) if c else []:
+            return open(f, errors="replace").read()
+    return None
+
+
+import re as _re_hp  # noqa: E402
+# Heads read as several load-time prepared tensors (gen_llm.HEAD_PIECES: decode.head.verify, draft.propose.head_pieces), from the package's
+# llm.loom: (prefix, rows, piece rows, pieces, format, kernel suffix, root)
+HEAD_PIECE_SETS = [(m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)), m.group(5), m.group(6), m.group(7))
+                   for m in _re_hp.finditer(r"// head pieces: (\S+) rows=(\d+) piece=(\d+) n=(\d+) fmt=(\w+) suffix=(\S*) on (%\w+)", _pkg_llm_text() or "")]
+VHEAD = next((p for p in HEAD_PIECE_SETS if p[6] == "%weights"), None)   # the verified head is a load-time Q8_0 copy of a BF16 head
+
+
+def q8_rows_dot(W, xs, rows=8192):
+    """Logits of the load-time Q8_0 copy of BF16 rows W (llama.cpp quantize_row_q8_0: d = amax/127 as F16, q = round(x/d))
+    with activations xs (S x H), float64, in row blocks (a whole 248320-row head at once would need tens of GB)."""
+    out = np.zeros((xs.shape[0], W.shape[0]))
+    for a in range(0, W.shape[0], rows):
+        g = W[a:a + rows].astype(np.float32).reshape(-1, 32)
+        d = np.abs(g).max(-1, keepdims=True) / np.float32(127)
+        v = np.divide(g, d, out=np.zeros_like(g), where=d > 0)
+        q = np.sign(v) * np.floor(np.abs(v) + 0.5)
+        wq = (q * d.astype(np.float16).astype(np.float32)).reshape(-1, W.shape[1]).astype(np.float64)
+        out[:, a:a + rows] = xs.astype(np.float64) @ wq.T
+    return out
+
+
 hs = rng.standard_normal((t, H)).astype(np.float32)
 HEAD_Q8 = ACT_Q8 and T[head_name].tensor_type.name.lower() in IQ_FMTS
 logits = Wh @ (q8_ref(hs[-1:])[0] if HEAD_Q8 else hs[-1]).astype(np.float64)
+if VHEAD:   # decode.head.verify: the kernels read g_prep_bf16r_q8_0's copy of the BF16 head with int8 activations
+    logits = q8_rows_dot(Wh, q8_ref(hs[-1:]))[0]
+VQB = cfg["vocab"] * H // 32 * 34   # bytes of that copy
+VQ_PREP = (f"""  %vb = check.literal value({cfg["vocab"] * H // 32}) : index
+  %vo = check.literal value(0) : i64
+  %wq = check.generate.fill value(0) : tensor<{VQB}xi8>
+  kernel.launch @g_prep_bf16r_q8_0[%vb](%vb, %vo, %vo, %vo, %wq, %w) : [index](index, i64, i64, i64, tensor<{VQB}xi8>, {{hwt}})
+""")
 meta = np.zeros(4 + 9, np.int32); meta[0] = 1; meta[4 + 0] = t; meta[4 + 6] = 1
 order = np.argsort(-logits)
 for n, a in [("hd_meta", meta), ("hd_h", hs), ("hd_w", raw(head_name)), ("hd_out", np.array([order[0]], np.int32))]:
@@ -578,7 +620,8 @@ cases.append(f"""check.case public @head_argmax {{
 """ + (f"""  %hk = check.literal value({H}) : index
   %hq = check.generate.fill value(0) : tensor<{t}x{2 * H}xi8>
   kernel.launch @g_quant_q8[%t, %hk](%t, %hk, %h, %hq) : [index, index](index, index, tensor<{t}x{H}xf32>, tensor<{t}x{2 * H}xi8>)
-  kernel.launch @g_head_mv_q8[%spans](%spans, %t, %meta, %hq, %w, %partials, %logits) : [index](index, index, tensor<13xi32>, tensor<{t}x{2 * H}xi8>, {hwt}, tensor<{CH * 2}xi32>, tensor<{CH * 128}xf32>)""" if HEAD_Q8 else
+""" + (VQ_PREP.replace("{hwt}", hwt) + f"""  kernel.launch @g_head_mv_q8[%spans](%spans, %t, %meta, %hq, %wq, %partials, %logits) : [index](index, index, tensor<13xi32>, tensor<{t}x{2 * H}xi8>, tensor<{VQB}xi8>, tensor<{CH * 2}xi32>, tensor<{CH * 128}xf32>)""" if VHEAD else
+      f"""  kernel.launch @g_head_mv_q8[%spans](%spans, %t, %meta, %hq, %w, %partials, %logits) : [index](index, index, tensor<13xi32>, tensor<{t}x{2 * H}xi8>, {hwt}, tensor<{CH * 2}xi32>, tensor<{CH * 128}xf32>)""") if HEAD_Q8 or VHEAD else
       f"""  kernel.launch @g_head_mv[%spans](%spans, %t, %meta, %h, %w, %partials, %logits) : [index](index, index, tensor<13xi32>, tensor<{t}x{H}xf32>, {hwt}, tensor<{CH * 2}xi32>, tensor<{CH * 128}xf32>)""") + f"""
   kernel.launch @g_head_select[%spans](%spans, %meta, %partials, %logits, %out) : [index](index, tensor<13xi32>, tensor<{CH * 2}xi32>, tensor<{CH * 128}xf32>, tensor<1xi32>)
   check.expect.equal actual(%out) expected(%expect) : tensor<1xi32>
@@ -619,7 +662,8 @@ cases.append(f"""check.case public @logits_export {{
 """)
 # 3a'. multi-span int8 head: the 4/8/16-span kernels must give every span's logits and argmax partials bit-identical to
 # the 1-span kernel (verification rounds like decode); 16 and 12 live spans (a partial span group)
-if HEAD_Q8:
+if HEAD_Q8 or VHEAD:   # VHEAD: over the load-time Q8_0 copy (g_prep_bf16r_q8_0) of the BF16 head
+    hwq = f"tensor<{VQB}xi8>" if VHEAD else hwt
     for S in (16, 12):
         hm = np.zeros(4 + 9 * S, np.int32); hm[0] = S
         for j in range(S):
@@ -628,7 +672,7 @@ if HEAD_Q8:
         mt, ht = f"tensor<{hm.size}xi32>", f"tensor<{S}x{H}xf32>"
         def hl(k, tag):
             return (f"  %p{tag} = check.generate.fill value(0) : tensor<{S * CH * 2}xi32>\n  %l{tag} = check.generate.fill value(0.0) : tensor<{S * CH * 128}xf32>\n"
-                    f"  kernel.launch @{k}[%spans](%spans, %t, %meta, %hq, %w, %p{tag}, %l{tag}) : [index](index, index, {mt}, tensor<{S}x{2 * H}xi8>, {hwt}, tensor<{S * CH * 2}xi32>, tensor<{S * CH * 128}xf32>)\n")
+                    f"  kernel.launch @{k}[%spans](%spans, %t, %meta, %hq, {'%wq' if VHEAD else '%w'}, %p{tag}, %l{tag}) : [index](index, index, {mt}, tensor<{S}x{2 * H}xi8>, {hwq}, tensor<{S * CH * 2}xi32>, tensor<{S * CH * 128}xf32>)\n")
         variants = [("g_head_mv_t4_q8", "4"), ("g_head_mv_t8_q8", "8"), ("g_head_mv_t16_q8", "16")]
         cases.append(f"""check.case public @head_spans{S} {{
   %spans = check.literal value({S}) : index
@@ -639,7 +683,7 @@ if HEAD_Q8:
   %hk = check.literal value({H}) : index
   %hq = check.generate.fill value(0) : tensor<{S}x{2 * H}xi8>
   kernel.launch @g_quant_q8[%t, %hk](%t, %hk, %h, %hq) : [index, index](index, index, {ht}, tensor<{S}x{2 * H}xi8>)
-""" + hl("g_head_mv_q8", "1") + "".join(hl(k, tag) for k, tag in variants) + "".join(
+""" + (VQ_PREP.replace("{hwt}", hwt) if VHEAD else "") + hl("g_head_mv_q8", "1") + "".join(hl(k, tag) for k, tag in variants) + "".join(
             f"  check.expect.close actual(%l{tag}) expected(%l1) atol(0.0) rtol(0.0) nan(different) : tensor<{S * CH * 128}xf32>\n"
             f"  check.expect.equal actual(%p{tag}) expected(%p1) : tensor<{S * CH * 2}xi32>\n" for _, tag in variants) + "  check.return\n}\n")
 # 3b. attention chain: [q/gate split] -> qk norm + rope + paged KV store -> split-K attention -> combine (gate)
@@ -2033,18 +2077,6 @@ if (HEAD_Q8 and HEAD_FMT in ("q8_0", "bf16", "f16") and H % 32 == 0 and (cfg.get
 # [0, N) + the added-token rows of the Q6_K head to Q4_0 (llama.cpp dequantize_row_q6_K numerics, then quantize_row_q4_0), the int8
 # head runs over the copy (logits vs numpy), and g_head_select_p maps a winning row back to its token id (synthetic partials: a head
 # row, a tail row, an end-of-turn token). The split / shift the generator baked into g_head_select_p are read from the package's llm.loom.
-def _pkg_llm_text():
-    """The generated llm.loom of the package under test (next to the config, or in a build dir beside it), or None."""
-    import glob
-    d = os.path.dirname(os.path.abspath(sys.argv[1]))
-    cands = [os.path.join(d, g) for g in ("pkg/program/llm.loom", "*/pkg/program/llm.loom")] \
-        + [os.path.join(os.path.dirname(d), g) for g in ("pkg/program/llm.loom", "*/pkg/program/llm.loom")]
-    for c in cands:
-        for f in glob.glob(c) if c else []:
-            return open(f, errors="replace").read()
-    return None
-
-
 def _phead_params():
     import re
     t = _pkg_llm_text()
@@ -2140,6 +2172,60 @@ if _PH:
   check.return
 }}
 """)
+# 3a-p. Heads read as several load-time prepared tensors (gen_llm HEAD_PIECES: decode.head.verify, draft.propose.head_pieces): each piece
+# is prepared from its own source rows of the BF16 head (g_prep_bf16r_<fmt> at the piece's offsets, the ranges its policy entry stages) and
+# its _pc<LC> kernels write the whole head's chunks: logits and partials bit-identical to the whole copy's kernel (1 and 4 spans).
+for _pfx, _rows, _P, _n, _fmt, _suf, _root in HEAD_PIECE_SETS:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "draft"))
+    import prep_weights as _pw
+    V_ = cfg["vocab"]
+    _N, _base = (_PH[0], _PH[0] + _PH[1]) if (_root == "%w_phead" and _PH) else (V_, V_)
+    _ents, _sizes = _pw.piece_entries(_fmt, "k", _N, _base, V_, H, _P, "p")
+    assert len(_sizes) == _n and sum(_sizes) == _rows, (_sizes, _rows)
+    _, _, _bw, (_l1, _spw, _, _o2w, _l2w) = _pw.subset_entry("bf16r", _fmt, _N, _base, V_, H)
+    _bpb = _pw.DST[_fmt]
+    CHq = (_rows + 127) // 128
+    S = 8
+    hm = np.zeros(4 + 9 * S, np.int32); hm[0] = S
+    for j in range(S):
+        hm[4 + 9 * j + 0] = 1; hm[4 + 9 * j + 4] = j; hm[4 + 9 * j + 6] = 1
+    _tag = "v" if _root == "%weights" else "p"
+    save(f"hp{_tag}_meta", hm); save(f"hp{_tag}_h", rng.standard_normal((S, H)).astype(np.float32))
+    mt, ht = f"tensor<{hm.size}xi32>", f"tensor<{S}x{H}xf32>"
+    wt = lambda b: f"tensor<{b * _bpb}xi8>"
+    pt, lt = f"tensor<{S * CHq * 2}xi32>", f"tensor<{S * CHq * 128}xf32>"
+    body = (f"""  %spans = check.literal value({S}) : index
+  %t = check.literal value({S}) : index
+  %meta = check.file.read.npy path("hp{_tag}_meta.npy") : {mt}
+  %h = check.file.read.npy path("hp{_tag}_h.npy") : {ht}
+  %w = check.file.read.npy path("hd_w.npy") : {hwt}
+  %hk = check.literal value({H}) : index
+  %hq = check.generate.fill value(0) : tensor<{S}x{2 * H}xi8>
+  kernel.launch @g_quant_q8[%t, %hk](%t, %hk, %h, %hq) : [index, index](index, index, {ht}, tensor<{S}x{2 * H}xi8>)
+  %bw = check.literal value({_bw}) : index
+  %ow = check.literal value(0) : i64
+  %sw = check.literal value({_spw}) : i64
+  %tw = check.literal value({_o2w}) : i64
+  %ww = check.generate.fill value(0) : {wt(_bw)}
+  kernel.launch @g_prep_bf16r_{_fmt}[%bw](%bw, %ow, %sw, %tw, %ww, %w) : [index](index, i64, i64, i64, {wt(_bw)}, {hwt})
+""")
+    c0 = 0
+    for k in range(len(_sizes)):
+        _s, _d, _b, (_ln1, _sp, _z, _o2, _ln2, _o1, _) = _ents[f"p{k}"]
+        body += (f"  %b{k} = check.literal value({_b}) : index\n  %o{k} = check.literal value({_o1}) : i64\n  %s{k} = check.literal value({_sp}) : i64\n"
+                 f"  %t{k} = check.literal value({_o2}) : i64\n  %c{k} = check.literal value({c0}) : index\n  %w{k} = check.generate.fill value(0) : {wt(_b)}\n"
+                 f"  kernel.launch @g_prep_bf16r_{_fmt}[%b{k}](%b{k}, %o{k}, %s{k}, %t{k}, %w{k}, %w) : [index](index, i64, i64, i64, {wt(_b)}, {hwt})\n")
+        c0 += _sizes[k] // 128
+    for tg, nm in (("1", f"g_head_mv_q8{_suf}"), ("4", f"g_head_mv_t4_q8{_suf}")):
+        body += (f"  %pw{tg} = check.generate.fill value(0) : {pt}\n  %lw{tg} = check.generate.fill value(0.0) : {lt}\n"
+                 f"  kernel.launch @{nm}[%spans](%spans, %t, %meta, %hq, %ww, %pw{tg}, %lw{tg}) : [index](index, index, {mt}, tensor<{S}x{2 * H}xi8>, {wt(_bw)}, {pt}, {lt})\n"
+                 f"  %pp{tg} = check.generate.fill value(0) : {pt}\n  %lp{tg} = check.generate.fill value(0.0) : {lt}\n")
+        for k, n in enumerate(_sizes):
+            body += (f"  kernel.launch @{nm}_pc{(n + 127) // 128}[%spans](%spans, %t, %meta, %hq, %w{k}, %pp{tg}, %lp{tg}, %c{k}) : "
+                     f"[index](index, index, {mt}, tensor<{S}x{2 * H}xi8>, {wt(n * H // 32)}, {pt}, {lt}, index)\n")
+        body += (f"  check.expect.close actual(%lp{tg}) expected(%lw{tg}) atol(0.0) rtol(0.0) nan(different) : {lt}\n"
+                 f"  check.expect.equal actual(%pp{tg}) expected(%pw{tg}) : {pt}\n")
+    cases.append(f"check.case public @head_pieces_{_tag} {{\n" + body + "  check.return\n}\n")
 # Drafter matrices without an int8 path (a vendor BF16/F16 DFlash drafter used as-is, cfg["drafter"]["gguf"]):
 # the f32-activation matvecs (1 and 4 tokens; gate/up pair) and the GEMMs (64-, 128- and 256-row tiles) the drafter's
 # propose / warm programs launch, one tensor per (format, K), vs float64 numpy on the dequantized weights. Rows per
