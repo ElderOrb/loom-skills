@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st olayer exp2: fused two-launch GDN prefill (GDN_FUSED2) vs base: ktest, func, ABBA prefill, per-kernel profile. Evidence branch: not for merge.",
+ "_comment": "mxfp4st olayer exp3: fused GDN prefill (gdnf) and + int8 alpha/beta (gdnfab) vs base: ktest, func, ABBA prefill, profile, dev gates vs vLLM. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -7,7 +7,7 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "amd-q38-olayer-e2",
+   "name": "amd-q38-olayer-e3",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
    "kit": null,
    "llamacpp": "b1375",
@@ -31,21 +31,39 @@
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
      "context": 65536
+    },
+    {
+     "name": "gdnfab",
+     "build": {
+      "GDN_FUSED2": "1",
+      "GDN_AB_Q8": "1"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 65536
     }
    ],
    "steps": [
-    "ktest:gdnf",
+    "ktest:gdnfab",
     "func:gdnf",
+    "func:gdnfab",
+    "func:base",
     "perf:base:1",
     "perf:base:1:long",
     "perf:gdnf:1",
     "perf:gdnf:1:long",
+    "perf:gdnfab:1",
+    "perf:gdnfab:1:long",
+    "perf:gdnfab:1",
+    "perf:gdnfab:1:long",
     "perf:gdnf:1",
     "perf:gdnf:1:long",
     "perf:base:1",
     "perf:base:1:long",
-    "profile:base:pf2k,pf8k",
-    "profile:gdnf:pf2k,pf8k"
+    "profile:gdnfab:pf2k,pf8k",
+    "gates:gdnfab:dev"
    ]
   }
  ]
