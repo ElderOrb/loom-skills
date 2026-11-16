@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st integ exp2: the AMD node with decode.spec.gdn_fold + prefill.gdn.fused2/ab_q8/ab_f8 (node, PR #942 head) vs origin/mxfp4st (base: fold on, fused off): warm-up func, func node, ABBA prefill 1k-32k + decode (+ long), dev gates vs vLLM on node (vLLM references cached so Loom is never restarted after a vLLM load). Evidence branch: not for merge. Served context 110592 (the card).",
+ "_comment": "mxfp4st integ exp3: dev gates vs vLLM on the node build (PR #942 head: gdn_fold + fused2/ab_q8/ab_f8), every vLLM reference cached (exp2b run 43861747456 filled the agent references) so Loom is never restarted after a vLLM load; func twice first (cold first load). Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@1f240a79acb54d773194382c4eac47b63ecd9f2d",
@@ -14,16 +14,6 @@
    "repeat_rows": 3,
    "variants": [
     {
-     "name": "base",
-     "ref": "origin/mxfp4st",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592
-    },
-    {
      "name": "node",
      "build": {},
      "build_args": [
@@ -34,16 +24,8 @@
     }
    ],
    "steps": [
-    "func:base",
     "func:node",
-    "perf:base:1",
-    "perf:base:1:long",
-    "perf:node:1",
-    "perf:node:1:long",
-    "perf:node:1",
-    "perf:node:1:long",
-    "perf:base:1",
-    "perf:base:1:long",
+    "func:node",
     "gates:node:dev"
    ],
    "reference_cache": ".github/devlab/integ_vllm_refs.tgz"
