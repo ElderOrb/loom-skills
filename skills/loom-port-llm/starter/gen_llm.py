@@ -942,10 +942,11 @@ func.def inline @g_q5_0_values(%w: buffer, %origin: offset, %group: index) -> (v
 def iq_decode(fmt, wi, w, ok, o, within):
     """ACT_Q8 weight side: integer codes %wq{wi} (+ scale %sc{wi}, and %mn{wi}: Q4_K/Q5_K minimum, Q6_K second
     half scale) of the lane's 32-value group, once per row."""
-    two = fmt != "q8_0"
+    two = fmt not in ("q8_0", "mxfp4s")
     rt = "vector<32xi8>, f32, f32" if two else "vector<32xi8>, f32"
+    split = fmt in SPLIT   # split planes: the scale plane's view and the block's scale offset %so (_mv)
     return (f"""    %wq{wi}, %sc{wi}""" + (f", %mn{wi}" if two else "") + f""" = scf.if {ok} -> ({rt}) {{
-      %v, %a""" + (", %b" if two else "") + f""" = func.call @g_{fmt}_icodes(%{w}, {o}, {within}) : (buffer, offset, index) -> ({rt})
+      %v, %a""" + (", %b" if two else "") + f""" = func.call @g_{fmt}_icodes(%{w}, {"%ws, " if split else ""}{o}, {"%so, " if split else ""}{within}) : (buffer, {"buffer, " if split else ""}offset, {"offset, " if split else ""}index) -> ({rt})
       scf.yield %v, %a""" + (", %b" if two else "") + f""" : {rt}
     }} else {{
       scf.yield %zero32i8, %zero_f""" + (", %zero_f" if two else "") + f""" : {rt}
@@ -975,7 +976,7 @@ def iq_dot(fmt, wi, j, out):
         return "\n".join(t)
     t, di = chain(0, 8, "")
     t.append(f"    %df{wi}_{j} = scalar.sitofp {di} : i32 to f32")
-    if fmt == "q8_0":
+    if fmt in ("q8_0", "mxfp4s"):
         t.append(f"""    %wd{wi}_{j} = scalar.mulf %sc{wi}, %da{j} : f32
     {out} = scalar.mulf %wd{wi}_{j}, %df{wi}_{j} : f32""")
     else:
@@ -1112,7 +1113,7 @@ def _mv(fmt, K, R=16, TG=1, swiglu=False, suffix="", iq=False, pair=False, chunk
     assert NCH * CHK == TG
     PERM = iq and nw == 2 and BFLY_PERM and CHK >= 8
     wargs = "%w: buffer, %w2: buffer" if nw == 2 else "%w: buffer" + (", %ws: buffer" if fmt in SPLIT else "")
-    assert not (fmt in SPLIT and (nw == 2 or iq)), f"{fmt}: split-plane weights have no swiglu / int8-activation matvec yet"
+    assert not (fmt in SPLIT and nw == 2), f"{fmt}: split-plane weights have no swiglu matvec"
     yargs = "%y: buffer, %y2: buffer" if pair else "%y: buffer"
     L = [f"""
 kernel.def export("{name}") @{name}(%n: index, %tokens: index) {{
@@ -1217,6 +1218,12 @@ kernel.def export("{name}") @{name}(%n: index, %tokens: index) {{
     %o = index.add %ro, %ba : offset""")
     for wi, w in enumerate(["w", "w2"] if nw == 2 else ["w"]):
         if iq:
+            if fmt in SPLIT:   # the scale plane: one byte per 32 values, K // 32 bytes per row
+                L.append(f"""    %srow_bytes = index.constant {groups} : offset
+    %sro = index.scale %row, %srow_bytes : index, offset -> offset
+    %one_byte = index.constant 1 : offset
+    %sga = index.scale %g, %one_byte : index, offset -> offset
+    %so = index.add %sro, %sga : offset""")
             # integer codes once per row; per token one dot4 contraction against the int8 activations
             L.append(iq_decode(fmt, wi, w, "%ok", "%o", "%within"))
             for j in range(CHK):
@@ -5704,6 +5711,9 @@ if __name__ == "__main__":
     # A BF16 (safetensors) head with a reduced-vocabulary proposal copy: only the proposals run the int8 head (over the Q4_0 copy);
     # the verified head keeps its f32-activation kernels.
     PH_ONLY = bool(spec_kernels and "phead" in gfacts and head_fmt not in IQ_FMTS and PHEAD_ROWS)
+    if "mxfp4s" in IQ_FMTS and any(t["type"] in SPLIT for t in TENS.values()):   # choice decode.mxfp4s.act_q8
+        from gen_mxfp4s import mxfp4s_icodes as _mx_icodes
+        COMMON += _mx_icodes()
     if USED_MVQ or USED_MOEQ or PH_ONLY:   # ACT_Q8: int8-activation matvecs, their weight-code helpers and g_quant_q8
         COMMON += ICODES + "".join(mv(fmt, K, R=R, TG=TG, swiglu=sw == 1, pair=sw == 2, suffix=f"_r{R}" if R != 16 else "", iq=True)
                                    for fmt, K, sw, R, TG in sorted(USED_MVQ))
@@ -5811,6 +5821,11 @@ if __name__ == "__main__":
         from f16o_fuse import fuse as _f16o_fuse
         text, _nf16o = _f16o_fuse(text)
         print("f16o groups:", _nf16o)
+    from gen_mxfp4s import f8_enabled as _f8s_on
+    if _f8s_on():   # gfx12: the split-plane MXFP4 prefill GEMMs on fp8 WMMA (choice prefill.gemm.mxfp4s_f8; gen_mxfp4s.fuse_mxfp4s_f8)
+        from gen_mxfp4s import fuse_mxfp4s_f8 as _f8s_fuse
+        text, _nf8s = _f8s_fuse(text)
+        print("mxfp4s fp8 groups:", _nf8s)
     if seg_tokens():
         text = seg_attention(text)
     SRC_PREP = {n: t for n, t in TENS.items() if t.get("prep") and f'"{n}"' in text}   # safetensors: the small tensors the programs read, converted at load (hf_names/*.json "prep")

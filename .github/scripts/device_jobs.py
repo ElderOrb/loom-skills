@@ -40,6 +40,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "skills", "loom-benchmark", "scripts", "card"))
 import card_lib  # noqa: E402
+import matched_spec  # noqa: E402
 
 registry = card_lib.registry
 
@@ -83,6 +84,28 @@ def device_fields(gpu, f, m, pool):
     return job, ex_ctx, old, ctx, preset
 
 
+def reference_only(slug):
+    """A safetensors package (fleet/<slug>/llm_config.json source.kind): llama.cpp cannot read the checkpoint, so its job has no llama.cpp
+    baseline steps (vLLM ROCm is its baseline engine: the vllm: steps once vLLM is the reference) and the gates step runs only where the vLLM
+    reference engine exists (vllm_shim.py). None when the slug is a GGUF card, else (has the vLLM reference)."""
+    try:
+        cfg = json.load(open(os.path.join(ROOT, "fleet", slug, "llm_config.json")))
+    except OSError:
+        return None
+    if (cfg.get("source") or {}).get("kind") != "safetensors":
+        return None
+    return os.path.exists(os.path.join(ROOT, "skills", "loom-benchmark", "scripts", "vllm_shim.py"))
+
+
+def not_a_target(slug, gpu):
+    """Why the package is not measured on GPU (a weight format without a fast path on its family: card_lib.non_targets), or None."""
+    try:
+        cfg = json.load(open(os.path.join(ROOT, "fleet", slug, "llm_config.json")))
+    except OSError:
+        return None
+    return card_lib.non_targets(cfg).get(gpu)
+
+
 def main(argv=None, device=None, tool="device_jobs.py"):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("slugs", nargs="*", help="card repo names (without the org), e.g. unsloth-Qwen3-0.6B-loom")
@@ -118,6 +141,11 @@ def main(argv=None, device=None, tool="device_jobs.py"):
     skipped = sorted(m for m in models if not fit.get(m, {}).get("verdict", "").startswith("fits")) if a.all else []
     for slug in slugs:
         m, f = models[slug], fit[slug]
+        why = not_a_target(slug, GPU)
+        if why:
+            skipped.append(slug)   # a format without a fast path on this device: the card says "not a target"
+            print(f"{slug}: not a target on {NAME}: {why}", file=sys.stderr)
+            continue
         got = device_fields(GPU, f, m, POOL)
         if not got:
             skipped.append(slug)   # the weights do not fit: no run (the card says "doesn't fit")
@@ -133,15 +161,21 @@ def main(argv=None, device=None, tool="device_jobs.py"):
             if preset:
                 sys.exit(f"{slug}: --build rebuilds from the default preset's settings, not the {NAME} preset's: publish the package and measure the card")
         nodraft = v("nodraft", {**ex_ctx, "draft_depth": 0})
+        st = reference_only(slug)   # None: a GGUF card (llama.cpp baselines); else a safetensors card: Loom rows only, gates where vLLM is the reference
+        base = {} if st is not None else {"llamacpp": BASE["rocm"]["build"], "llamacpp_vulkan": BASE["vulkan"]["build"]}
+        llama = [] if st is not None else [f"llama@rocm.np1:{n}", f"llama@rocm.np1:{n}:long", "llamac4@rocm.nodraft",
+                                           f"llama@vulkan.np1:{n}", f"llama@vulkan.np1:{n}:long", "llamac4@vulkan.perslot.nodraft"]
+        gates = [f"gates:card:{a.gates}"] if a.gates and (st is None or st) else []
+        if st:   # vLLM ROCm is the baseline engine of a safetensors card, where the reference engine's install helper exists: same runner, out of the box
+            llama = [f"vllm:{n}", f"vllm:{n}:long", f"vllmc4:{n}"]
         jobs.append({
-            **({"llama_kv_rocm": jf["llama_kv_rocm"]} if "llama_kv_rocm" in jf else {}),
+            **({"llama_kv_rocm": jf["llama_kv_rocm"]} if "llama_kv_rocm" in jf and st is None else {}),
+            **({"vllm_spec": spec} if st and (spec := matched_spec.vllm_spec(f"loom-fun/{slug}")) else {}),
             "name": slug.lower().replace(".", "-")[:40], **({"repeat_rows": rr} if rr > 1 else {}),
-            "card": f"{a.card_org}/{slug}", **({f"require_preset_{K}": True} if preset else {}), "kit": m["kit"], "llamacpp": BASE["rocm"]["build"], "llamacpp_vulkan": BASE["vulkan"]["build"],
+            "card": f"{a.card_org}/{slug}", **({f"require_preset_{K}": True} if preset else {}), "kit": m["kit"], **base,
             f"memory_bytes_{K}": jf[f"memory_bytes_{K}"], **({"served_context": ctx} if ctx else {}),
             "variants": [card, nodraft],
-            "steps": ["func:card", "ktest:card", *([f"gates:card:{a.gates}"] if a.gates else []), *["perf:card:1"] * n, *["perf:card:1:long"] * n, "c4:nodraft",
-                      f"llama@rocm.np1:{n}", f"llama@rocm.np1:{n}:long", "llamac4@rocm.nodraft",
-                      f"llama@vulkan.np1:{n}", f"llama@vulkan.np1:{n}:long", "llamac4@vulkan.perslot.nodraft"]})
+            "steps": ["func:card", "ktest:card", *gates, *["perf:card:1"] * n, *["perf:card:1:long"] * n, "c4:nodraft", *llama]})
     if not jobs:
         sys.exit("no job: " + (", ".join(skipped) + f" do not fit the {NAME}" if skipped else "no model given"))
     exp = {"_comment": f"{NAME} per-model measurement ({tool}): one job per model on one {NAME} runner; "
@@ -149,6 +183,9 @@ def main(argv=None, device=None, tool="device_jobs.py"):
                        "reduced-context models served at served_context. Does not fit: " + (", ".join(skipped) or "none"),
            "runner": DEV["runner"]["key"], "memory_bytes": POOL, "llama_spec": "matched", "jobs": jobs,
            "card": jobs[0]["card"], "kit": None, "llamacpp": BASE["rocm"]["build"], "llamacpp_vulkan": BASE["vulkan"]["build"]}
+    if all("llamacpp" not in j for j in jobs):   # only safetensors cards: no llama.cpp anywhere in the experiment
+        for k in ("llama_spec", "llamacpp", "llamacpp_vulkan"):
+            exp.pop(k)
     json.dump(exp, sys.stdout, indent=1)
     print()
 
