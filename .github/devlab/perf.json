@@ -8,7 +8,7 @@
   {
    "name": "coldoff",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "require_preset_r9700": true,
+   "require_preset_r9700": false,
    "kit": null,
    "memory_bytes_r9700": 34000000000,
    "runner": "r9700",
@@ -22,14 +22,13 @@
      },
      "build_args": [
       "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-      "--prefill-r9700",
-    "1024"
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
      "build": {
       "MTP_BLOCK_PREP": "",
       "PROPOSE_HEAD_ROWS": "0"
-     }
+     },
+     "require_preset_r9700": false
     }
    ],
    "steps": [
