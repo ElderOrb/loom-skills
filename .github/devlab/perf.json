@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st draft exp8: serving-context ladder of the final package (and the base) with func, repeated; exp6/exp7 func failed at 106496 on two runners, exp5 passed once. Evidence branch: not for merge.",
+ "_comment": "mxfp4st draft exp9: repeat of exp8 (func at 106496 failed on two of four runners): does the base fail where the final package does, and how far down must the context go. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -74,16 +74,12 @@
     }
    ],
    "steps": [
+    "func:k106",
+    "func:b106",
+    "func:k98",
     "func:b106",
     "func:k106",
     "func:k102",
-    "func:k98",
-    "func:k90",
-    "func:b106",
-    "func:k106",
-    "func:k102",
-    "func:k98",
-    "func:b98",
     "func:k98"
    ],
    "repeat_rows": 3,
