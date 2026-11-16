@@ -23,7 +23,7 @@
     }
    ],
    "steps": [
-    "profile:card:probe,pf2k,pf8k,dec"
+    "profile:card:probe,pf2k"
    ]
   }
  ]

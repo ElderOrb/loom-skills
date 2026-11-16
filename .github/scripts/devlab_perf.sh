@@ -516,7 +516,7 @@ print('$p1', k, [x.get(k) for x in r if x.get(k)], 'median', round(st.median(v),
     profile)   # profile:V[:SCENARIOS] (comma list of probe,pf2k,pf8k,dec; default all but probe): V served alone per scenario with --print_device_statistics (the HAL's
                # per-function dispatch statistics, printed at shutdown); one session per scenario, so each table holds only that scenario's requests
       for sc in $(echo "${p2:-pf2k,pf8k,dec}" | tr ',' ' '); do
-        PROFILE_SA="--print_device_statistics" serve_alone "$p1" || { res[$s]=ERROR; break; }
+        PROFILE_SA="--device_profiling_mode=dispatch-events,executable-metadata --print_device_statistics" serve_alone "$p1" || { res[$s]=ERROR; break; }
         step "profile $p1 $sc"
         ( cd "$B" && "$T" profile_requests.py "$url" "$cardid" "$sc" ) > "$out/profile_${p1}_$sc.req.json" 2> "$out/profile_${p1}_$sc.req.err"; tail -c 600 "$out/profile_${p1}_$sc.req.json"; tail -3 "$out/profile_${p1}_$sc.req.err"
         "$SV/stop.sh" "perf-$p1" | tail -1; sleep 2   # a graceful stop: the statistics are printed at shutdown
