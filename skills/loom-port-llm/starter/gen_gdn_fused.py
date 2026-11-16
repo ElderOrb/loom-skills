@@ -236,12 +236,19 @@ def phase_a(G, NG, LB, eps, grouped, ratio, target=True, abl=()):
     P("  } else {")
     for r in range(CN):
         P(f"    view.store %nh{r}, %q_view[{ci(r)}, %tq] : f16, view<{CN}x{QAS}xf16>")
-    P("    scf.if %kfirst {")
-    for r in range(CN):
-        P(f"      view.store %nh{r}, %v_q[{ci(r)}, %tq] : f16, view<{CN}x{DK}xf16>")
-    P("    }")
     P("  }")
     bar()
+    # the key head's normalized Q to the workspace by its first value head: rows of the LDS copy, 16-byte stores
+    P("  scf.if %kfirst {")
+    for r in range(2):
+        P(f"    %qc{r}_v = index.add %thread, {ci(256 * r)} : index")
+        P(f"    %qc{r} = index.assume %qc{r}_v [range(%qc{r}_v, 0, 511)] : index")
+        P(f"    %qcr{r} = index.div %qc{r}, %k16 : index")
+        P(f"    %qcq{r} = index.rem %qc{r}, %k16 : index")
+        P(f"    %qcc{r} = index.mul %qcq{r}, %k8 : index")
+        P(f"    %qcv{r} = vector.load %q_view[%qcr{r}, %qcc{r}] : view<{CN}x{QAS}xf16> -> vector<8xf16>")
+        P(f"    vector.store %qcv{r}, %v_q[%qcr{r}, %qcc{r}] : vector<8xf16>, view<{CN}x{DK}xf16>")
+    P("  }")
     # ---- S4: A = -beta exp(gc_i - gc_j) K K^T (waves 0-3, j < i) to LDS; P = exp(gc_i - gc_j) Q K^T (waves 4-7, j <= i) to the workspace
     P(f"  %tqw = index.rem %wave, {ci(NT * NT)} : index")
     P(f"  %tmt = index.div %tqw, {ci(NT)} : index")
@@ -333,8 +340,20 @@ def phase_a(G, NG, LB, eps, grouped, ratio, target=True, abl=()):
                 P(f"  %{nm_}rr{mt}_{kt} = vector.fragment.load<rhs> {src}[{ci(16 * kt)}, %wcol] {SH} : view<{CN}x{KHS}xf16> -> vector<8xf16>")
                 P(f"  %{nm_}a{mt}_{kt} = vector.mma %{nm_}tl{mt}_{kt}, %{nm_}rr{mt}_{kt}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
                 prev = f"%{nm_}a{mt}_{kt}"
-            ul = ", %ut_l" if nm_ == "u" else ""
-            P(f"  vector.fragment.store<result> {prev}, {dst}[{ci(16 * mt)}, %wcol] {SH} : {vec8}, view<{CN}x{DV}xf16{ul}>")
+            if nm_ == "u":   # U^T: a lane's 8 rows are 16 contiguous bytes
+                P(f"  vector.fragment.store<result> {prev}, {dst}[{ci(16 * mt)}, %wcol] {SH} : {vec8}, view<{CN}x{DV}xf16, %ut_l>")
+            else:            # W through LDS (the K buffer is free after S4): row stores below
+                P(f"  vector.fragment.store<result> {prev}, %kh_view[{ci(16 * mt)}, %wcol] {SH} : {vec8}, view<{CN}x{KHS}xf16>")
+
+    bar()
+    for r in range(2):
+        P(f"  %wc{r}_v = index.add %thread, {ci(256 * r)} : index")
+        P(f"  %wc{r} = index.assume %wc{r}_v [range(%wc{r}_v, 0, 511)] : index")
+        P(f"  %wcr{r} = index.div %wc{r}, %k16 : index")
+        P(f"  %wcq{r} = index.rem %wc{r}, %k16 : index")
+        P(f"  %wcc{r} = index.mul %wcq{r}, %k8 : index")
+        P(f"  %wcv{r} = vector.load %kh_view[%wcr{r}, %wcc{r}] : view<{CN}x{KHS}xf16> -> vector<8xf16>")
+        P(f"  vector.store %wcv{r}, %v_w[%wcr{r}, %wcc{r}] : vector<8xf16>, view<{CN}x{DV}xf16>")
     if "nosolve" in abl:
         a = out.index("  scf.if %tcn {", out.index("    %cc = index.assume %thread [range(%thread, 0, 31)] : index") - 1)
         b = out.index("  %wcol = index.mul %wave, %k16 : index")
