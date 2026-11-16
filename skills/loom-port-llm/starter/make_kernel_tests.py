@@ -2674,6 +2674,63 @@ if cfg.get("moe") and os.environ.get("MOE_TESTS", "1") == "1" and os.environ.get
 }}
 """)
         print(f"moe_gemm layer {li}: {gun}/{fd}, mean |act| {np.abs(act_ref).mean():.3g}, mean |ys| {np.abs(ys_ref).mean():.3g}")
+# decode.verify.fuse (gen_pstep.py): every g_pmv_* kernel of this build on synthetic split planes (MXFP4 nibbles "pairs" order + E8M0
+# scales), float64 references over llama.cpp's q8_1 activations of the kernel's own producer (f32 rows, silu(f) * u, rmsnorm(x) * w).
+# The persistent ones get rows for at least two row groups per workgroup; the accumulate store adds into a random y.
+_FP4 = np.array([0, .5, 1, 1.5, 2, 3, 4, 6, 0, -.5, -1, -1.5, -2, -3, -4, -6], np.float32)
+def _pmv_planes(n, K):
+    nib = rng.integers(0, 256, (n, K // 2), dtype=np.uint8); e = rng.integers(118, 125, (n, K // 32), dtype=np.uint8)
+    v = np.empty((n, K), np.float32); v[:, 0::2] = _FP4[nib & 15]; v[:, 1::2] = _FP4[nib >> 4]
+    return nib.view(np.int8).reshape(-1), e.view(np.int8).reshape(-1), v * np.repeat(np.exp2(e.astype(np.float32) - 127), 32, 1)
+for _pk in sorted(set(re.findall(r'^kernel\.def export\("(g_pmv_mxfp4s_[^"]+)"\)', _pkg_llm_text() or "", re.M))):
+    _m = re.match(r"g_pmv_mxfp4s_k(\d+)_t4_(f32|silu|norm|q8)_r(\d+)(?:_m(\d+))?(_h)?(?:_p(\d+))?$", _pk)
+    if not _m or _m.group(2) == "q8":
+        continue
+    K, mode, R, mats, hout, G = int(_m.group(1)), _m.group(2), int(_m.group(3)), int(_m.group(4) or 1), bool(_m.group(5)), int(_m.group(6) or 0)
+    tag, t = _pk, 4
+    x = rng.standard_normal((t, K)).astype(np.float32)
+    if mode == "silu":
+        u = rng.standard_normal((t, K)).astype(np.float32)
+        a = (x.astype(np.float64) / (1 + np.exp(-x.astype(np.float64))) * u).astype(np.float32)
+    elif mode == "norm":
+        nw = rng.uniform(0.5, 1.5, K).astype(np.float32)
+        hh = norm(x.astype(np.float64), nw.astype(np.float64)).astype(np.float32); a = hh
+    else:
+        a = x
+    aq = q8_ref(a).astype(np.float64)
+    decl, args, tys, outs, chk = [], [], [], [], []
+    nrow = [R * (G + 3 if G else 37) // (1 if i == 0 else 2) // R * R for i in range(mats)]   # the first matrix spans past G row groups
+    for i, n in enumerate(nrow):
+        s_ = "" if i == 0 else str(i + 1)
+        wq, ws, wv = _pmv_planes(n, K)
+        y0 = rng.standard_normal((t, n)).astype(np.float32) if i == 0 else np.zeros((t, n), np.float32)
+        ref = y0.astype(np.float64) + aq @ wv.T.astype(np.float64)
+        save(f"{tag}_w{s_}", wq); save(f"{tag}_ws{s_}", ws); save(f"{tag}_y0{s_}", y0); save(f"{tag}_e{s_}", ref.astype(np.float32))
+        decl.append(f'  %n{s_} = check.literal value({n}) : index\n  %w{s_} = check.file.read.npy path("{tag}_w{s_}.npy") : {ty(wq)}\n'
+                    f'  %ws{s_} = check.file.read.npy path("{tag}_ws{s_}.npy") : {ty(ws)}\n  %y{s_} = check.file.read.npy path("{tag}_y0{s_}.npy") : tensor<{t}x{n}xf32>\n'
+                    f'  %e{s_} = check.file.read.npy path("{tag}_e{s_}.npy") : tensor<{t}x{n}xf32>\n')
+        args.append(f"%w{s_}, %ws{s_}"); tys.append(f"{ty(wq)}, {ty(ws)}"); outs.append((f"%y{s_}", f"tensor<{t}x{n}xf32>"))
+        tol = 2e-3 * float(np.abs(ref).mean())
+        chk.append(f"  check.expect.close actual(%y{s_}) expected(%e{s_}) atol({tol:.3g}) rtol(2.0e-3) nan(different) : tensor<{t}x{n}xf32>\n")
+    save(f"{tag}_x", x)
+    xin = [("%x", ty(x))]
+    if mode == "silu":
+        save(f"{tag}_u", u); decl.append(f'  %u = check.file.read.npy path("{tag}_u.npy") : {ty(u)}\n'); xin.append(("%u", ty(u)))
+    if mode == "norm":
+        save(f"{tag}_nw", nw); decl.append(f'  %nw = check.file.read.npy path("{tag}_nw.npy") : {ty(nw)}\n'); xin.append(("%nw", ty(nw)))
+    if hout:
+        save(f"{tag}_he", hh); decl.append(f'  %he = check.file.read.npy path("{tag}_he.npy") : {ty(hh)}\n  %h = check.generate.fill value(0.0) : {ty(hh)}\n')
+        outs.append(("%h", ty(hh))); chk.append(f"  check.expect.close actual(%h) expected(%he) atol(1.0e-5) rtol(1.0e-5) nan(different) : {ty(hh)}\n")
+    ns = ", ".join(f"%n{'' if i == 0 else i + 1}" for i in range(mats))
+    idx = ", ".join(["index"] * (mats + 1))
+    cases.append(f"""check.case public @pmv_{tag} {{
+  %t = check.literal value({t}) : index
+  %acc = check.literal value(1) : i32
+  %x = check.file.read.npy path("{tag}_x.npy") : {ty(x)}
+{"".join(decl)}  kernel.launch @{_pk}[{ns}, %t]({ns}, %t, %acc, {", ".join(v for v, _ in xin)}, {", ".join(args)}, {", ".join(v for v, _ in outs)}) : [{idx}]({idx}, i32, {", ".join(tt for _, tt in xin)}, {", ".join(tys)}, {", ".join(tt for _, tt in outs)})
+{"".join(chk)}  check.return
+}}
+""")
 if flash2_deep_from(cfg):   # gen_llm.py launches the deep pairs' kernel after every one-tile prefill flash launch
     cases = [re.sub(r"^( *)kernel\.launch @g_attention_flash2\[(.*)$", r"\g<0>\n\1kernel.launch @g_attention_flash2_deep[\2", c,
                     flags=re.M) for c in cases] + DEEP_CASES   # these launch the two kernels as they test them

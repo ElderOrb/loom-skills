@@ -257,6 +257,14 @@ CHOICE("prefill.gemm.f16o_swiglu", "bool", False, "GEMM_F16O", kernels=["g_gemm_
 CHOICE("decode.mxfp4s.act_q8", "bool", False, "MXFP4S_Q8", kernels=["g_mv_mxfp4s_*_q8*", "g_mxfp4s_icodes"], rows=ROWS_DECODE + ROWS_STREAMS, from_pr="mxfp4st-kern",
        doc="MXFP4 split-plane dense matvecs take int8 activations (ACT_Q8's dot4 path, as Q8_0 / the K-quants) instead of f32 conversions and fused multiply-adds: the 4-token verify "
            "matvec of a drafted decode is ALU-bound on the f32 path (the GGUF MXFP4 Qwen3.8-27B measured 47 tok/s drafted vs 74 with int8 activations). Opt-in per model.")
+CHOICE("decode.verify.fuse", "bool", False, "VERIFY_FUSE", kernels=["g_pmv_*"], rows=ROWS_DECODE, from_pr="mxfp4st-ostep",
+       doc="Drafted verify epochs of 2-4 tokens on the int8 matvec path run fused layers (starter gen_pstep.py): the projections that read one "
+           "normalized row are one launch whose prologue computes rmsnorm + the int8 quant (no g_post_add_norm / g_quant_q8 launches), the "
+           "out / down projections quantize their own input (f32 / silu(gate) * up) and accumulate into the residual (no g_silu_mul). "
+           "Every value is the launch chain's (kernel tests: equality). The layer as generated stays for every other epoch.")
+CHOICE("decode.verify.persist", "int", 0, "MV_PERSIST", kernels=["g_pmv_*"], rows=ROWS_DECODE, from_pr="mxfp4st-ostep",
+       doc="decode.verify.fuse's matvecs as persistent row loops: min(G, row groups) workgroups each walk row groups id, id + G, ... "
+           "(the prologue runs once per workgroup instead of once per row group); 0: one workgroup per row group.")
 CHOICE("prefill.gemm.mxfp4s_f8", "bool", False, "GEMM_MXFP4S_F8", kernels=["g_gemm_mxfp4s_*_f8_*", "g_row_scale_f16*_f8_*", "g_post_add_norm_rs*_f8_*"], rows=ROWS_PREFILL,
        devices=["rdna4"], from_pr="mxfp4st-kern",
        doc="gfx12: MXFP4 split-plane (mxfp4s) prefill GEMMs on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): the nibble and scale planes are read as stored, weights decoded to bf8 "
