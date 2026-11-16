@@ -427,6 +427,16 @@ CHOICE("draft.propose.block", "str", None, "MTP_BLOCK_PREP", kernels=["g_prep_*"
        doc="MTP proposals of a safetensors checkpoint whose NextN block is BF16: the block's matrices (eh_proj, attention, FFN) are read from a "
        "load-time Q8_0 or Q4_0 copy (q8_0 | q4_0; empty: as stored). The block feeds proposals only (verification never reads it), so only "
        "acceptance moves (draft/prep_weights.py, weights.loom).", **{})
+CHOICE("draft.propose.head_pieces", "bool", False, "PROPOSE_HEAD_PIECES", enc=("1", "0"), kernels=["g_prep_*", "g_head_mv*_p40_pc*"], rows=ROWS_DECODE + ROWS_STREAMS,
+       doc="The proposal head's copy (draft.propose.head_rows, BF16 head) as several load-time prepared tensors of decode.head.piece_rows rows "
+       "(draft/prep_weights.piece_entries): hrx-loom stages a prepared tensor's input whole through four lanes, so one N-row copy costs "
+       "4 x N x 2H bytes of device budget while loading, pieces 4 x piece x 2H; one head launch per piece (g_head_mv*_pc<chunks>).", **{})
+CHOICE("decode.head.verify", "str", None, "VERIFY_HEAD_PREP", kernels=["g_prep_*", "g_head_mv*_q8_pc*"], rows=ROWS_DECODE + ROWS_STREAMS,
+       doc="q8_0: the verified head of a safetensors checkpoint with an untied BF16 head reads a load-time Q8_0 copy (int8 activations, "
+       "decode.head.piece_rows-row prepared tensors) instead of the BF16 tensor: about half the head bytes per step, and the BF16 tensor is "
+       "no longer resident. CHANGES the verified output (lossy weights): opt-in, gated (golden vs the reference, near-tie statistics).", **{})
+CHOICE("decode.head.piece_rows", "int", 16384, "HEAD_PIECE_ROWS", kernels=["g_head_mv*_pc*"], rows=ROWS_DECODE + ROWS_STREAMS,
+       doc="Rows per prepared piece of a pieced head (draft.propose.head_pieces, decode.head.verify); a multiple of 128.", **{})
 CHOICE("draft.dflash.splits", "int", 32, "DFL_SPLITS", kernels=["g_dfl_attention", "g_dfl_ctx_split"], rows=ROWS_DECODE,
        doc="DFlash context-attention splits.")
 CHOICE("draft.dflash.prep_weights", "bool", True, "DRAFTER_PREP", kernels=["g_dfl_*"], rows=ROWS_DECODE + ROWS_STREAMS,
