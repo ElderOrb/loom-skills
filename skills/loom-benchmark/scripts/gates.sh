@@ -43,6 +43,14 @@ export LOOM_NO_AUDIT=1 LLAMA_CACHE=$bench/llama_cache
 long=$("$T" -c "print(','.join(str(n) for n in (1000, 2000, 16000, 32000) if n + 2000 <= $ctx))")
 slot=$("$T" -c "print(min($ctx, 65536) + 1024)")
 cd "$bench"
+# REFERENCE_ALT=record (a job's "env"): this job takes the committed store's SECOND recording of the golden and vision requests (salt
+# bench_common.ALT_SALT_*, read back by compare.py / vision_golden.py as the --alt rule) and nothing else: only for a request whose first recording
+# was in the store when the job started (stored_keys.txt), so the two are independent jobs' answers. Add the job's llama_cache.tgz with reference_cache.py merge.
+if [ "${REFERENCE_ALT:-}" = record ]; then
+  [ -f stored_keys.txt ] || { find llama_cache -name '*.json' -printf '%f\n' 2>/dev/null | sed 's/\.json$//' > stored_keys.txt; }
+  export REFERENCE_STORED_KEYS=$bench/stored_keys.txt
+  echo "REFERENCE_ALT=record: $(wc -l < stored_keys.txt) keys stored at the start"
+fi
 defer=0
 # A package with image input: llama-server also loads its projector (MMPROJ), for the vision gate.
 MMPROJ=${MMPROJ:-$("$T" -c "import json; print((json.load(open('$pkg/llm_config.json')).get('vision') or {}).get('mmproj', ''))" 2>/dev/null)}; export MMPROJ
@@ -156,6 +164,17 @@ dev_gates() {
   [ -n "$drafting" ] && run spec spec_gate
 }
 all_gates() {
+  if [ "${REFERENCE_ALT:-}" = record ]; then   # the second recording only (the gates' request sets of this level), no verdicts about Loom
+    [ -n "$L" ] || return 0
+    if [ "$level" = dev ]; then
+      run golden "$T" "$S/golden.py" "$pkg" golden_dev.json --llama "$L" --short 12 --long "$("$T" -c "print(','.join(str(n) for n in (1000, 2000) if n + 2000 <= $ctx))")"
+      [ -n "$MMPROJ" ] && run vision "$T" "$S/vision_golden.py" "$pkg" --url "$url" --llama "$L" --cases shapes,wide
+    else
+      run golden "$T" "$S/golden.py" "$pkg" golden.json --llama "$L" --long "$long"
+      [ -n "$MMPROJ" ] && run vision "$T" "$S/vision_golden.py" "$pkg" --url "$url" --llama "$L"
+    fi
+    return 0
+  fi
   # VISION_ONLY=1 [VISION_ARGS="--cases wide,wide_pre"]: just the vision gate (DevLab diagnostics for one failing case)
   if [ -n "${VISION_ONLY:-}" ]; then
     [ -n "$MMPROJ" ] && [ -n "$L" ] && run vision "$T" "$S/vision_golden.py" "$pkg" --url "$url" --llama "$L" ${VISION_ARGS:-}
