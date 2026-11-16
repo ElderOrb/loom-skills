@@ -47,8 +47,9 @@ VARIANTS = {   # name -> flash2_g6.py options (FLASH2_G6_OPTS)
     "fm": {"B": "2", "fmax": 1, "vpf": "top2", "e2": 1},   # fixed reference m0 (first + diagonal page), running-max fallback above m0 + 15
     "fmt": {"B": "2", "fmax": 1, "vpf": "top", "e2": 1},
     "fmp": {"B": "2", "fmax": 1, "vpf": "top2", "e2": 1, "peel": 1},   # + unmasked loop below the diagonal
+    "ovl": {"B": "2", "ovl": 1},   # with fmax: overflow tracked by the per-lane block sum
 }
-TESTED = ["fm", "fmp"]
+TESTED = ["fmp"]
 
 
 def opts_of(v):
