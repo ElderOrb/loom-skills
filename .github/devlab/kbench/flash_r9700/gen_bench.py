@@ -44,7 +44,7 @@ VARIANTS = {   # name -> flash2_g6.py options (FLASH2_G6_OPTS)
     "e2": {"B": "2", "e2": 1},
     "wg3qs": {"B": "2", "wg": 3, "qshare": 1},   # timing only (the three pairs read one Q^T region)
 }
-TESTED = ["vtop+e2"]
+TESTED = []
 
 
 def opts_of(v):
