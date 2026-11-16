@@ -1554,12 +1554,14 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
             tag = f"gm8s_swbf_{K}_{n_use}"
             save(tag + "_x", e4m3_bytes(xf)); save(tag + "_s", sc); save(tag + "_w", Wr); save(tag + "_ws", Ws_); save(tag + "_u", Ur); save(tag + "_us", Us_)
             save(tag + "_s8", np.stack([2.0 ** (7 - ye), 2.0 ** (ye - 7 - 8.0)], 1).astype(np.float32)); save(tag + "_inf", np.tile(np.array([0, 0, 1, 0], np.int32), (rows, 1)))
+            yb = bf16_vals(yv.astype(np.float32)).astype(np.float64); e16 = np.clip(np.frexp(np.abs(yb).max(1))[1] - 1 - 13, 0, 100)
+            save(tag + "_h16", (yb * (2.0 ** -e16)[:, None]).astype(np.float16))   # the f16 operand copy of the bf16 row (w16 = 1): the data check of the bf16 store
             cases.append(f"""check.case public @{tag} {{
   %rows = check.literal value({rows}) : index
   %k = check.literal value({K}) : index
   %n = check.literal value({n_use}) : index
   %fl = check.literal value(1) : index
-  %w16 = check.literal value(0) : index
+  %w16 = check.literal value(1) : index
   %x = check.file.read.npy path("{tag}_x.npy") : tensor<{rows}x{K}xi8>
   %s = check.file.read.npy path("{tag}_s.npy") : tensor<{rows}x2xf32>
   %w = check.file.read.npy path("{tag}_w.npy") : {ty(Wr)}
@@ -1568,6 +1570,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   %us = check.file.read.npy path("{tag}_us.npy") : {ty(Us_)}
   %info = check.file.read.npy path("{tag}_inf.npy") : tensor<{rows}x4xi32>
   %es8 = check.file.read.npy path("{tag}_s8.npy") : tensor<{rows}x2xf32>
+  %eh16 = check.file.read.npy path("{tag}_h16.npy") : tensor<{rows}x{n_use}xf16>
   %y = check.generate.fill value(0) : tensor<{rows}x{n_use}xi16>
   %s16 = check.generate.fill value(0.0) : tensor<{rows}x2xf32>
   %h16 = check.generate.fill value(0.0) : tensor<{rows}x{n_use}xf16>
@@ -1576,6 +1579,7 @@ if os.environ.get("GEMM_TESTS", "1") == "1" and _f8_on():   # choice prefill.gem
   kernel.launch @g_gemm_mxfp4s_swiglu_f8_bf16_m256_rdna4[%rows, %n](%rows, %k, %n, %x, %s, %w, %ws, %u, %us, %y) : [index, index](index, index, index, tensor<{rows}x{K}xi8>, tensor<{rows}x2xf32>, {ty(Wr)}, {ty(Ws_)}, {ty(Ur)}, {ty(Us_)}, tensor<{rows}x{n_use}xi16>)
   kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%rows](%rows, %info, %n, %y, %s16, %h16, %q8, %s8, %w16, %fl) : [index](index, tensor<{rows}x4xi32>, index, tensor<{rows}x{n_use}xi16>, tensor<{rows}x2xf32>, tensor<{rows}x{n_use}xf16>, tensor<{rows}x{n_use}xi8>, tensor<{rows}x2xf32>, index, index)
   check.expect.close actual(%s8) expected(%es8) atol(0.0) rtol(0.0) nan(different) : tensor<{rows}x2xf32>
+  check.expect.close actual(%h16) expected(%eh16) atol(2.0e-1) rtol(2.0e-2) nan(different) : tensor<{rows}x{n_use}xf16>
   check.return
 }}
 """)
