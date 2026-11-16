@@ -28,13 +28,26 @@ def f8_enabled():
     return enabled() and os.environ.get("GEMM_MXFP4S_F8", "0").lower() not in ("", "0", "false", "no", "off")
 
 
+# kernel designs of the fp8 GEMM (choice prefill.gemm.mxfp4s_f8_kernel, env GEMM_MXFP4S_F8_KERNEL): name -> (store kwargs, swiglu kwargs) of gemm_mxfp4s_f8_m256
+F8_KERNELS = {"v1": ({}, {}),
+              "lvs": ({"lv": True, "lvs": 1}, {}),     # ogemm: store GEMMs -5..-7 % at 1024 rows (kbench 43869957328, 43875719428); the SwiGLU pair keeps v1; on the card +1..1.6 % prefill but the consistency gate fails (device/rdna4/prefill.md)
+              "lv": ({"lv": True}, {"lv": True, "rf": 4}),
+              "ws": ({"ws": 4}, {"ws": 4})}
+
+
+def f8_kernel_kwargs(mode):
+    """the generator kwargs of the selected fp8 GEMM design for `mode` (store / swiglu)"""
+    name = os.environ.get("GEMM_MXFP4S_F8_KERNEL", "") or "v1"
+    return dict(F8_KERNELS[name][mode == "swiglu"])
+
+
 def mxfp4_f8_range(blocks_e):
     """(lowest, highest) block exponent byte of an iterable/ndarray of E8M0 bytes, and whether every block fits the kernel's exact range."""
     lo, hi = int(min(blocks_e)), int(max(blocks_e))
     return lo, hi, MXFP4_F8_E_MIN <= lo and hi <= MXFP4_F8_E_MAX
 
 
-def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, pair=False):
+def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=False, kmult=1, rf=None, a_pf=False, nt=256, bm=None, tn=None, cf=None, swp=False, swz=False, pfa=0, yf16=False, pad=16, pair=False, lv=False, lvpf=0, lvs=False, ws=0):
     """The 256 x 128 MXFP4 (split planes) prefill GEMM of gfx12 on fp8 WMMA (v_wmma_f32_16x16x16_fp8_bf8): fp8 e4m3 activations (the row-scale
     producers' x8, scales s8) times MXFP4 weights decoded to bf8 e5m2 in LDS, exactly (see MXFP4_F8 below). Weights: nibble plane
     %w [n, k/2] and scale plane %ws [n, k/32] (swiglu: %w, %ws, %w2, %ws2). y = acc * s8[row, 1].
@@ -46,6 +59,9 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     device/rdna4/prefill.md); kmult 2 doubles the K step; nt 128 halves the workgroup; a_pf / dbuf are measured non-wins kept for the record.
     pair (store only): two projections of the same activation in one launch: output tiles [0, n / tn) multiply %w into %y, tiles
     [n / tn, 2 n / tn) multiply %w2 into %y2 (both n rows; the skinny GDN alpha / beta projections, ab_f8 below)."""
+    if ws:   # the wave-specialized design (ws = producer waves)
+        assert not pair
+        return gemm_mxfp4s_f8_ws(mode, prefix, order, npw=ws, rf=rf, pad=pad, lvs=lvs)
     two_w = mode == "swiglu"
     assert not (pair and two_w)
     BM = bm or nt                 # rows of the workgroup tile (default 256; 128 / 256 with a wider tn: the tile shapes of the prefill GEMM sweep)
@@ -59,7 +75,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     NWV = WR * WC
     NT = NWV * 32                 # threads = waves * 32 (256 for the 256 x 128 tile)
     HALVES = NT // TW             # staging threads per weight row
-    assert RF in (2, 4, 8) and WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2) and NT <= 1024
+    assert RF in (2, 4, 8) and WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2, 4) and NT <= 1024
     assert a_direct or (NT == BM == 256 and TW == 128)
     wave_cols = 16 * cfr
     YT = 'f16' if yf16 else 'f32'   # the output element type (f16: a measured option for the SwiGLU output, whose consumer is the down projection's row-scale producer)
@@ -158,7 +174,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
   %chalves = index.constant {HALVES} : index
   %stage_row = index.div %workitem, %chalves : index
   %stage_half = index.rem %workitem, %chalves : index
-  %stage_col = index.mul %stage_half, %cks2 : index''')
+{'' if HALVES < 4 else f'  %cnb32 = index.constant {NB * 32} : index' + chr(10)}  %stage_col = index.mul %stage_half, {'%cks2' if HALVES < 4 else '%cnb32'} : index''')
     if two_w:
         A(f'''  %half_tw = index.constant {TN} : index
   %w_is_up = index.cmp uge, %stage_row, %half_tw : index
@@ -281,6 +297,32 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
             if r == 0:
                 A("  %c15 = index.constant 15 : index\n  %rows_m15 = index.sub %rows, %c15 : index")
             A(f"  %xrow{r}_v = index.add %row_origin, {'%wave_row' if r == 0 else f'%wave_row{r}'} : index\n  %xrow{r} = index.assume %xrow{r}_v [lt(%xrow{r}_v, %rows_m15)] : index")
+    if lv:   # lane-vector operand loads: one 16-byte load per lane covers two K substeps (A from global, B from LDS); both operands take K in the same
+        # permuted order (substep 2p: bytes [32p + 16h, +8) of lane half h; substep 2p + 1: the next 8), so the products are those of the plain layout
+        assert a_direct and not (a_pf or swp or pfa) and lvpf <= KS // 32
+        A("""  %lv_c32 = index.constant 32 : index
+  %lv_lane = index.rem %workitem, %lv_c32 : index
+  %lv_l16 = index.rem %lv_lane, %c16 : index
+  %lv_h = index.div %lv_lane, %c16 : index
+  %lv_h16 = index.mul %lv_h, %c16 : index""")
+        for r in range(RF):
+            A(f"""  %lv_xr{r} = index.add %xrow{r}, %lv_l16 : index
+  %lv_xm{r} = index.mul %lv_xr{r}, %k : index
+  %lv_xo{r}_i = index.add %lv_xm{r}, %lv_h16 : index
+  %lv_xo{r} = index.scale %lv_xo{r}_i, %one_off : index, offset -> offset""")
+        for p in range(KS // 32):
+            A(f"  %lv_kc{p} = index.constant {32 * p} : index\n  %lv_bk{p} = index.add %lv_h16, %lv_kc{p} : index")
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                A(f"  %lv_bn{wi}{c}_c = index.constant {wi * TN + c * 16} : index\n  %lv_bn{wi}{c}_a = index.add %wave_col, %lv_bn{wi}{c}_c : index\n  %lv_bn{wi}{c} = index.add %lv_bn{wi}{c}_a, %lv_l16 : index")
+    def lv_aload(dst, r, p, base):
+        """the 16-byte activation load of row fragment r, K pair p, at the step whose byte offset is `base` (an offset value)"""
+        return (f"    %{dst}_xp = index.add %lv_xo{r}, {base} : offset\n    %{dst}_xv = buffer.view %x[%{dst}_xp] : buffer -> view<{KS}xi8>\n"
+                f"    %{dst} = vector.load %{dst}_xv[%lv_kc{p}] : view<{KS}xi8> -> vector<16xi8>")
+    if lvpf:
+        for r in range(RF):
+            for p in range(lvpf):
+                A(lv_aload(f"lv_pa{r}_{p}", r, p, "%o0"))
     A(loads("p", "%c0"))
     if a_pf:
         assert a_direct and not dbuf
@@ -298,6 +340,7 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
     for j in range(NB):
         carried.append((f"%cr_e{j}", f"%we{j}{'q' if dbuf else 'p'}", f"%we{j}n", "i32"))
         carried.append((f"%cr_q{j}", f"%wq{j}{'q' if dbuf else 'p'}", f"%wq{j}n", "vector<4xi32>"))
+    carried += [(f"%lv_ca{r}_{p}", f"%lv_pa{r}_{p}", f"%lv_na{r}_{p}", "vector<16xi8>") for r in range(RF) for p in range(lvpf)]
     if a_pf:
         carried += [(f"%ca{r}_{kk}", f"%lp{r}_{kk}", f"%ln{r}_{kk}", "vector<2xi32>") for kk in range(KS // 16) for r in range(RF)]
     A("  " + ", ".join(f"%o{a}" for a in accs) + ", " + ", ".join(f"%unused_{i}" for i in range(len(carried))) +
@@ -366,10 +409,54 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
                     A(f"    %m{a}_{kk} = vector.mma %l{r}_{kk}, %rf{wi}{c}_{kk}, {cur[a]} : vector<2xi32>, vector<2xi32>, vector<8xf32>")
                     cur[a] = f"%m{a}_{kk}"
 
+    def lv_loads(p, parts="ab"):
+        if p == 0 and "a" in parts:
+            A("    %lv_kb = index.scale %kbase, %one_off : index, offset -> offset")
+        for r in range(RF if "a" in parts else 0):
+            if p == 0:
+                A(f"    %lv_xp{r} = index.add %lv_xo{r}, %lv_kb : offset\n    %lv_xv{r} = buffer.view %x[%lv_xp{r}] : buffer -> view<{KS}xi8>")
+            if p < lvpf:
+                A(f"    %lv_a{r}_{p} = vector.bitcast %lv_ca{r}_{p} : vector<16xi8> to vector<16xi8>")
+            else:
+                A(f"    %lv_a{r}_{p} = vector.load %lv_xv{r}[%lv_kc{p}] : view<{KS}xi8> -> vector<16xi8>")
+            A(f"""    %lv_aw{r}_{p} = vector.bitcast %lv_a{r}_{p} : vector<16xi8> to vector<4xi32>""")
+            for q in range(2):
+                A(f"""    %lv_ar{r}_{2 * p + q} = vector.slice %lv_aw{r}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
+    %l{r}_{2 * p + q} = vector.fragment<lhs> %lv_ar{r}_{2 * p + q} shape [%c16, %c16] using {{schema = %a_schema : encoding<schema>}} : vector<2xi32>""")
+        for wi in range(len(weights) if "b" in parts else 0):
+            for c in range(cfr):
+                A(f"""    %lv_b{wi}{c}_{p} = vector.load {"%w_cur_st" if dbuf else "%w_stage_st"}[%lv_bn{wi}{c}, %lv_bk{p}] : view<{TW}x{PX}xi8> -> vector<16xi8>
+    %lv_bw{wi}{c}_{p} = vector.bitcast %lv_b{wi}{c}_{p} : vector<16xi8> to vector<4xi32>""")
+                for q in range(2):
+                    A(f"""    %lv_br{wi}{c}_{2 * p + q} = vector.slice %lv_bw{wi}{c}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
+    %rf{wi}{c}_{2 * p + q} = vector.fragment<rhs> %lv_br{wi}{c}_{2 * p + q} shape [%c16, %c16] using {{schema = %b_schema : encoding<schema>}} : vector<2xi32>""")
+
     NKK = KS // 16
-    if swp:
+    if lv:
+        if dbuf:
+            A(f"    %w_cur_st = buffer.view %w_stage[%cur_off] : buffer -> view<{TW}x{PX}xi8>")
+        # lvs 1: software-pipelined, the loads of pair p + 1 are issued before the WMMAs of pair p; lvs 2: only the activation loads run ahead
+        pre = "ab" if lvs == 1 else "a"
+        if lvs:
+            lv_loads(0, pre)
+        for p in range(KS // 32):
+            if not lvs:
+                lv_loads(p)
+            else:
+                if lvs == 2:
+                    lv_loads(p, "b")
+                if p + 1 < KS // 32:
+                    lv_loads(p + 1, pre)
+            frag_mma(2 * p)
+            frag_mma(2 * p + 1)
+        if lvpf:   # the next step's first activation pairs, before the barrier (carried)
+            A("    %lv_kn = index.mul %k_next, %c128 : index\n    %lv_kno = index.scale %lv_kn, %one_off : index, offset -> offset")
+            for r in range(RF):
+                for p in range(lvpf):
+                    A(lv_aload(f"lv_na{r}_{p}", r, p, "%lv_kno"))
+    elif swp:
         frag_loads(0)
-    for kk in range(NKK):
+    for kk in range(0 if lv else NKK):
         if swp:
             if kk + 1 < NKK:
                 frag_loads(kk + 1)
@@ -410,6 +497,343 @@ def gemm_mxfp4s_f8_m256(mode, prefix="g", order="pairs", a_direct=True, dbuf=Fal
                 A(f"  %vh{r}{c} = vector.fptrunc %v{r}{c} : vector<8xf32> to vector<8xf16>")
             A(f"  vector.fragment.store<result> %{'vh' if yf16 else 'v'}{r}{c}, %y_view[{row}, %oc{r}{c}] shape [%c16, %c16] : vector<8x{YT}>, view<{BM}x{TN}x{YT}, %y_layout>")
     A("  kernel.return\n}\n")
+    return "\n".join(L)
+
+
+def _bf8_decode_text(j, q, e, row, col, view, TW, PX, order, sfx, ind="    "):
+    """the bf8 decode of one MXFP4 block (raw nibble words `q` vector<4xi32>, E8M0 `e` i32) stored at view[row, col + 32 j] (view<TW x PX x i8>)"""
+    t = [f"%em{j}{sfx} = scalar.subi {e}, %c107 : i32",
+         f"%ea{j}{sfx} = scalar.shli %em{j}{sfx}, %cs2 : i32",
+         f"%ea4_{j}{sfx} = scalar.muli %ea{j}{sfx}, %ones : i32",
+         f"%ea4z_{j}{sfx} = scalar.andi %ea4_{j}{sfx}, %lo_mask : i32",
+         f"%tlo{j}{sfx} = scalar.addi %ea4z_{j}{sfx}, %tab_lo_c : i32",
+         f"%thi{j}{sfx} = scalar.addi %ea4_{j}{sfx}, %tab_hi_c : i32",
+         f"%tab2_{j}{sfx} = vector.from_elements %tlo{j}{sfx}, %thi{j}{sfx} : vector<2xi32>",
+         f"%tab{j}{sfx} = vector.bitcast %tab2_{j}{sfx} : vector<2xi32> to vector<8xi8>"]
+    for i in range(4):
+        n = f"{j}{i}{sfx}"
+        t += [f"%qw{n}_1 = vector.slice {q}[{i}] : vector<4xi32> -> vector<1xi32>",
+              f"%qw{n} = vector.bitcast %qw{n}_1 : vector<1xi32> to vector<4xi8>",
+              f"%lo_i{n} = vector.andi %qw{n}, %m7 : vector<4xi8>",
+              f"%hs_i{n} = vector.shrui %qw{n}_1, %m4i : vector<1xi32>",
+              f"%hs_b{n} = vector.bitcast %hs_i{n} : vector<1xi32> to vector<4xi8>",
+              f"%hi_i{n} = vector.andi %hs_b{n}, %m7 : vector<4xi8>",
+              f"%lo_m{n} = vector.table.lookup %tab{j}{sfx}[%lo_i{n}] : vector<8xi8>, vector<4xi8> -> vector<4xi8>",
+              f"%hi_m{n} = vector.table.lookup %tab{j}{sfx}[%hi_i{n}] : vector<8xi8>, vector<4xi8> -> vector<4xi8>",
+              f"%ls_i{n} = vector.shli %qw{n}_1, %m4i : vector<1xi32>",
+              f"%ls_m{n} = vector.andi %ls_i{n}, %m80i : vector<1xi32>",
+              f"%ls_b{n} = vector.bitcast %ls_m{n} : vector<1xi32> to vector<4xi8>",
+              f"%hs_m{n} = vector.andi %qw{n}_1, %m80i : vector<1xi32>",
+              f"%hs_s{n} = vector.bitcast %hs_m{n} : vector<1xi32> to vector<4xi8>",
+              f"%lo_f{n} = vector.ori %lo_m{n}, %ls_b{n} : vector<4xi8>",
+              f"%hi_f{n} = vector.ori %hi_m{n}, %hs_s{n} : vector<4xi8>",
+              f"%lo_w{n} = vector.bitcast %lo_f{n} : vector<4xi8> to vector<1xi32>",
+              f"%hi_w{n} = vector.bitcast %hi_f{n} : vector<4xi8> to vector<1xi32>"]
+    js = f"{j}{sfx}"
+    t += [f"%lo4_{js} = vector.concat<0> %lo_w{j}0{sfx}, %lo_w{j}1{sfx}, %lo_w{j}2{sfx}, %lo_w{j}3{sfx} : vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32> -> vector<4xi32>",
+          f"%hi4_{js} = vector.concat<0> %hi_w{j}0{sfx}, %hi_w{j}1{sfx}, %hi_w{j}2{sfx}, %hi_w{j}3{sfx} : vector<1xi32>, vector<1xi32>, vector<1xi32>, vector<1xi32> -> vector<4xi32>",
+          f"%lo16_{js} = vector.bitcast %lo4_{js} : vector<4xi32> to vector<16xi8>",
+          f"%hi16_{js} = vector.bitcast %hi4_{js} : vector<4xi32> to vector<16xi8>",
+          f"%wcl{js}_a = index.constant {32 * j} : index",
+          f"%wcl{js} = index.add {col}, %wcl{js}_a : index"]
+    if order == "pairs":
+        t += [f"%blk{js} = vector.interleave<0> %lo16_{js}, %hi16_{js} : vector<16xi8>, vector<16xi8> -> vector<32xi8>",
+              f"vector.store %blk{js}, {view}[{row}, %wcl{js}] : vector<32xi8>, view<{TW}x{PX}xi8>"]
+    else:
+        t += [f"%wch{js} = index.add %wcl{js}, %c16 : index",
+              f"vector.store %lo16_{js}, {view}[{row}, %wcl{js}] : vector<16xi8>, view<{TW}x{PX}xi8>",
+              f"vector.store %hi16_{js}, {view}[{row}, %wch{js}] : vector<16xi8>, view<{TW}x{PX}xi8>"]
+    return "\n".join(ind + x for x in t)
+
+
+def gemm_mxfp4s_f8_ws(mode, prefix="g", order="pairs", npw=4, rf=None, pad=16, kmult=1, lvs=False):
+    """Wave-specialized variant of gemm_mxfp4s_f8_m256 (same launch ABI, name and results): the workgroup has the WMMA waves of the 256 x 128
+    (swiglu 256 x 64 x 2) tile plus `npw` producer waves. The weight stage is double-buffered in LDS: during K step s the WMMA waves multiply
+    buffer s % 2 (activation fragments from global memory) while the producer waves decode step s + 1 into the other buffer (their raw nibble and
+    scale loads run one more step ahead); one workgroup barrier per step. The WMMA waves never decode, the producers never multiply."""
+    two_w = mode == "swiglu"
+    BM = 256
+    TN = 64 if two_w else 128
+    TW = TN * (2 if two_w else 1)
+    RF = rf or (2 if two_w else 4)
+    cfr = (8 if two_w else 16) // RF
+    WR, WC = BM // (16 * RF), TN // (16 * cfr)
+    NWV = WR * WC
+    NM = NWV * 32
+    NPT = npw * 32
+    NT = NM + NPT
+    HALVES = NPT // TW
+    KS = 128 * kmult
+    PX = KS + pad
+    NB = (KS // 32) // HALVES
+    assert WR * 16 * RF == BM and WC * 16 * cfr == TN and HALVES in (1, 2) and HALVES * TW == NPT and NM % NPT == 0 and NB >= 1 and NT <= 1024
+    WB = TW * PX
+    assert 2 * WB >= BM * 64
+    name = f"{prefix}_gemm_mxfp4s_{mode}_f8_m256_rdna4"
+    weights = ["w", "w2"] if two_w else ["w"]
+    accs = [f"{wi}r{r}c{c}" for wi in range(len(weights)) for r in range(RF) for c in range(cfr)]
+    L = []
+    A = L.append
+    A(f'''kernel.def target(@rdna4) export("{name}") @{name}(%rows: index, %n: index) {{
+  %c1 = index.constant 1 : index
+  %c256 = index.constant {BM} : index
+  %cnt = index.constant {NT} : index
+  %tn = index.constant {TN} : index
+  %row_tiles = index.div %rows, %c256 : index
+  %out_tiles = index.div %n, %tn : index
+  kernel.launch.config workgroups(%row_tiles, %out_tiles, %c1) workgroup_size(%cnt, %c1, %c1) : index
+}} launch(%rows_arg: index, %k_arg: index, %n_arg: index, %x: buffer, %scales: buffer, {", ".join(f"%{w}: buffer, %{w}s: buffer" for w in weights)}, %y: buffer) {{
+  %rows = index.assume %rows_arg [range(%rows_arg, {BM}, 8192), multiple_of(%rows_arg, {BM})] : index
+  %k = index.assume %k_arg [range(%k_arg, {KS}, 65536), multiple_of(%k_arg, {KS})] : index
+  %n = index.assume %n_arg [range(%n_arg, {TN}, 262144), multiple_of(%n_arg, {TN})] : index
+  %origin = index.constant 0 : offset
+  %four = index.constant 4 : offset
+  %one_off = index.constant 1 : offset
+  %o0 = index.constant 0 : offset''')
+    for j in range(1, NB):
+        A(f"  %o{16 * j} = index.constant {16 * j} : offset")
+    for j in range(NB):
+        A(f"  %cj{j} = index.constant {j} : index")
+    A(f'''  %c0 = index.constant 0 : index
+  %c2 = index.constant 2 : index
+  %c16 = index.constant 16 : index
+  %c32 = index.constant 32 : index
+  %cks2 = index.constant {KS // 2} : index
+  %cnb16 = index.constant {NB * 16} : index
+  %cks32 = index.constant {KS // 32} : index
+  %cnb = index.constant {NB} : index
+  %c128 = index.constant {KS} : index
+  %c1 = index.constant 1 : index
+  %c256 = index.constant {BM} : index
+  %tn = index.constant {TN} : index
+  %row_tile_count = index.div %rows, %c256 : index
+  %out_tile_count = index.div %n, %tn : index
+  %row_group_id = kernel.workgroup.id<x> : index
+  %out_group_id = kernel.workgroup.id<y> : index
+  %row_group = index.assume %row_group_id [lt(%row_group_id, %row_tile_count)] : index
+  %out_group = index.assume %out_group_id [lt(%out_group_id, %out_tile_count)] : index
+  %workitem_id = kernel.workitem.id<x> : index
+  %workitem = index.assume %workitem_id [range(%workitem_id, 0, {NT - 1})] : index
+  %subgroup = kernel.subgroup.id : index
+  %bounded_subgroup = index.assume %subgroup [range(%subgroup, 0, {NT // 32 - 1})] : index
+  %cnwv = index.constant {NWV} : index
+  %is_mma = index.cmp ult, %bounded_subgroup, %cnwv : index
+  %is_prod = index.cmp uge, %bounded_subgroup, %cnwv : index
+  %cnwv1 = index.constant {NWV - 1} : index
+  %msub_v = index.min %bounded_subgroup, %cnwv1 : index
+  %msub = index.assume %msub_v [range(%msub_v, 0, {NWV - 1})] : index
+  %cwc = index.constant {WC} : index
+  %cwr = index.constant {16 * RF} : index
+  %wave_row_group = index.div %msub, %cwc : index
+  %wave_col_group = index.rem %msub, %cwc : index
+  %wave_row_value = index.mul %wave_row_group, %cwr : index
+  %wave_row = index.assume %wave_row_value [range(%wave_row_value, 0, {BM - 16 * RF})] : index
+  %wave_cols = index.constant {16 * cfr} : index
+  %wave_col_value = index.mul %wave_col_group, %wave_cols : index
+  %wave_col = index.assume %wave_col_value [range(%wave_col_value, 0, {TN - 16 * cfr})] : index''')
+    for r in range(1, RF):
+        A(f"  %wave_row{r}_c = index.constant {16 * r} : index\n  %wave_row{r} = index.add %wave_row, %wave_row{r}_c : index")
+    A(f'''  %row_origin = index.mul %row_group, %c256 : index
+  %out_origin = index.mul %out_group, %tn : index
+  %blocks = index.div %k, %c32 : index
+  %k_half = index.div %k, %c2 : index
+  %k_half_off = index.scale %k_half, %one_off : index, offset -> offset
+  %ks_off = index.scale %blocks, %one_off : index, offset -> offset
+  %s_view = buffer.view %scales[%origin] : buffer -> view<[%rows]x2xf32>
+  %w_bytes = index.constant {WB} : offset
+  %w_alloc = index.constant {2 * WB} : offset
+  %w_stage = buffer.alloca<workgroup> align(16) %w_alloc : buffer
+  %a_schema = encoding.define #encoding.operand<element_format=f8e4m3, payload_elements=8, payload_registers=2> : encoding<schema>
+  %b_schema = encoding.define #encoding.operand<element_format=f8e5m2, payload_elements=8, payload_registers=2> : encoding<schema>
+  %a_layout = encoding.layout.dense : encoding<layout>
+  %b_layout = encoding.layout.strided [1, {PX}] : encoding<layout>
+  %a_storage = encoding.define #encoding.storage {{layout = %a_layout : encoding<layout>, schema = %a_schema : encoding<schema>}} : encoding<storage>
+  %b_storage = encoding.define #encoding.storage {{layout = %b_layout : encoding<layout>, schema = %b_schema : encoding<schema>}} : encoding<storage>
+  %x_g8 = buffer.view %x[%origin] : buffer -> view<[%rows]x[%k]xf8E4M3, %a_storage>
+  // producer thread p = workitem mod {NPT} decodes weight row p / {HALVES}, columns (p mod {HALVES}) * {KS // 2} of each step
+  %cnpt = index.constant {NPT} : index
+  %pitem = index.rem %workitem, %cnpt : index
+  %chalves = index.constant {HALVES} : index
+  %stage_row = index.div %pitem, %chalves : index
+  %stage_half = index.rem %pitem, %chalves : index
+  %stage_col = index.mul %stage_half, %cks2 : index''')
+    if two_w:
+        A(f'''  %half_tw = index.constant {TN} : index
+  %w_is_up = index.cmp uge, %stage_row, %half_tw : index
+  %w_local_up = index.sub %stage_row, %half_tw : index
+  %w_local = scf.select %w_is_up, %w_local_up, %stage_row : index
+  %w_out_row_value = index.add %out_origin, %w_local : index
+  %wsel = scf.select %w_is_up, %w2, %w : buffer
+  %wssel = scf.select %w_is_up, %w2s, %ws : buffer''')
+    else:
+        A("  %w_out_row_value = index.add %out_origin, %stage_row : index")
+    A(f'''  %w_out_row = index.assume %w_out_row_value [lt(%w_out_row_value, %n)] : index
+  %w_row_origin = index.scale %w_out_row, %k_half_off : index, offset -> offset
+  %ws_row_origin = index.scale %w_out_row, %ks_off : index, offset -> offset
+  %zero8 = vector.constant 0.0 : vector<8xf32>
+  %init = vector.fragment<init> %zero8 shape [%c16, %c16] : vector<8xf32>
+  %k_steps = index.div %k, %c128 : index
+  %k_steps_m1 = index.sub %k_steps, %c1 : index
+  %c107 = scalar.constant 107 : i32
+  %cs2 = scalar.constant 2 : i32
+  %ones = scalar.constant 16843009 : i32
+  %lo_mask = scalar.constant -256 : i32
+  %tab_lo_c = scalar.constant 235669504 : i32
+  %tab_hi_c = scalar.constant 370414096 : i32
+  %m7 = vector.constant 7 : vector<4xi8>
+  %m80i = vector.constant -2139062144 : vector<1xi32>
+  %m4i = vector.constant 4 : vector<1xi32>
+  %c15 = index.constant 15 : index
+  %rows_m15 = index.sub %rows, %c15 : index''')
+    for r in range(RF):
+        A(f"  %xrow{r}_v = index.add %row_origin, {'%wave_row' if r == 0 else f'%wave_row{r}'} : index\n  %xrow{r} = index.assume %xrow{r}_v [lt(%xrow{r}_v, %rows_m15)] : index")
+    if lvs:   # lane-vector operand loads (see gemm_mxfp4s_f8_m256 lv), the next K pair's loads issued before this pair's WMMAs
+        A("""  %lv_c32 = index.constant 32 : index
+  %lv_lane = index.rem %workitem, %lv_c32 : index
+  %lv_l16 = index.rem %lv_lane, %c16 : index
+  %lv_h = index.div %lv_lane, %c16 : index
+  %lv_h16 = index.mul %lv_h, %c16 : index""")
+        for r in range(RF):
+            A(f"""  %lv_xr{r} = index.add %xrow{r}, %lv_l16 : index
+  %lv_xm{r} = index.mul %lv_xr{r}, %k : index
+  %lv_xo{r}_i = index.add %lv_xm{r}, %lv_h16 : index
+  %lv_xo{r} = index.scale %lv_xo{r}_i, %one_off : index, offset -> offset""")
+        for p in range(KS // 32):
+            A(f"  %lv_kc{p} = index.constant {32 * p} : index\n  %lv_bk{p} = index.add %lv_h16, %lv_kc{p} : index")
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                A(f"  %lv_bn{wi}{c}_c = index.constant {wi * TN + c * 16} : index\n  %lv_bn{wi}{c}_a = index.add %wave_col, %lv_bn{wi}{c}_c : index\n  %lv_bn{wi}{c} = index.add %lv_bn{wi}{c}_a, %lv_l16 : index")
+    wsrc = "%wsel" if two_w else "%w"
+    ssrc = "%wssel" if two_w else "%ws"
+
+    def loads(sfx, kstep, ind):
+        t = [f"%wk{sfx}_a = index.mul {kstep}, %cks2 : index", f"%wk{sfx}_b = index.mul %stage_half, %cnb16 : index",
+             f"%wk{sfx} = index.add %wk{sfx}_a, %wk{sfx}_b : index", f"%wk{sfx}_o = index.scale %wk{sfx}, %one_off : index, offset -> offset",
+             f"%wkb{sfx} = index.add %w_row_origin, %wk{sfx}_o : offset", f"%sb{sfx}_a = index.mul {kstep}, %cks32 : index",
+             f"%sb{sfx}_b = index.mul %stage_half, %cnb : index", f"%sb{sfx} = index.add %sb{sfx}_a, %sb{sfx}_b : index"]
+        for j in range(NB):
+            t += [f"%wqo{j}{sfx} = index.add %wkb{sfx}, %o{16 * j} : offset",
+                  f"%wq{j}{sfx}_v = buffer.view {wsrc}[%wqo{j}{sfx}] : buffer -> view<4xi32>",
+                  f"%wq{j}{sfx} = vector.load %wq{j}{sfx}_v[0] : view<4xi32> -> vector<4xi32>",
+                  f"%sbj{j}{sfx} = index.add %sb{sfx}, %cj{j} : index",
+                  f"%sbo{j}{sfx}_a = index.scale %sbj{j}{sfx}, %one_off : index, offset -> offset",
+                  f"%sbo{j}{sfx} = index.add %ws_row_origin, %sbo{j}{sfx}_a : offset",
+                  f"%we{j}{sfx}_v = buffer.view {ssrc}[%sbo{j}{sfx}] : buffer -> view<1xi8>",
+                  f"%we{j}{sfx}_b = view.load %we{j}{sfx}_v[0] : view<1xi8> -> i8",
+                  f"%we{j}{sfx} = scalar.extui %we{j}{sfx}_b : i8 to i32"]
+        return "\n".join(ind + x for x in t)
+
+    # prologue: every thread loads steps 0 and 1 (the WMMA waves' copies are unused); the producers decode step 0 into buffer 0
+    A(loads("p0", "%c0", "  "))
+    A("  %k_one = index.min %c1, %k_steps_m1 : index")
+    A(loads("p1", "%k_one", "  "))
+    A(f"  %w_buf0 = buffer.view %w_stage[%origin] : buffer -> view<{TW}x{PX}xi8>\n  scf.if %is_prod {{")
+    for j in range(NB):
+        A(_bf8_decode_text(j, f"%wq{j}p0", f"%we{j}p0", "%stage_row", "%stage_col", "%w_buf0", TW, PX, order, "_pro"))
+    A("  }\n  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+    carried = []
+    for j in range(NB):
+        carried += [(f"%cr_q{j}", f"%wq{j}p1", "vector<4xi32>"), (f"%cr_e{j}", f"%we{j}p1", "i32")]
+    acc_t = ", ".join("vector<8xf32>" for _ in accs)
+    car_t = ", ".join(c[2] for c in carried)
+    A("  " + ", ".join(f"%o{a}" for a in accs) + ", " + ", ".join(f"%unused_{i}" for i in range(len(carried))) +
+      " = scf.for %step = [%c0 to %k_steps step %c1](" + ", ".join(f"%i{a} = %init : vector<8xf32>" for a in accs) + ", " +
+      ", ".join(f"{c[0]} = {c[1]} : {c[2]}" for c in carried) + f") -> ({acc_t}, {car_t}) {{")
+    A('''    %par = index.rem %step, %c2 : index
+    %npar = index.sub %c1, %par : index
+    %cur_off = index.scale %par, %w_bytes : index, offset -> offset
+    %nxt_off = index.scale %npar, %w_bytes : index, offset -> offset''')
+    A("    " + ", ".join(f"%f{a}" for a in accs) + ", " + ", ".join(f"%fc{i}" for i in range(len(carried))) + f" = scf.if %is_mma -> ({acc_t}, {car_t}) {{")
+    A(f"      %w_cur_f8 = buffer.view %w_stage[%cur_off] : buffer -> view<{PX}x{TW}xf8E5M2, %b_storage>\n      %kbase = index.mul %step, %c128 : index")
+    cur = {a: f"%i{a}" for a in accs}
+
+    def mma(kk):
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                for r in range(RF):
+                    a = f"{wi}r{r}c{c}"
+                    A(f"      %m{a}_{kk} = vector.mma %l{r}_{kk}, %rf{wi}{c}_{kk}, {cur[a]} : vector<2xi32>, vector<2xi32>, vector<8xf32>")
+                    cur[a] = f"%m{a}_{kk}"
+
+    def lv_loads(p):
+        for r in range(RF):
+            A(f"""      %lv_a{r}_{p} = vector.load %lv_xv{r}[%lv_kc{p}] : view<{KS}xi8> -> vector<16xi8>
+      %lv_aw{r}_{p} = vector.bitcast %lv_a{r}_{p} : vector<16xi8> to vector<4xi32>""")
+            for q in range(2):
+                A(f"""      %lv_ar{r}_{2 * p + q} = vector.slice %lv_aw{r}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
+      %l{r}_{2 * p + q} = vector.fragment<lhs> %lv_ar{r}_{2 * p + q} shape [%c16, %c16] using {{schema = %a_schema : encoding<schema>}} : vector<2xi32>""")
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                A(f"""      %lv_b{wi}{c}_{p} = vector.load %w_cur_st[%lv_bn{wi}{c}, %lv_bk{p}] : view<{TW}x{PX}xi8> -> vector<16xi8>
+      %lv_bw{wi}{c}_{p} = vector.bitcast %lv_b{wi}{c}_{p} : vector<16xi8> to vector<4xi32>""")
+                for q in range(2):
+                    A(f"""      %lv_br{wi}{c}_{2 * p + q} = vector.slice %lv_bw{wi}{c}_{p}[{2 * q}] : vector<4xi32> -> vector<2xi32>
+      %rf{wi}{c}_{2 * p + q} = vector.fragment<rhs> %lv_br{wi}{c}_{2 * p + q} shape [%c16, %c16] using {{schema = %b_schema : encoding<schema>}} : vector<2xi32>""")
+    if lvs:
+        A(f"      %w_cur_st = buffer.view %w_stage[%cur_off] : buffer -> view<{TW}x{PX}xi8>\n      %lv_kb = index.scale %kbase, %one_off : index, offset -> offset")
+        for r in range(RF):
+            A(f"      %lv_xp{r} = index.add %lv_xo{r}, %lv_kb : offset\n      %lv_xv{r} = buffer.view %x[%lv_xp{r}] : buffer -> view<{KS}xi8>")
+        lv_loads(0)
+        for p in range(KS // 32):
+            if p + 1 < KS // 32:
+                lv_loads(p + 1)
+            mma(2 * p)
+            mma(2 * p + 1)
+    for kk in range(0 if lvs else KS // 16):
+        A(f"      %fk{kk} = index.constant {kk * 16} : index\n      %kg{kk} = index.add %kbase, %fk{kk} : index")
+        for r in range(RF):
+            A(f"      %l{r}_{kk} = vector.fragment.load<lhs> %x_g8[%xrow{r}, %kg{kk}] shape [%c16, %c16] : view<[%rows]x[%k]xf8E4M3, %a_storage> -> vector<2xi32>")
+        for wi in range(len(weights)):
+            for c in range(cfr):
+                A(f'''      %wr{wi}{c}_{kk}_c = index.constant {wi * TN + c * 16} : index
+      %wr{wi}{c}_{kk} = index.add %wave_col, %wr{wi}{c}_{kk}_c : index
+      %rf{wi}{c}_{kk} = vector.fragment.load<rhs> %w_cur_f8[%fk{kk}, %wr{wi}{c}_{kk}] shape [%c16, %c16] : view<{PX}x{TW}xf8E5M2, %b_storage> -> vector<2xi32>''')
+        mma(kk)
+    A("      scf.yield " + ", ".join(cur[a] for a in accs) + ", " + ", ".join(c[0] for c in carried) + f" : {acc_t}, {car_t}\n    }} else {{")
+    A(f"      %w_nxt = buffer.view %w_stage[%nxt_off] : buffer -> view<{TW}x{PX}xi8>")
+    for j in range(NB):
+        A(_bf8_decode_text(j, f"%cr_q{j}", f"%cr_e{j}", "%stage_row", "%stage_col", "%w_nxt", TW, PX, order, "", ind="      "))
+    A("      %k_n2_raw = index.add %step, %c2 : index\n      %k_n2 = index.min %k_n2_raw, %k_steps_m1 : index")
+    A(loads("n", "%k_n2", "      "))
+    nxt = []
+    for j in range(NB):
+        nxt += [f"%wq{j}n", f"%we{j}n"]
+    A("      scf.yield " + ", ".join(f"%i{a}" for a in accs) + ", " + ", ".join(nxt) + f" : {acc_t}, {car_t}\n    }}")
+    A("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+    A("    scf.yield " + ", ".join(f"%f{a}" for a in accs) + ", " + ", ".join(f"%fc{i}" for i in range(len(carried))) + f" : {acc_t}, {car_t}\n  }}")
+    # epilogue (WMMA waves): rows scaled by scales[row, 1] through LDS (buffer 0 of the weight stage)
+    rowv = ["%wave_row"] + [f"%wave_row{r}" for r in range(1, RF)]
+    A(f'''  %cbm = index.constant {BM} : index
+  %mitem_v = index.rem %workitem, %cbm : index
+  %mitem = index.assume %mitem_v [range(%mitem_v, 0, {BM - 1})] : index
+  %inv_view = buffer.view %w_stage[%origin] : buffer -> view<{BM}x16xf32>
+  scf.if %is_mma {{
+    %inv_row_value = index.add %row_origin, %mitem : index
+    %inv_row = index.assume %inv_row_value [lt(%inv_row_value, %rows)] : index
+    %inverse = view.load %s_view[%inv_row, %c1] : view<[%rows]x2xf32> -> f32
+    %inverse16 = vector.splat %inverse : vector<16xf32>
+    vector.store %inverse16, %inv_view[%mitem, %c0] : vector<16xf32>, view<{BM}x16xf32>
+  }}
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  scf.if %is_mma {{''')
+    for r in range(RF):
+        A(f"    %inv{r} = vector.fragment.load<result> %inv_view[{rowv[r]}, %c0] shape [%c16, %c16] : view<{BM}x16xf32> -> vector<8xf32>")
+    A(f'''    %y_layout = encoding.layout.strided [%n, %c1] : encoding<layout>
+    %tile_first = index.madd %row_origin, %n, %out_origin : index
+    %tile_offset = index.scale %tile_first, %four : index, offset -> offset
+    %y_view = buffer.view %y[%tile_offset] : buffer -> view<{BM}x{TN}xf32, %y_layout>''')
+    for r in range(RF):
+        for c in range(cfr):
+            A(f"    %oc{r}{c}_c = index.constant {c * 16} : index\n    %oc{r}{c} = index.add %wave_col, %oc{r}{c}_c : index")
+            if two_w:
+                A(f'''    %g{r}{c} = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>
+    %u{r}{c} = vector.mulf %o1r{r}c{c}, %inv{r} : vector<8xf32>
+    %sg{r}{c} = vector.siluf<afn> %g{r}{c} : vector<8xf32>
+    %v{r}{c} = vector.mulf %sg{r}{c}, %u{r}{c} : vector<8xf32>''')
+            else:
+                A(f"    %v{r}{c} = vector.mulf %o0r{r}c{c}, %inv{r} : vector<8xf32>")
+            A(f"    vector.fragment.store<result> %v{r}{c}, %y_view[{rowv[r]}, %oc{r}{c}] shape [%c16, %c16] : vector<8xf32>, view<{BM}x{TN}xf32, %y_layout>")
+    A("  }\n  kernel.return\n}\n")
     return "\n".join(L)
 
 

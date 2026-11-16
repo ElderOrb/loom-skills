@@ -1215,8 +1215,8 @@ if __name__ == "__main__":
                 if fmt == "mxfp4s" and mode == "store":   # gfx12 fp8 WMMA kernels (gen_mxfp4s.fuse_mxfp4s_f8 launches them): the plain GEMM and its fused SwiGLU pair
                     import gen_mxfp4s as _mx
                     if _mx.f8_enabled():
-                        out.append(post(_mx.gemm_mxfp4s_f8_m256("store", PREFIX)))
-                        out.append(post(_mx.gemm_mxfp4s_f8_m256("swiglu", PREFIX)))
+                        out.append(post(_mx.gemm_mxfp4s_f8_m256("store", PREFIX, **_mx.f8_kernel_kwargs("store"))))
+                        out.append(post(_mx.gemm_mxfp4s_f8_m256("swiglu", PREFIX, **_mx.f8_kernel_kwargs("swiglu"))))
             else:
                 out.append(_rdna4.with_twins(post(gemm_big(fmt, mode))))
                 if on256:

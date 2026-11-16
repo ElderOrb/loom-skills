@@ -108,6 +108,38 @@ class KernelTests(unittest.TestCase):
                 i = blob.find(b".private_segment_fixed_size")
                 self.assertEqual(blob[i + len(b".private_segment_fixed_size")], 0, f"{mode} {kw} spills to scratch")
 
+    @unittest.skipUnless(loom_compile(), "loom-compile not available")
+    def test_kernel_designs_compile_for_gfx1201_without_spills(self):
+        """every design of choice prefill.gemm.mxfp4s_f8_kernel (gen_mxfp4s.F8_KERNELS), both modes and both nibble orders, compiles without scratch"""
+        for name, kws in R.F8_KERNELS.items():
+            for mode, kw in zip(("store", "swiglu"), kws):
+                for order in ("pairs", "split16"):
+                    with tempfile.TemporaryDirectory() as d:
+                        f = Path(d) / "t.loom"
+                        f.write_text(HEADER + R.gemm_mxfp4s_f8_m256(mode, order=order, **kw))
+                        out = Path(d) / "o.hsaco"
+                        r = subprocess.run([loom_compile(), str(f), "--format=amdgpu-hsaco", "--target=amdgpu:gfx1201", f"--output={out}"], capture_output=True, text=True)
+                        self.assertEqual(r.returncode, 0, (name, mode, r.stderr[:1500]))
+                        blob = out.read_bytes()
+                        i = blob.find(b".private_segment_fixed_size")
+                        self.assertEqual(blob[i + len(b".private_segment_fixed_size")], 0, f"{name} {mode} spills to scratch")
+
+    def test_kernel_design_choice(self):
+        """GEMM_MXFP4S_F8_KERNEL selects the generator kwargs; unset = v1 = the #879 kernel; lv keeps the 128 WMMA per step and loads 16 bytes per lane"""
+        old = os.environ.pop("GEMM_MXFP4S_F8_KERNEL", None)
+        try:
+            self.assertEqual(R.f8_kernel_kwargs("store"), {})
+            os.environ["GEMM_MXFP4S_F8_KERNEL"] = "lv"
+            self.assertEqual(R.f8_kernel_kwargs("swiglu"), {"lv": True, "rf": 4})
+            for mode in ("store", "swiglu"):
+                t = R.gemm_mxfp4s_f8_m256(mode, **R.f8_kernel_kwargs(mode))
+                self.assertEqual(t.count("vector.mma "), 16 * 8)
+                self.assertNotIn("vector.fragment.load<", t.split("scf.for")[1].split("scf.yield")[0])
+        finally:
+            os.environ.pop("GEMM_MXFP4S_F8_KERNEL", None)
+            if old is not None:
+                os.environ["GEMM_MXFP4S_F8_KERNEL"] = old
+
     def test_default_kernel_is_independent_of_the_sweep_options(self):
         """the options default to the kernel of #879: the explicit defaults produce the same text"""
         for mode in ("store", "swiglu"):
