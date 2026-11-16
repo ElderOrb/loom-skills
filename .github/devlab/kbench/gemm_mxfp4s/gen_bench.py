@@ -78,12 +78,14 @@ GEN = {"staged": {"a_direct": False, "rf": 4}, "adirect": {"a_direct": True, "rf
        # ogemm round 1: lane-vector operand loads (one 16-byte load per lane = two K substeps, A from global with immediate offsets, B ds_load_b128), swiglu at rf 4
        "lv": {"lv": True, "sw": {"rf": 4}}, "lvpf1": {"lv": True, "lvpf": 1, "sw": {"rf": 4}}, "lvpf2": {"lv": True, "lvpf": 2, "sw": {"rf": 4}},
        "lvk2": {"lv": True, "kmult": 2, "sw": {"rf": 4}}, "lvsw2": {"lv": True, "lvpf": 1, "sw": {"rf": 4, "lvpf": 2}},
-       "lvs": {"lv": True, "lvs": True, "sw": {"rf": 4}}, "lvk2s": {"lv": True, "lvs": True, "kmult": 2, "sw": {"rf": 4}}}   # variants that are generator parameters (the levers), not text ablations
+       "lvs": {"lv": True, "lvs": True, "sw": {"rf": 4}}, "lvk2s": {"lv": True, "lvs": True, "kmult": 2, "sw": {"rf": 4}},
+       # ogemm round 3: wave-specialized (4 producer waves decode the next step into a second LDS buffer while 8 WMMA waves multiply; one barrier per step)
+       "ws": {"ws": 4}, "wsr4": {"ws": 4, "sw": {"rf": 4}}}   # variants that are generator parameters (the levers), not text ablations
 
 
 # the variants whose results are checked against float64 (the others are timing-only levers that lost or tied; hrx-loom 0.1.0 fails to verify a module of ~65k lines
 # ("view type references encoding value ... not defined at this point", notes/sdk_blockers.md), so the checked set stays at ~60 cases)
-TESTED = ["staged", "adirect", "adr2", "adn128", "t128x256", "swp", "pfa2", "yf16", "lv", "lvpf1", "lvs", "lvk2s"]
+TESTED = ["staged", "adirect", "adr2", "adn128", "t128x256", "swp", "pfa2", "yf16", "lv", "lvs", "ws", "wsr4"]
 
 
 def ytype(variant):
