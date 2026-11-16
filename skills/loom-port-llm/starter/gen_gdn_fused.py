@@ -20,6 +20,8 @@ Workspace slot of chunk c of span s: first_s / 32 + s + c (distinct over the epo
 Padding rows of a chunk (beyond the span's end) have q = k = v = 0, beta = 0 and g = 0, so W, U, P, Q, K^T are zero there and change nothing.
 """
 
+import re
+
 CN = 32
 
 
@@ -52,12 +54,13 @@ def _region_text(G):
     return "\n".join(out)
 
 
-def _blk(name, idx, nbytes, shape, ind="  "):
-    """A view of one (slot, head) block of region `name`: `idx` = slot * heads + head (index SSA)."""
-    return (f"{ind}%bo_{name}_c = index.constant {nbytes} : offset\n"
-            f"{ind}%bo_{name}_r = index.scale {idx}, %bo_{name}_c : index, offset -> offset\n"
-            f"{ind}%bo_{name} = index.add %base_{name}, %bo_{name}_r : offset\n"
-            f"{ind}%v_{name} = buffer.view %work[%bo_{name}] : buffer -> view<{shape}>")
+def _blk(name, idx, nbytes, shape, ind="  ", sfx=""):
+    """A view %v_<name><sfx> of one (slot, head) block of region `name`: `idx` = slot * heads + head (index SSA)."""
+    n = name + sfx
+    return (f"{ind}%bo_{n}_c = index.constant {nbytes} : offset\n"
+            f"{ind}%bo_{n}_r = index.scale {idx}, %bo_{n}_c : index, offset -> offset\n"
+            f"{ind}%bo_{n} = index.add %base_{name}, %bo_{n}_r : offset\n"
+            f"{ind}%v_{n} = buffer.view %work[%bo_{n}] : buffer -> view<{shape}>")
 
 
 def _head_ids(G, grouped, ratio):
@@ -68,7 +71,8 @@ def _head_ids(G, grouped, ratio):
     return kh
 
 
-def phase_a(G, NG, LB, eps, grouped, ratio, target=True):
+def phase_a(G, NG, LB, eps, grouped, ratio, target=True, abl=()):
+    """abl: kbench timing ablations (wrong results): nosolve (no T solve), nostore (no workspace stores), noconv (no conv taps)."""
     HK, HV, DK, DV, C, K, SB = G["HK"], G["HV"], G["DK"], G["DV"], G["C"], G["K"], G["state_bytes"]
     assert DK == 128 and DV == 128 and K == 4, "g_gdn_fa_rdna4: 128 x 128 heads, conv kernel 4"
     NT = CN // 16
@@ -331,10 +335,19 @@ def phase_a(G, NG, LB, eps, grouped, ratio, target=True):
                 prev = f"%{nm_}a{mt}_{kt}"
             ul = ", %ut_l" if nm_ == "u" else ""
             P(f"  vector.fragment.store<result> {prev}, {dst}[{ci(16 * mt)}, %wcol] {SH} : {vec8}, view<{CN}x{DV}xf16{ul}>")
+    if "nosolve" in abl:
+        a = out.index("  scf.if %tcn {", out.index("    %cc = index.assume %thread [range(%thread, 0, 31)] : index") - 1)
+        b = out.index("  %wcol = index.mul %wave, %k16 : index")
+        out[a:b] = ["  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)"]
+    if "nostore" in abl:
+        out = [l for l in out if not re.search(r"(vector\.store|view\.store|vector\.fragment\.store<result>) [^\n]*%v_(w|u|p|g|q|kt)\[", l)]
+    if "noconv" in abl:
+        out = [re.sub(r"scalar\.fmaf %w[ab]\d+, (%x[ab](m\d|\d+_r)), (%\w+) : f32", r"scalar.addf \1, \3 : f32", l) for l in out]
     body = "\n".join(out)
     tgt = "target(@rdna4) " if target else ""
+    kname = "g_gdn_fa_rdna4" + "".join("_" + x for x in abl)
     head = f"""
-kernel.def {tgt}export("g_gdn_fa_rdna4") @g_gdn_fa_rdna4(%tokens: index, %spans: index) {{
+kernel.def {tgt}export("{kname}") @{kname}(%tokens: index, %spans: index) {{
   %c31 = index.constant {CN - 1} : index
   %c32 = index.constant {CN} : index
   %heads = index.constant {HV} : index
@@ -458,7 +471,8 @@ kernel.def {tgt}export("g_gdn_fa_rdna4") @g_gdn_fa_rdna4(%tokens: index, %spans:
     return head + body + "\n  }\n  kernel.return\n}\n"
 
 
-def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", target=True):
+def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", target=True, abl=()):
+    """abl: kbench timing ablations: nonorm (no norm-gate epilogue)."""
     HK, HV, DK, DV, C, K, VD, SB = G["HK"], G["HV"], G["DK"], G["DV"], G["C"], G["K"], G["VD"], G["state_bytes"]
     NS = HV * DV * DK
     NT = CN // 16
@@ -472,18 +486,58 @@ def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", targe
     def ci(n):
         consts.add(n)
         return f"%k{n}"
+    WP, TP = DV + 8, CN + 8   # stage pitches (f16): the 32 x 128 W / Q rows, the 128 x 32 K^T / U^T and 32 x 32 P rows
+    # per thread: W, Q, K^T, U^T pieces t and t + 256 (8 f16), P piece t < 128, gc piece t < 8 (4 f32)
+    PIECES = [("w", "%svh", CN * DV * 2, f"{CN}x{DV}xf16", f"{CN}x{WP}xf16", 16, 2), ("q", "%skh", CN * DK * 2, f"{CN}x{DK}xf16", f"{CN}x{WP}xf16", 16, 2),
+              ("kt", "%skh", DK * CN * 2, f"{DK}x{CN}xf16", f"{DK}x{TP}xf16", 4, 2), ("u", "%svh", CN * DV * 2, f"{DV}x{CN}xf16", f"{DV}x{TP}xf16", 4, 2),
+              ("p", "%svh", CN * CN * 2, f"{CN}x{CN}xf16", f"{CN}x{TP}xf16", 4, 1)]
+
+    def prefetch(chunk, ind):
+        sx = "_" + chunk.strip("%")
+        L = [f"{ind}%pslot{sx} = index.add %slot0, {chunk} : index", f"{ind}%psv{sx}_v = index.mul %pslot{sx}, {ci(HV)} : index",
+             f"{ind}%svh{sx} = index.add %psv{sx}_v, %vh : index", f"{ind}%psk{sx}_v = index.mul %pslot{sx}, {ci(HK)} : index",
+             f"{ind}%skh{sx} = index.add %psk{sx}_v, %kh : index"]
+        L.append(_blk("g", "%svh" + sx, CN * 4, f"{CN}xf32", ind, sx))
+        for nm_, idx, nb, gshp, _, per_row, reps in PIECES:
+            L.append(_blk(nm_, idx + sx, nb, gshp, ind, sx))
+            for r in range(reps):
+                pc = f"%pc_{nm_}{r}{sx}"
+                L.append(f"{ind}{pc}_v = index.add %thread, {ci(256 * r)} : index")
+                L.append(f"{ind}{pc} = index.assume {pc}_v [range({pc}_v, 0, {256 * reps - 1})] : index")
+                L.append(f"{ind}%prow_{nm_}{r}{sx} = index.div {pc}, {ci(per_row)} : index")
+                L.append(f"{ind}%pcq_{nm_}{r}{sx} = index.rem {pc}, {ci(per_row)} : index")
+                L.append(f"{ind}%pcol_{nm_}{r}{sx} = index.mul %pcq_{nm_}{r}{sx}, %k8 : index")
+                ld = f"vector.load %v_{nm_}{sx}[%prow_{nm_}{r}{sx}, %pcol_{nm_}{r}{sx}] : view<{gshp}> -> vector<8xf16>"
+                if nm_ == "p":
+                    L += [f"{ind}%pf_{nm_}{r}{sx} = scf.if %t128 -> (vector<8xf16>) {{", f"{ind}  %pl_{nm_}{r}{sx} = {ld}", f"{ind}  scf.yield %pl_{nm_}{r}{sx} : vector<8xf16>",
+                          f"{ind}}} else {{", f"{ind}  scf.yield %zero8h : vector<8xf16>", f"{ind}}}"]
+                else:
+                    L.append(f"{ind}%pf_{nm_}{r}{sx} = {ld}")
+        L += [f"{ind}%pf_g{sx} = scf.if %t8 -> (vector<4xf32>) {{", f"{ind}  %pl_g{sx} = vector.load %v_g{sx}[%t4o] : view<{CN}xf32> -> vector<4xf32>",
+              f"{ind}  scf.yield %pl_g{sx} : vector<4xf32>", f"{ind}}} else {{", f"{ind}  scf.yield %zero4 : vector<4xf32>", f"{ind}}}"]
+        return L
+
+    def stage_stores(ind, sx):
+        L = []
+        for nm_, idx, nb, gshp, sshp, per_row, reps in PIECES:
+            for r in range(reps):
+                st = f"vector.store %pf_{nm_}{r}{sx}, %s_{nm_}[%prow_{nm_}{r}{sx}, %pcol_{nm_}{r}{sx}] : vector<8xf16>, view<{sshp}>"
+                L += ([f"{ind}scf.if %t128 {{", f"{ind}  {st}", f"{ind}}}"] if nm_ == "p" else [f"{ind}{st}"])
+        L += [f"{ind}scf.if %t8 {{", f"{ind}  vector.store %pf_g{sx}, %s_g[%t4o] : vector<4xf32>, view<{CN}xf32>", f"{ind}}}"]
+        return L
     P("    %c0tok = index.mul %ci, %k32 : index")
     P("    %rem = index.sub %length, %c0tok : index")
     P("    %m = index.min %rem, %k32 : index")
     P("    %tok0 = index.add %first, %c0tok : index")
-    P("    %slot = index.add %slot0, %ci : index")
-    P(f"    %sv_v = index.mul %slot, {ci(HV)} : index")
-    P("    %svh = index.add %sv_v, %vh : index")
-    P(f"    %sk_v = index.mul %slot, {ci(HK)} : index")
-    P("    %skh = index.add %sk_v, %kh : index")
-    for nm_, idx, nb, shp in (("w", "%svh", CN * DV * 2, f"{CN}x{DV}xf16"), ("u", "%svh", CN * DV * 2, f"{DV}x{CN}xf16"), ("p", "%svh", CN * CN * 2, f"{CN}x{CN}xf16"),
-                              ("g", "%svh", CN * 4, f"{CN}xf32"), ("q", "%skh", CN * DK * 2, f"{CN}x{DK}xf16"), ("kt", "%skh", DK * CN * 2, f"{DK}x{CN}xf16")):
-        P(_blk(nm_, idx, nb, shp, "    "))
+    # z of this lane's norm rows (independent of the chain: in flight during it)
+    for rr in range(4):
+        P(f"    %nr{rr}_a = index.mul %wave, %k4 : index")
+        P(f"    %nr{rr}_b = index.add %nr{rr}_a, {ci(rr)} : index")
+        P(f"    %nr{rr} = index.assume %nr{rr}_b [range(%nr{rr}_b, 0, {CN - 1})] : index")
+        P(f"    %olive{rr} = index.cmp ult, %nr{rr}, %m : index")
+        P(f"    %otok{rr}_a = index.add %tok0, %nr{rr} : index")
+        P(f"    %otok{rr}_c = scf.select %olive{rr}, %otok{rr}_a, %tok0 : index")
+        P(f"    %otok{rr} = index.assume %otok{rr}_c [lt(%otok{rr}_c, %tokens)] : index")
     for kb in range(8):
         P(f"    %sh{kb} = vector.fptrunc %s{kb} : {vec8} to vector<8xf16>")
         P(f"    %sf{kb} = vector.fragment<rhs> %sh{kb} {SH} : vector<8xf16>")
@@ -499,18 +553,18 @@ def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", targe
             P(f"    %wrow{mt} = index.assume %wrow{mt}_v [range(%wrow{mt}_v, 0, {CN - 16})] : index")
         wr = f"%wrow{mt}" if mt else ci(0)
         for kb in range(8):
-            P(f"    %wl{mt}_{kb} = vector.fragment.load<lhs> %v_w[{wr}, {ci(16 * kb)}] {SH} : view<{CN}x{DV}xf16> -> vector<8xf16>")
+            P(f"    %wl{mt}_{kb} = vector.fragment.load<lhs> %s_w[{wr}, {ci(16 * kb)}] {SH} : view<{CN}x{WP}xf16> -> vector<8xf16>")
             P(f"    %ws{mt}_{kb} = vector.mma %wl{mt}_{kb}, %sf{kb}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             prev = f"%ws{mt}_{kb}"
         P(f"    %ri{mt}_v = index.add {ci(16 * mt)}, %lane_h8 : index")
         P(f"    %ri{mt} = index.assume %ri{mt}_v [range(%ri{mt}_v, 0, {CN - 8})] : index")
-        P(f"    %uh{mt} = vector.load %v_u[%dv, %ri{mt}] : view<{DV}x{CN}xf16> -> vector<8xf16>")
+        P(f"    %uh{mt} = vector.load %s_u[%dv, %ri{mt}] : view<{DV}x{TP}xf16> -> vector<8xf16>")
         P(f"    %uv{mt} = vector.extf %uh{mt} : vector<8xf16> to {vec8}")
         P(f"    %d{mt} = vector.subf %uv{mt}, {prev} : {vec8}")
         P(f"    %dh{mt} = vector.fptrunc %d{mt} : {vec8} to vector<8xf16>")
         P(f"    %df{mt} = vector.fragment<rhs> %dh{mt} {SH} : vector<8xf16>")
-        P(f"    %gcv{mt} = vector.load %v_g[%ri{mt}] : view<{CN}xf32> -> {vec8}")
-    P(f"    %gl = view.load %v_g[%k{CN - 1}] : view<{CN}xf32> -> f32")
+        P(f"    %gcv{mt} = vector.load %s_g[%ri{mt}] : view<{CN}xf32> -> {vec8}")
+    P(f"    %gl = view.load %s_g[%k{CN - 1}] : view<{CN}xf32> -> f32")
     P(f"    %glv = vector.splat %gl : {vec8}")
     # O = exp(gc) (Q S) + P d; the Q loads take a run-time-zero term of d (W S and its loads first: register pressure)
     P("    %dz_e = vector.extract %d0[0] : vector<8xf32> -> f32")
@@ -529,14 +583,14 @@ def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", targe
         P(f"    %qrow{mt} = index.assume %qrow{mt}_v [range(%qrow{mt}_v, 0, {CN - 16})] : index")
         prev = "%init"
         for kb in range(8):
-            P(f"    %ql{mt}_{kb} = vector.fragment.load<lhs> %v_q[%qrow{mt}, {ci(16 * kb)}] {SH} : view<{CN}x{DK}xf16> -> vector<8xf16>")
+            P(f"    %ql{mt}_{kb} = vector.fragment.load<lhs> %s_q[%qrow{mt}, {ci(16 * kb)}] {SH} : view<{CN}x{WP}xf16> -> vector<8xf16>")
             P(f"    %qs{mt}_{kb} = vector.mma %ql{mt}_{kb}, %sf{kb}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             prev = f"%qs{mt}_{kb}"
         P(f"    %egc{mt} = vector.expf<afn> %gcv{mt} : {vec8}")
         P(f"    %oi{mt} = vector.mulf %egc{mt}, {prev} : {vec8}")
         prev = f"%oi{mt}"
         for kt in range(mt + 1):
-            P(f"    %pl{mt}_{kt} = vector.fragment.load<lhs> %v_p[%qrow{mt}, {ci(16 * kt)}] {SH} : view<{CN}x{CN}xf16> -> vector<8xf16>")
+            P(f"    %pl{mt}_{kt} = vector.fragment.load<lhs> %s_p[%qrow{mt}, {ci(16 * kt)}] {SH} : view<{CN}x{TP}xf16> -> vector<8xf16>")
             P(f"    %oo{mt}_{kt} = vector.mma %pl{mt}_{kt}, %df{kt}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             prev = f"%oo{mt}_{kt}"
         P(f"    vector.fragment.store<result> {prev}, %o_lds[{ci(16 * mt)}, %wcol] {SH} : {vec8}, view<{CN}x{OS}xf32>")
@@ -552,6 +606,16 @@ def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", targe
     P("    %dz2_b = scalar.bitcast %dz2_e : f32 to i32")
     P("    %dz2_i = scalar.andi %dz2_b, %zero_i32 : i32")
     P("    %dz2 = index.cast %dz2_i : i32 to index")
+    P("    %cn_a = index.add %ci, %k1 : index")
+    P("    %cn_last = index.sub %nchunks, %k1 : index")
+    P("    %cn_b = index.min %cn_a, %cn_last : index")
+    P("    %cn = index.add %cn_b, %dz2 : index")
+    out.extend(prefetch("%cn", "    "))
+    for rr in range(4):   # z of this lane's norm rows: in flight during the S update (after O: not over the W S / Q S chains)
+        P(f"    %ztok{rr} = index.add %otok{rr}, %dz2 : index")
+        P(f"    %zta{rr} = index.assume %ztok{rr} [range(%ztok{rr}, 0, 8191)] : index")
+        P(f"    %ztb{rr} = index.assume %zta{rr} [lt(%zta{rr}, %tokens)] : index")
+        P(f"    %zv{rr} = vector.load %z_view[%ztb{rr}, %zcol] : view<[%tokens]x{VD}xf32> -> vector<4xf32>")
     P(f"    %eg_last = scalar.expf<afn> %gl : f32")
     P(f"    %eg_v = vector.splat %eg_last : {vec8}")
     for kb in range(8):
@@ -560,18 +624,22 @@ def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", targe
         prev = f"%sd{kb}"
         for kt in range(NT):
             if kt == 0:
-                P(f"    %ktr{kb}_v = index.add {ci(16 * kb)}, %dz2 : index")
+                if kb:   # K^T fragments of one key block in flight: the next block's loads after the previous block's products
+                    P(f"    %dzk{kb}_e = vector.extract %un{kb - 1}_{NT - 1}[0] : vector<8xf32> -> f32")
+                    P(f"    %dzk{kb}_b = scalar.bitcast %dzk{kb}_e : f32 to i32")
+                    P(f"    %dzk{kb}_i = scalar.andi %dzk{kb}_b, %zero_i32 : i32")
+                    P(f"    %dzk{kb}_x = index.cast %dzk{kb}_i : i32 to index")
+                    P(f"    %dzk{kb} = index.add %dz2, %dzk{kb}_x : index")
+                P(f"    %ktr{kb}_v = index.add {ci(16 * kb)}, {'%dzk' + str(kb) if kb else '%dz2'} : index")
                 P(f"    %ktr{kb} = index.assume %ktr{kb}_v [range(%ktr{kb}_v, 0, {DK - 16})] : index")
-            P(f"    %ul{kb}_{kt} = vector.fragment.load<lhs> %v_kt[%ktr{kb}, {ci(16 * kt)}] {SH} : view<{DK}x{CN}xf16> -> vector<8xf16>")
+            P(f"    %ul{kb}_{kt} = vector.fragment.load<lhs> %s_kt[%ktr{kb}, {ci(16 * kt)}] {SH} : view<{DK}x{TP}xf16> -> vector<8xf16>")
             P(f"    %un{kb}_{kt} = vector.mma %ul{kb}_{kt}, %dfe{kt}, {prev} : vector<8xf16>, vector<8xf16>, {vec8}")
             prev = f"%un{kb}_{kt}"
         P(f"    %sn{kb} = vector.addf {prev}, %zero8 : {vec8}")
     P("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+    out.extend(stage_stores("    ", "_cn"))
     # norm-gate epilogue: wave w takes rows 4 w .. 4 w + 3, lane l value columns 4 l .. 4 l + 3
     for rr in range(4):
-        P(f"    %nr{rr}_a = index.mul %wave, %k4 : index")
-        P(f"    %nr{rr}_b = index.add %nr{rr}_a, {ci(rr)} : index")
-        P(f"    %nr{rr} = index.assume %nr{rr}_b [range(%nr{rr}_b, 0, {CN - 1})] : index")
         P(f"    %ov{rr} = vector.load %o_lds[%nr{rr}, %lc4] : view<{CN}x{OS}xf32> -> vector<4xf32>")
         P(f"    %osq{rr} = vector.mulf %ov{rr}, %ov{rr} : vector<4xf32>")
         P(f"    %osr{rr} = vector.reduce<addf> %osq{rr}, %zero_f : vector<4xf32>, f32")
@@ -580,11 +648,6 @@ def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", targe
         P(f"    %ost{rr} = scalar.addf %omean{rr}, %eps : f32")
         P(f"    %oinv{rr} = scalar.rsqrtf %ost{rr} : f32")
         P(f"    %oiv{rr} = vector.splat %oinv{rr} : vector<4xf32>")
-        P(f"    %olive{rr} = index.cmp ult, %nr{rr}, %m : index")
-        P(f"    %otok{rr}_a = index.add %tok0, %nr{rr} : index")
-        P(f"    %otok{rr}_c = scf.select %olive{rr}, %otok{rr}_a, %tok0 : index")
-        P(f"    %otok{rr} = index.assume %otok{rr}_c [lt(%otok{rr}_c, %tokens)] : index")
-        P(f"    %zv{rr} = vector.load %z_view[%otok{rr}, %zcol] : view<[%tokens]x{VD}xf32> -> vector<4xf32>")
         P(f"    %zs{rr} = vector.siluf<afn> %zv{rr} : vector<4xf32>")
         P(f"    %on{rr}_a = vector.mulf %ov{rr}, %oiv{rr} : vector<4xf32>")
         P(f"    %on{rr}_b = vector.mulf %on{rr}_a, %nwv : vector<4xf32>")
@@ -595,6 +658,10 @@ def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", targe
         P("    }")
     P("    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
     P(f"    scf.yield {', '.join(f'%sn{kb}' for kb in range(8))} : {', '.join([vec8] * 8)}")
+    if "nonorm" in abl:
+        txt = "\n".join(out)
+        txt = re.sub(r"\n    scf\.if %olive\d \{\n[^\n]*\n    \}", "", txt)
+        out = [l for l in txt.split("\n") if not re.search(r"%(ov|osq|osr|osum|omean|ost|oinv|oiv|zs|on)\d", l)]
     loop = "\n".join(out)
     # conv history commit (the span's last K-1 inputs; after phase A read the old ones): v channels of this head (threads < DV), the key
     # head's q and k channels by its first value head (thread t: q channel t, k channel t, t < DK)
@@ -650,8 +717,9 @@ def phase_b(G, NG, LB, eps, grouped, ratio, guard_open="", guard_close="", targe
   }}
 """
     tgt = "target(@rdna4) " if target else ""
+    kname = "g_gdn_fb_rdna4" + "".join("_" + x for x in abl)
     head = f"""
-kernel.def {tgt}export("g_gdn_fb_rdna4") @g_gdn_fb_rdna4(%spans: index) {{
+kernel.def {tgt}export("{kname}") @{kname}(%spans: index) {{
   %c1 = index.constant 1 : index
   %heads = index.constant {HV} : index
   %c256 = index.constant 256 : index
@@ -717,6 +785,7 @@ kernel.def {tgt}export("g_gdn_fb_rdna4") @g_gdn_fb_rdna4(%spans: index) {{
   %ob = index.constant {CN * OS * 4} : offset
   %o_buf = buffer.alloca<workgroup> align(16) %ob : buffer
   %o_lds = buffer.view %o_buf[%zero] : buffer -> view<{CN}x{OS}xf32>
+@STAGE@
   %sc_bytes = index.constant 64 : offset
   %sc_buf = buffer.alloca<workgroup> align(16) %sc_bytes : buffer
   %zero_cell = buffer.view %sc_buf[%zero] : buffer -> view<16xi32>
@@ -736,7 +805,17 @@ kernel.def {tgt}export("g_gdn_fb_rdna4") @g_gdn_fb_rdna4(%spans: index) {{
         init.append(f"    %sl{kb} = vector.load %state_view[%sk{kb}_i] : view<{NS}xf32> -> {vec8}")
     init.append(f"    scf.yield {', '.join(f'%sl{kb}' for kb in range(8))} : {', '.join([vec8] * 8)}")
     init.append("  }")
-    nch = ["  %len_r = index.add %length, %k31 : index", "  %nchunks = index.div %len_r, %k32 : index"]
+    nch = ["  %len_r = index.add %length, %k31 : index", "  %nchunks = index.div %len_r, %k32 : index"] + prefetch("%k0", "  ") + stage_stores("  ", "_k0") + \
+          ["  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)"]
+    stage = [f"  %zero8h = vector.constant 0.0 : vector<8xf16>", "  %zero4 = vector.constant 0.0 : vector<4xf32>",
+             f"  %t128 = index.cmp ult, %thread, {ci(128)} : index", f"  %t8 = index.cmp ult, %thread, %k8 : index",
+             "  %t4o_v = index.mul %thread, %k4 : index", f"  %t4o = index.assume %t4o_v [range(%t4o_v, 0, {CN - 4})] : index"]
+    off = 0
+    for nm_, b in (("w", CN * WP * 2), ("q", CN * WP * 2), ("kt", DK * TP * 2), ("u", DV * TP * 2), ("p", CN * TP * 2), ("g", CN * 4)):
+        shp = {"w": f"{CN}x{WP}xf16", "q": f"{CN}x{WP}xf16", "kt": f"{DK}x{TP}xf16", "u": f"{DV}x{TP}xf16", "p": f"{CN}x{TP}xf16", "g": f"{CN}xf32"}[nm_]
+        stage += [f"  %sb_{nm_} = index.constant {b} : offset", f"  %sbuf_{nm_} = buffer.alloca<workgroup> align(16) %sb_{nm_} : buffer",
+                  f"  %s_{nm_} = buffer.view %sbuf_{nm_}[%zero] : buffer -> view<{shp}>"]
+    head = head.replace("@STAGE@", "\n".join(stage))
     carry = ", ".join(f"%s{kb} = %ist{kb} : {vec8}" for kb in range(8))
     outs = ", ".join(f"%fin{kb}" for kb in range(8))
     loop_head = f"  {outs} = scf.for %ci = [%k0 to %nchunks step %k1]({carry}) -> ({', '.join([vec8] * 8)}) {{"
