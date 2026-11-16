@@ -36,8 +36,11 @@ VARIANTS = {   # name -> flash2_g6.py options (FLASH2_G6_OPTS)
     "nopv": {"B": "2", "abl": "nopv"},
     "nobar": {"B": "2", "abl": "nobar"},
     "noexp": {"B": "2", "abl": "noexp"},
+    "vtop": {"B": "2", "vpf": "top"},
+    "vmid": {"B": "2", "vpf": "mid"},
+    "vtop2": {"B": "2", "vpf": "top2"},
 }
-TESTED = []
+TESTED = ["vtop", "vmid"]
 
 
 def opts_of(v):
