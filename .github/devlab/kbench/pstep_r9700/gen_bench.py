@@ -49,6 +49,19 @@ def build():
     return cfg, open(os.path.join(work, "pkg", "program", "llm.loom")).read()
 
 
+def gen_mv(cfg, K, R):
+    """gen_llm.mv of the card's int8 matvec at R rows (the build's choices: kb_choices for the slug)"""
+    work = os.path.join(OUT, "_pkg")
+    os.environ["LOOM_KB_ROOT"] = os.path.join(ROOT, "skills", "loom-kb")
+    import kb_choices
+    kb_choices.apply(cfg, "mtp", slug=SLUG)
+    os.environ["LLM_CONFIG"] = os.path.join(work, "cfg.json")
+    os.environ["LLM_DRAFT"] = json.dumps({"kind": "mtp", "depth": 3})
+    sys.argv = [os.path.join(STARTER, "gen_llm.py")]
+    import gen_llm
+    return gen_llm.mv("mxfp4s", K, R=R, TG=T, suffix=f"_r{R}", iq=True)
+
+
 def block(prog, kind, name):
     m = re.search(rf'^{kind}[^\n]*@{re.escape(name)}\((?:.|\n)*?^\}}\n', prog, re.M)
     assert m, name
@@ -199,6 +212,9 @@ def main():
         a, b = gen_pstep.pmv(kt["gate"], G=G), gen_pstep.pmv(kt["down"], G=G)
         persist[G] = (re.search(r'export\("([^"]+)"', a).group(1), re.search(r'export\("([^"]+)"', b).group(1))
         kernels[persist[G][0]], kernels[persist[G][1]] = a, b
+    swq = gen_pstep.swiglu_q8(gen_mv(cfg, H, 32))
+    swq_name = re.search(r'export\("([^"]+)"', swq).group(1)
+    kernels[swq_name] = swq
     funcs = {}
     for t in kernels.values():
         funcs_for(prog, t, funcs)
@@ -240,7 +256,22 @@ def main():
             return [f"  %f2 = check.generate.fill value(0.0) : {TF}", f"  %fu2 = check.generate.fill value(0.0) : {TF}",
                     f"  kernel.launch @{k1}[%nFF, %nFF, %t](%nFF, %nFF, %t, %zero_i32, %x, %nw, %wg, %wgs, %wu, %wus, %f2, %fu2) : [index, index, index](index, index, index, i32, {TX}, {TH}, {WG}, {WGS}, {WG}, {WGS}, {TF}, {TF})",
                     f"  kernel.launch @{k2}[%nH, %t](%nH, %t, %zero_i32, %f2, %fu2, %wd, %wds, {out}) : [index, index](index, index, i32, {TF}, {TF}, {WD}, {WDS}, {TX})"]
-        if variant == "chain":
+        def swq_chain(out, xn="%x"):
+            return [f"  %h = check.generate.fill value(0.0) : {TX}", f"  %hq = check.generate.fill value(0) : tensor<{hq}xi8>",
+                    f"  %fq3 = check.generate.fill value(0) : tensor<{fq}xi8>",
+                    f"  kernel.launch @g_post_add_norm[%t](%t, %y, %nw, {xn}, %nw, %h) : [index](index, {TX}, {TH}, {TX}, {TH}, {TX})",
+                    f"  kernel.launch @g_quant_q8[%t, %nH](%t, %nH, %h, %hq) : [index, index](index, index, {TX}, tensor<{hq}xi8>)",
+                    f"  kernel.launch @{swq_name}[%nFF, %t](%nFF, %t, %zero_i32, %hq, %wg, %wgs, %wu, %wus, %fq3) : [index, index](index, index, i32, tensor<{hq}xi8>, {WG}, {WGS}, {WG}, {WGS}, tensor<{fq}xi8>)",
+                    f"  kernel.launch @{names['down']}[%nH, %t](%nH, %t, %zero_i32, %fq3, %wd, %wds, {out}) : [index, index](index, index, i32, tensor<{fq}xi8>, {WD}, {WDS}, {TX})"]
+        if variant == "swq":
+            if check:   # the launch chain on (x, y), then the swq chain on a fresh copy of x (same seed): equal outputs
+                d += chain(names["gate"], names["down"], "c")
+                d += [f"  %x2 = check.generate.random.uniform seed(%seed) range(-2.0 to 2.0) : {TX}", f"  %y3 = check.generate.fill value(0.0) : {TX}"]
+                d += swq_chain("%y3", "%x2")
+                d.append(f"  check.expect.equal actual(%y3) expected(%yo) : {TX}")
+            else:
+                d += swq_chain("%yo")
+        elif variant == "chain":
             d += chain(names["gate"], names["down"])
         elif variant.startswith("chain_p"):
             G = int(variant[7:])
@@ -260,13 +291,15 @@ def main():
         return s
 
     bench = lib
-    for v in ["chain"] + [f"chain_p{G}" for G in GS] + ["fuse"] + [f"fuse_p{G}" for G in GS]:
+    # round 1 (runs 43809470161, 43810902803) measured chain_p<G>, fuse, fuse_p<G> and the grid barrier: VARIANTS=all brings them back
+    allv = os.environ.get("VARIANTS") == "all"
+    for v in ["swq", "chain"] + ([f"chain_p{G}" for G in GS] + ["fuse"] + [f"fuse_p{G}" for G in GS] if allv else []):
         bench += ffn_case(v, v)
-    for G in GB:
+    for G in (GB if allv else ()):
         bench += gb_case(G, "chain") + gb_case(G, "bar")
     open(os.path.join(OUT, "bench.loom"), "w").write(bench)
     test = lib
-    for v in ["fuse"] + [f"fuse_p{G}" for G in GS]:
+    for v in ["swq", "fuse"] + [f"fuse_p{G}" for G in GS]:
         test += ffn_case("eq_" + v, v, check=True)
     import numpy as np
     for G in GB:

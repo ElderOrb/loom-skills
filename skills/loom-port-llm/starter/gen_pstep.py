@@ -359,3 +359,91 @@ def _kernel(src, fmt, K, R, mode, mats, G, eps, hidden, hout):
     base = f"g_mv_{fmt}_k{K}_t4_q8_r{R}"
     t = pmv(src(base), mode, mats=mats, G=G, eps=eps if mode == "norm" else None, count=float(hidden) if mode == "norm" else None, hout=hout)
     return re.search(r'export\("([^"]+)"', t).group(1), t
+
+
+def swiglu_q8(text):
+    """gen_llm._mv text of an int8 matvec with R = 32 rows (one q8 group of the output) -> gate + up of the same rows in one
+    workgroup, whose epilogue writes silu(gate) * up (g_silu_mul's ops) straight as g_quant_q8 codes + (d, code sum) of the
+    32-row group: g_mv(gate) + g_mv(up) + g_silu_mul + g_quant_q8 in one launch, every code bit-identical.
+    Launch args (n, tokens, accumulate (unused), x, w, ws, w2, ws2, fq)."""
+    name = re.search(r'kernel\.def export\("([^"]+)"\) @', text).group(1)
+    m = re.match(r"g_mv_(\w+?)_k(\d+)_t(\d+)_q8_r32$", name)
+    assert m, f"gen_pstep.swiglu_q8: {name} is not a 32-row int8 matvec"
+    fmt, K, TG = m.group(1), int(m.group(2)), int(m.group(3))
+    new = f"g_pmv_{fmt}_k{K}_t{TG}_swq_r32"
+    text = text.replace(f'kernel.def export("{name}") @{name}(', f'kernel.def export("{new}") @{new}(', 1)
+    text = _one(text, "%w: buffer, %ws: buffer, %y: buffer)", "%w: buffer, %ws: buffer, %w2: buffer, %ws2: buffer, %y: buffer)", "weights")
+    pb = re.search(r"  %part_bytes = index\.constant (\d+) : offset\n", text)
+    text = text.replace(pb.group(0), f"  %part_bytes = index.constant {2 * int(pb.group(1))} : offset\n", 1)
+    W = re.search(r"view<1x(\d+)x32x" + str(TG) + r"xf32>", text).group(1)
+    text = text.replace(f"view<1x{W}x32x{TG}xf32>", f"view<2x{W}x32x{TG}xf32>")
+    head, rest = text.split(ROW_LOOP, 1)
+    bar = "  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
+    loop, epi = rest.split(bar, 1)
+    loop2 = loop
+    for a, b in (("@g_mxfp4s_icodes(%w, %ws, ", "@g_mxfp4s_icodes(%w2, %ws2, "), ("%pv[0, ", "%pv[1, ")):
+        assert loop2.count(a) == 1, a
+        loop2 = loop2.replace(a, b)
+    groups = None
+    epi_new = f"""  %fl_bytes = index.constant {32 * TG * 4} : offset
+  %fl = buffer.alloca<workgroup> align(16) %fl_bytes : buffer
+  %flv = buffer.view %fl[%zero] : buffer -> view<{TG}x32xf32>
+  %outputs = index.constant {32 * TG} : index
+  %lanes_step = index.constant {(K // 32 + 31) // 32 * 32} : index
+  scf.for %wr0 = [%workitem to %outputs step %lanes_step] {{
+    %wr = index.assume %wr0 [range(%wr0, 0, {32 * TG - 1})] : index
+    %rr_v = index.div %wr, %tg : index
+    %rr = index.assume %rr_v [range(%rr_v, 0, 31)] : index
+    %jj_v = index.rem %wr, %tg : index
+    %jj = index.assume %jj_v [range(%jj_v, 0, {TG - 1})] : index
+    %t0 = scf.for %ww = [%c0 to %cW step %c1](%acc = %zero_f : f32) -> (f32) {{
+      %bw = index.assume %ww [range(%ww, 0, {int(W) - 1})] : index
+      %p = view.load %pv[0, %bw, %rr, %jj] : view<2x{W}x32x{TG}xf32> -> f32
+      %nx = scalar.addf %acc, %p : f32
+      scf.yield %nx : f32
+    }}
+    %t1 = scf.for %ww = [%c0 to %cW step %c1](%acc = %zero_f : f32) -> (f32) {{
+      %bw = index.assume %ww [range(%ww, 0, {int(W) - 1})] : index
+      %p = view.load %pv[1, %bw, %rr, %jj] : view<2x{W}x32x{TG}xf32> -> f32
+      %nx = scalar.addf %acc, %p : f32
+      scf.yield %nx : f32
+    }}
+    %g1 = vector.from_elements %t0 : vector<1xf32>
+    %u1 = vector.from_elements %t1 : vector<1xf32>
+    %sg1 = vector.logisticf<afn> %g1 : vector<1xf32>
+    %s1 = vector.mulf %g1, %sg1 : vector<1xf32>
+    %o1 = vector.mulf %s1, %u1 : vector<1xf32>
+    %o = vector.extract %o1[0] : vector<1xf32> -> f32
+    view.store %o, %flv[%jj, %rr] : f32, view<{TG}x32xf32>
+  }}
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %ctg = index.constant {TG} : index
+  %qlane = index.cmp ult, %workitem, %ctg : index
+  scf.if %qlane {{
+    %jq = index.assume %workitem [range(%workitem, 0, {TG - 1})] : index
+    %tokq = index.add %token0, %jq : index
+    %liveq = index.cmp ult, %tokq, %tokens : index
+    scf.if %liveq {{
+      %tq = index.assume %tokq [lt(%tokq, %tokens)] : index
+      %fvals = vector.load %flv[%jq, %c0] : view<{TG}x32xf32> -> vector<32xf32>
+      %pq_c127 = scalar.constant 127.0 : f32
+      %pq_ones8 = vector.constant 1 : vector<32xi8>
+{quant_lines(0, "fvals")}
+      %c32q = index.constant 32 : index
+      %gout = index.div %n, %c32q : index
+      %gq = index.div %row_base, %c32q : index
+      %gqa = index.assume %gq [lt(%gq, %gout)] : index
+      %qv = buffer.view %y[%zero] : buffer -> view<[%tokens]x[%gout]x8xi32>
+      %nb = index.cast %n : index to offset
+      %moff = index.scale %tokens, %nb : index, offset -> offset
+      %mv = buffer.view %y[%moff] : buffer -> view<[%tokens]x[%gout]x2xf32>
+      %qw = vector.bitcast %q0 : vector<32xi8> to vector<8xi32>
+      vector.store %qw, %qv[%tq, %gqa, %c0] : vector<8xi32>, view<[%tokens]x[%gout]x8xi32>
+      %meta = vector.from_elements %da0, %xs0 : vector<2xf32>
+      vector.store %meta, %mv[%tq, %gqa, %c0] : vector<2xf32>, view<[%tokens]x[%gout]x2xf32>
+    }}
+  }}
+  kernel.return
+}}
+"""
+    return head + ROW_LOOP + loop + ROW_LOOP + loop2 + bar + epi_new
