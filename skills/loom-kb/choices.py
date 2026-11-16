@@ -235,6 +235,12 @@ CHOICE("decode.mv.q8_r32", "bool", True, "MV_Q8_R32", doc="Int8 16-token matvecs
 CHOICE("decode.spec.gdn_copy_split", "int", 1, "GDN_COPY_SPLIT", kernels=["g_gdn_capture*", "g_gdn_restore*"], rows=ROWS_DECODE, devices=["rdna4"], per_target=True,
        doc="Workgroups per token of the gated delta-net capture / restore copies of a drafted step (gfx12 twin; 1 = the one-workgroup-per-token "
            "kernel on both targets). R9700 Qwen3.8-27B MTP 3: 8 = -0.8 ms of a 40 ms step.")
+CHOICE("decode.spec.gdn_fold", "bool", False, "GDN_FOLD", enc=("1", None),
+       kernels=["g_gdn_conv_bank", "g_gdn_recurrence_rec*", "g_gdn_fold*", "g_gdn_capture*", "g_gdn_restore*"], rows=ROWS_DECODE, from_pr="mxfp4st-ogdn",
+       doc="Drafted verification of a gated delta-net hybrid without capture / restore / replay: the verification records each speculative "
+           "step's fold factors (raw conv input + key, update scalar per value column, decay per head) and, after acceptance, one launch "
+           "folds the accepted steps into every layer's state and one commits the conv histories (gen_gdn.fold_kernels). Published state "
+           "bit-identical to the replay's; the verify scratch holds 8 rows per span instead of every epoch token's replay inputs.")
 CHOICE("decode.mv.pair_proj", "str", "qg", "PAIR_PROJ", kernels=["g_mv*_pair"], rows=ROWS_DECODE + ROWS_STREAMS,
        doc="Paired projections: qg (q + gate), kv (k + v), 1 (both), 0 (off). k + v measured no faster end to end.")
 
