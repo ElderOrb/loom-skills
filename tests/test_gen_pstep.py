@@ -84,6 +84,8 @@ class FuseVerify(unittest.TestCase):
         fused = re.findall(r"^  scf\.if %pz \{\n(.*?)^  \} else \{\n", v, re.M | re.S)
         self.assertEqual(len(fused), 64)
         for i, f in enumerate(fused):
+            # the 4-token %pz copy keeps the GDN alpha / beta blocks' GEMM-epoch branch (prefill.gdn.ab_q8: g_quant_q8 of h there), never taken at 4 rows
+            f = re.sub(r"(scf\.if %gemm \{\n)\s*kernel\.launch @g_quant_q8\[%t, %nH\]\(%t, %nH, %h, %h16q\)[^\n]*\n", r"\1", f)
             for k in ("@g_post_add_norm", "@g_quant_q8", "@g_silu_mul", "@g_mv_mxfp4s_k5120_t4_q8", "@g_mv_mxfp4s_k17408_t4_q8"):
                 self.assertNotIn(k, f, f"layer {i}")
             self.assertEqual(len(re.findall(r"@g_pmv_mxfp4s_k5120_t4_norm_\w+\[", f)), 2, f"layer {i}: pre-mixer + gate/up")
