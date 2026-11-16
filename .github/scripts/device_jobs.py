@@ -29,6 +29,8 @@ One job per model, on ONE runner of the device, exactly as skills/loom-benchmark
     native context needs more KV cache than the pool holds after the weights is served at card_lib.served_context(...) tokens (variant
     "context"): the rows beyond it are refused by the server and skipped by perf.py (over_context), which the card shows as "doesn't fit". A
     model whose weights do not fit gets no job.
+  * --preset full (default) | iterate | final: .github/scripts/job_presets.py (iterate: no gates, smoke instead of func, no baseline engines; final: func + ktest +
+    gates once on the card variant, no perf).
 Ingest with make_info.py perf ... --gpu DEVICE --source-kind devlab (skills/loom-fleet/reference/publish.md step 3).
 """
 import argparse
@@ -41,6 +43,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "skills", "loom-benchmark", "scripts", "card"))
 import card_lib  # noqa: E402
 import matched_spec  # noqa: E402
+import job_presets  # noqa: E402
 
 registry = card_lib.registry
 
@@ -121,6 +124,8 @@ def main(argv=None, device=None, tool="device_jobs.py"):
     ap.add_argument("--card-org", default="loom-fun-staging")
     ap.add_argument("--build", action="store_true", help="rebuild the variants from this branch instead of fetching the card's programs")
     ap.add_argument("--gates", default="", help="add the gates step at this LEVEL (dev|fast|quick|full) on the card variant")
+    ap.add_argument("--preset", choices=job_presets.PRESETS, default="full",
+                    help="step list: full (default), iterate (no gates, smoke instead of func, no baseline engines: the loop of an optimization), final (func + ktest + gates once on the card variant)")
     ap.add_argument("--reps", type=int, default=None, help="serve sessions (= llama.cpp runs) per 1-stream row: default 3, 6 for a fast model (methodology rule 5)")
     ap.add_argument("--fast-tps", type=float, default=card_lib.FAST_DECODE_TPS, help="a model whose published loom-fun (Strix) decode is above this is fast: 6 sessions, --repeat-rows 3")
     ap.add_argument("--old-org", default="loom-fun", help="the org whose published cards give each model's decode rate")
@@ -179,7 +184,10 @@ def main(argv=None, device=None, tool="device_jobs.py"):
             "card": f"{a.card_org}/{slug}", **({f"require_preset_{K}": True} if preset else {}), "kit": m["kit"], **base,
             f"memory_bytes_{K}": jf[f"memory_bytes_{K}"], **({"served_context": ctx} if ctx else {}),
             "variants": [card, nodraft],
-            "steps": ["func:card", "ktest:card", *gates, *["perf:card:1"] * n, *["perf:card:1:long"] * n, "c4:nodraft", *llama]})
+            "steps": job_presets.apply(a.preset, ["func:card", "ktest:card", *gates, *["perf:card:1"] * n, *["perf:card:1:long"] * n, "c4:nodraft", *llama], "card",
+                                       a.gates or "dev")})
+        if a.preset == "final":
+            job_presets.trim_variants(jobs[-1])
     if not jobs:
         sys.exit("no job: " + (", ".join(skipped) + f" do not fit the {NAME}" if skipped else "no model given"))
     exp = {"_comment": f"{NAME} per-model measurement ({tool}): one job per model on one {NAME} runner; "
