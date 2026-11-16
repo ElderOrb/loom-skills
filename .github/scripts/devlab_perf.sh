@@ -689,13 +689,16 @@ PY
             # V served alone; a 1 s sampler (MemAvailable, Cached, serve RSS/threads, /v1/status) runs from before the serve to after the first requests; out/cold_V_MODE.*
       mode=${p2:-drop}; ct=$out/cold_${p1}_$mode; : > "$ct.timeline"
       free_gpu
-      if [ "$mode" != plain ]; then sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 && echo "page cache dropped" || echo "WARNING: could not drop the page cache"; fi
-      if [ "$mode" = preread ]; then
+      if [[ "$mode" == drop* || "$mode" == preread* ]]; then sync; echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 && echo "page cache dropped" || echo "WARNING: could not drop the page cache"; fi
+      if [[ "$mode" == preread* ]]; then
         t1=$(date +%s); find "$HOME/.cache" "$WORK" -name '*.safetensors' -size +100M 2>/dev/null | tee "$ct.files" | xargs -r cat > /dev/null; echo "preread $(wc -l < "$ct.files") files in $(( $(date +%s) - t1 )) s"; fi
       grep -E 'MemTotal|MemAvailable|^Cached' /proc/meminfo | tr '\n' ' '; echo
+      for g in /sys/class/drm/card*/device; do [ -f "$g/mem_info_vram_total" ] && echo "gpu $g vram_used=$(cat $g/mem_info_vram_used) vram_total=$(cat $g/mem_info_vram_total) gtt_used=$(cat $g/mem_info_gtt_used) gtt_total=$(cat $g/mem_info_gtt_total)" | tee -a "$ct.gpu"; done
+      echo "ulimit -l: $(ulimit -l); kfd users: $(sudo -n fuser -v /dev/kfd 2>&1 | tr '\n' ' ')" | tee -a "$ct.gpu"
+      { sudo -n dmesg -T || dmesg -T; } 2>/dev/null | wc -l > "$ct.dmesg_n"
       ( while :; do
           sp=$(pgrep -f "loom-serve.*--listen=127.0.0.1:$PORT" | head -1)
-          echo "$(date +%T.%N | cut -c1-12) avail_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo) cached_kb=$(awk '/^Cached/{print $2}' /proc/meminfo) pid=${sp:-none} rss_anon_kb=$(awk '/RssAnon/{print $2}' /proc/${sp:-0}/status 2>/dev/null) thr=$(awk '/Threads/{print $2}' /proc/${sp:-0}/status 2>/dev/null) st=$(curl -s -m 1 $url/v1/status | head -c 400 | tr '\n' ' ')" >> "$ct.timeline"
+          echo "$(date +%T.%N | cut -c1-12) avail_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo) cached_kb=$(awk '/^Cached/{print $2}' /proc/meminfo) pid=${sp:-none} rss_anon_kb=$(awk '/RssAnon/{print $2}' /proc/${sp:-0}/status 2>/dev/null) thr=$(awk '/Threads/{print $2}' /proc/${sp:-0}/status 2>/dev/null) vram=$(cat /sys/class/drm/card*/device/mem_info_vram_used 2>/dev/null | head -1) gtt=$(cat /sys/class/drm/card*/device/mem_info_gtt_used 2>/dev/null | head -1) st=$(curl -s -m 1 $url/v1/status | head -c 400 | tr '\n' ' ')" >> "$ct.timeline"
           sleep 1; done ) &
       samp=$!
       if serve_alone "$p1"; then
@@ -708,7 +711,7 @@ PY
         done
       fi
       kill $samp 2>/dev/null
-      { sudo -n dmesg -T || dmesg -T; } 2>/dev/null | grep -iE 'oom|killed process|amdgpu|kfd|segfault|general protection' | tail -n 40 > "$ct.dmesg"
+      { sudo -n dmesg -T || dmesg -T; } 2>/dev/null | tail -n +"$(( $(cat "$ct.dmesg_n") + 1 ))" > "$ct.dmesg"
       cp "$LOOM_SERVE_STATE/perf-$p1.log" "$ct.serve.log" 2>/dev/null
       echo "min avail_kb: $(grep -o 'avail_kb=[0-9]*' "$ct.timeline" | cut -d= -f2 | sort -n | head -1); max rss_anon_kb: $(grep -o 'rss_anon_kb=[0-9]*' "$ct.timeline" | cut -d= -f2 | sort -n | tail -1)"
       res[$s]="$(grep -c 'HTTP 200' "$ct.requests" 2>/dev/null) of 3 requests HTTP 200 ($mode)";;
