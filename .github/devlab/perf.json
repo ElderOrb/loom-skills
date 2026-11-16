@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st draft exp6: the final package as the KB resolves it (model node: block Q8_0, head rows 49152) at the model's served context 106496 vs the same build with both choices off; ktest, func, dev gates, ABBA short/long rows, depth 2/4, 4 streams undrafted. Evidence branch: not for merge.",
+ "_comment": "mxfp4st draft exp7: func of the final package as the first step after a clean start (exp6 ran it right after ktest and the first request lost the connection), 4 streams undrafted base vs final. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -13,7 +13,7 @@
    "llamacpp": "b1375",
    "variants": [
     {
-     "name": "base",
+     "name": "basend",
      "build": {
       "MTP_BLOCK_PREP": "",
       "PROPOSE_HEAD_ROWS": "0"
@@ -22,7 +22,10 @@
       "--slug",
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
-     "context": 106496
+     "context": 106496,
+     "execution": {
+      "draft_depth": 0
+     }
     },
     {
      "name": "card",
@@ -32,30 +35,6 @@
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
      "context": 106496
-    },
-    {
-     "name": "cardd2",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 106496,
-     "execution": {
-      "draft_depth": 2
-     }
-    },
-    {
-     "name": "cardd4",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 106496,
-     "execution": {
-      "draft_depth": 4
-     }
     },
     {
      "name": "nodraft",
@@ -71,20 +50,13 @@
     }
    ],
    "steps": [
-    "ktest:card",
     "func:card",
-    "gates:card:dev",
-    "perf:base:1",
-    "perf:card:1",
-    "perf:card:1",
-    "perf:base:1",
-    "perf:base:1:long",
-    "perf:card:1:long",
-    "perf:card:1:long",
-    "perf:base:1:long",
-    "perf:cardd2:1",
-    "perf:cardd4:1",
-    "c4:nodraft"
+    "func:nodraft",
+    "c4:basend",
+    "c4:nodraft",
+    "c4:basend",
+    "c4:nodraft",
+    "func:card"
    ],
    "repeat_rows": 3,
    "env": {
