@@ -1048,6 +1048,8 @@ def _defer_rows(text, G, CW, RL):
     sub(anchor, code + anchor)
     for j in J:
         sub(f"%s{j} = %init{j} : {VR}", f"%s{j} = %pinit{j} : {VR}")
+        if os.environ.get("GDN_STATE_LU", "") not in ("", "0"):   # A/B instrument: the state read is its last use in this step
+            sub(f"%g{j} = vector.load %state_view[%si{j}] :", f"%g{j} = vector.load %state_view[%si{j}] {{cache_scope = device, cache_temporal = last_use}} :")
     return text
 
 
