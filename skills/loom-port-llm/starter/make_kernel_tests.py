@@ -1036,6 +1036,22 @@ if cfg.get("recurrent_layers"):
   check.return
 }}
 """)
+def _pend_fix(arena, nslots):
+    """decode.spec.gdn_fold_defer: test slots at the layer stride LB hold layer 0 only; its pending fold lives at the slot + pend_base
+    (gen_gdn.gdn_geometry): the arena is extended to hold every slot's block and the blocks are zero (no pending fold)."""
+    Gp = gdn_geometry(cfg)
+    if not Gp.get("pend_stride"):
+        return arena
+    from gen_gdn import FOLD_W as _fw, PEND_HEAD as _ph
+    block = (_ph + _fw * (HK * DK + VD + HV) * 4) // 4
+    need = ((nslots - 1) * LB + Gp["pend_base"]) // 4 + block
+    arena = np.concatenate([arena, np.zeros(max(0, need - arena.size), arena.dtype)])
+    for sl in range(nslots):
+        b = (sl * LB + Gp["pend_base"]) // 4
+        arena[b:b + block] = 0
+    return arena
+
+
 # 4d. decode.spec.gdn_fold (gen_gdn.fold_kernels): a drafted verification of three speculative spans (4 tokens at a fork: reader !=
 # writer, accepted 2; 4 tokens accepted 4; 3 tokens accepted 1), once with the fold path (g_gdn_conv_bank, g_gdn_recurrence_rec, then
 # g_gdn_fold + g_gdn_fold_hist on the committed packet) and once with the replay path it replaces (verification, then conv + commit +
@@ -1047,7 +1063,7 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _fold_on(gdn_geometry(cf
     t = sum(L for L, _, _, _ in spans_); ns = len(spans_)
     qkv = rng.standard_normal((t, C)).astype(np.float32)
     alpha = rng.standard_normal((t, HV)).astype(np.float32); beta = rng.standard_normal((t, HV)).astype(np.float32)
-    arena = np.zeros(2 * ns * LB // 4, np.float32); meta = np.zeros(4 + 9 * ns, np.int32); meta[0] = ns
+    arena = _pend_fix(np.zeros(2 * ns * LB // 4, np.float32), 2 * ns); meta = np.zeros(4 + 9 * ns, np.int32); meta[0] = ns
     comm = np.zeros(4 + 9 * ns, np.int32); comm[0] = ns
     origins = np.zeros((ns, 5), np.int64); info = np.zeros((t, 4), np.int32); info2 = np.zeros((t, 4), np.int32)
     expect = None; first = 0; finals = []
@@ -1082,7 +1098,7 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _fold_on(gdn_geometry(cf
                  ("gf_arena", arena), ("gf_expect", expect), ("gf_qkv", qkv), ("gf_alpha", alpha), ("gf_beta", beta)]:
         save(n, a)
     from gen_gdn import FOLD_W as _FW
-    AT = f"tensor<{2 * ns * LB // 4}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * ns}xi32>"; IT = f"tensor<{t}x4xi32>"
+    AT = f"tensor<{arena.size}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * ns}xi32>"; IT = f"tensor<{t}x4xi32>"
     XT, ST, VT = f"tensor<{t}x{C}xf32>", f"tensor<{t}x{2 * HK}xf32>", f"tensor<{t}x{VD}xf32>"
     BX, BK, BD = (f"tensor<{ns * _FW}x{w}xf32>" for w in (C, HK * DK, VD + HV))
     REC = f"[index](index, index, index, {MT}, {OT}, {AT}, {XT}, {ST}, tensor<{t}x{HV}xf32>, tensor<{t}x{HV}xf32>, tensor<{HV}xf32>, tensor<{HV}xf32>, {VT}"
@@ -1409,7 +1425,7 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _fold_on(gdn_geometry(cf
     _fr = [42, 46, 197, 0, 200, 201]; t = 210; ncfg = 8; ns = len(_sv); stale = [(40, 5, 0), (17, 0, 100)]
     x = (1.5 * r.standard_normal((t, C))).astype(np.float32)
     alpha = r.standard_normal((t, HV)).astype(np.float32); beta = r.standard_normal((t, HV)).astype(np.float32)
-    arena = (0.1 * r.standard_normal(2 * ncfg * LB // 4)).astype(np.float32)
+    arena = _pend_fix((0.1 * r.standard_normal(2 * ncfg * LB // 4)).astype(np.float32), 2 * ncfg)
     meta = np.zeros(4 + 9 * ncfg, np.int32); meta[0] = ns; comm = np.zeros(4 + 9 * ncfg, np.int32); comm[0] = ns
     repl = np.zeros(4 + 9 * ncfg, np.int32); origins = np.zeros((ncfg, 5), np.int64); raw_o = np.zeros((t, HV, DV)); finals = []; k_r = 0
     for si in range(ncfg):
@@ -1450,7 +1466,7 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _fold_on(gdn_geometry(cf
                  ("expect", expect), ("x", x), ("alpha", alpha), ("beta", beta), ("raw", raw_o.reshape(t, VD).astype(np.float32)),
                  ("info0", np.zeros((t, 4), np.int32))]:
         save(f"gv_{n}", a)
-    AT = f"tensor<{2 * ncfg * LB // 4}xf32>"; MT = f"tensor<{4 + 9 * ncfg}xi32>"; OT = f"tensor<{10 * ncfg}xi32>"; IT = f"tensor<{t}x4xi32>"
+    AT = f"tensor<{arena.size}xf32>"; MT = f"tensor<{4 + 9 * ncfg}xi32>"; OT = f"tensor<{10 * ncfg}xi32>"; IT = f"tensor<{t}x4xi32>"
     XT, ST, VT = f"tensor<{t}x{C}xf32>", f"tensor<{t}x{2 * HK}xf32>", f"tensor<{t}x{VD}xf32>"
     BX, BK, BD = (f"tensor<{min(ncfg, 32) * _FW2}x{w}xf32>" for w in (C, HK * DK, VD + HV))
     REC = f"[index](index, index, index, {MT}, {OT}, {AT}, {XT}, {ST}, tensor<{t}x{HV}xf32>, tensor<{t}x{HV}xf32>, tensor<{HV}xf32>, tensor<{HV}xf32>, {VT}"
