@@ -8,11 +8,11 @@
   }
  },
  "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom": {
-  "ctx_cap": 113664,
+  "ctx_cap": 106496,
   "r9700_execution": {
    "prefill_capacity": 1024,
-   "context_capacity": 113664,
-   "pool_capacity": 113664
+   "context_capacity": 106496,
+   "pool_capacity": 106496
   }
  },
  "bartowski-LFM3-1.7B-loom": {
