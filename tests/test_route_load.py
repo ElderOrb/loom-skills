@@ -1,4 +1,4 @@
-"""fleet/route_load.py: instruction load per fleet model (CPU only; needs origin/r9700 for the pre-refactor set)."""
+"""fleet/route_load.py: instruction load per fleet model (CPU only; needs the pre-refactor r9700 commit route_load.PRE_REFACTOR)."""
 import importlib.util
 import json
 import subprocess
@@ -13,8 +13,8 @@ spec.loader.exec_module(route_load)
 
 
 def base_ref():
-    for ref in ("origin/r9700", "r9700"):
-        if subprocess.run(["git", "-C", str(REPO), "rev-parse", "--verify", "-q", ref], capture_output=True).returncode == 0:
+    for ref in (route_load.PRE_REFACTOR,):   # absent from a shallow CI checkout: the test then skips
+        if subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", f"{ref}:skills/loom-port-llm/SKILL.md"], capture_output=True).returncode == 0:
             return ref
     return None
 
@@ -23,7 +23,7 @@ class RouteLoadTests(unittest.TestCase):
     def test_every_fleet_config_routes_and_loads_less_than_the_old_set(self):
         ref = base_ref()
         if ref is None:
-            self.skipTest("no r9700 ref to take the pre-refactor set from")
+            self.skipTest("pre-refactor commit not in this checkout (shallow clone)")
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "rows.json"
             self.assertEqual(route_load.main(["--base", ref, "--json", str(out)]), 0)
