@@ -118,8 +118,13 @@ class Programs(unittest.TestCase):
         self.assertEqual(len(re.findall(r"@g_head_mv_t4_q8_p40_pc3\[", p)), 1)
         self.assertIn("%head_c4 = index.constant 512 : index", p)
         self.assertIn("g_head_select_p", p)
-        hw = open(os.path.join(self.dirs["pieces"], "head_weights.loom")).read()
-        self.assertEqual(len(re.findall(r'^// "lm_head.weight#p\d+"$', hw, re.M)), 5)
+        # one load-time preparation plan: the main weight policy prepares the pieces, the proposals' head root is bound with it
+        self.assertFalse(os.path.exists(os.path.join(self.dirs["pieces"], "head_weights.loom")))
+        w = open(os.path.join(self.dirs["pieces"], "weights.loom")).read()
+        self.assertEqual(len(re.findall(r'^// "lm_head.weight#p\d+"$', w, re.M)), 5)
+        prep = open(os.path.join(self.dirs["pieces"], "program", "prepare.loom")).read()
+        self.assertNotIn("%head_policy", prep)
+        self.assertIn("func.call @parameter(%pstage, %pstage_b2, %c0_source, %checkpoint, %policy)", prep)
         for k in ("g_head_mv_q8_p40_pc128", "g_head_mv_t16_q8_p40_pc3"):
             self.assertIn(f'kernel.def export("{k}")', on)
 
