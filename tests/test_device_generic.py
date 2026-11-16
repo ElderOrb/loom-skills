@@ -70,6 +70,19 @@ class DeviceJobs(unittest.TestCase):
             self.assertNotIn(k, j)
             self.assertNotIn(k, doc)
 
+    def test_vllm_baseline_steps_where_the_reference_engine_exists(self):   # #875 (vllm_shim.py) merged: gates + the vLLM baseline steps
+        from unittest import mock
+        buf = io.StringIO()
+        with mock.patch.object(device_jobs, "reference_only", return_value=True), contextlib.redirect_stdout(buf):
+            device_jobs.main(["--device", R9, "--gates", "dev", "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"])
+        (j,) = json.loads(buf.getvalue())["jobs"]
+        self.assertIn("gates:card:dev", j["steps"])
+        self.assertEqual(j["vllm_spec"], '{"method": "mtp", "num_speculative_tokens": 3}')   # the card's MTP, depth 3 as Loom's
+        n = j["steps"].count("perf:card:1")
+        self.assertEqual([x for x in j["steps"] if x.startswith("vllm")], [f"vllm:{n}", f"vllm:{n}:long", f"vllmc4:{n}"])
+        self.assertTrue(any(x.startswith("vllmc4") for x in j["steps"]))
+        self.assertFalse([x for x in j["steps"] if x.startswith("llama")])
+
     def test_mxfp4s_is_a_target_of_the_fp8_wmma_family_only(self):
         nt = card_lib.non_targets({"formats": ["bf16", "f32", "mxfp4s"]})
         self.assertIn(STRIX, nt)
