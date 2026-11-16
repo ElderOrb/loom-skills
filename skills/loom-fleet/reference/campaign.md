@@ -43,6 +43,7 @@ engineers are explicit and self-contained: they point at the files to read, neve
 | `log.md` | everyone (`status.py log WHO TEXT`) | append-only, one line per event: `YYYY-MM-DD HH:MM who: what` |
 | `inbox/<name>.md` | the writers | mailboxes: `techlead`, `pm`, `dashboard`, `eng-<id>` |
 | `notes/` | tech lead | `ENG_CONTRACT.md`, `task_<id>.md` per engineer, recipes |
+| `notes/techniques.md` | everyone (append) | optimization campaigns: one row per technique tried, win or loss (`loom-optimize` step 8); input to the skill and KB updates at the end |
 | `eng/<id>/`, `wt/<id>/` | engineers | big outputs and worktrees (see Hygiene) |
 
 `status.json`:
