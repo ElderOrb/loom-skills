@@ -21,7 +21,7 @@ kernel.def target(@rdna4) export("A_rdna4") @A_rdna4(%n: index) {
 }
 kernel.def target(@rdna4) export("F_rdna4") @F_rdna4(%n: index) {
 }
-command.program.def public @p() launch() {
+command.def public @p() launch() {
   // dual-group: rdna4 kernel.launch @F_rdna4[%t](%t, %x, %y) : [index](index, buffer, buffer)
   kernel.launch @A[%t](%t, %x) : [index](index, buffer)
   kernel.launch @B[%t](%t, %y, %x) : [index](index, buffer, buffer)
@@ -92,7 +92,7 @@ class F16OutKernel(unittest.TestCase):
 
 
 class FuseProgram(unittest.TestCase):
-    PROGRAM = '''command.program.def public @llm_advance() launch() {
+    PROGRAM = '''command.def public @llm_advance() launch() {
   scf.if %mm {
     scf.if %big {
       scf.if %huge {
