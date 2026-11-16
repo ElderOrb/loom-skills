@@ -35,7 +35,8 @@ LAYERS = _c["layers"] - 1
 assert D in (256, 512) and not _c.get("attn_sinks"), "gen_flash2s: head_dim 256 or 512 without attention sinks"
 # FLASH2_B=2 (gfx12 twin; opt-in): the key-split two-heads-per-wave loop of flash2_b2.py, at head_dim 512 with 8 query heads per KV head
 # (gemma4 E2B) or head_dim 256 with 6 (Qwen3.5-class 27B: three head pairs per KV head). Other shapes keep the plain twin.
-B_MODE = "2" if os.environ.get("FLASH2_B") == "2" and os.environ.get("FLASH2_ARCH") == "rdna4" and (D, G) in ((512, 8), (256, 6)) else "0"
+B_MODE = "2" if os.environ.get("FLASH2_B") in ("2", "3") and os.environ.get("FLASH2_ARCH") == "rdna4" and (D, G) in ((512, 8), (256, 6)) else "0"
+B_HEADS = 3 if os.environ.get("FLASH2_B") == "3" and (D, G) == (256, 6) else 2   # query heads per wave of the key-split loop (3: two head triples per KV head)
 HALF = D // 4 if B_MODE == "2" else 128   # dims per wave (key-split loop: four waves share a head pair, each owns a quarter of the dims)
 NFH = HALF // 16                  # 16-dim fragments per wave (8)
 WPH = D // HALF                   # waves per query head (2, or 4 at head_dim 512)
@@ -48,7 +49,7 @@ VTC = KT + 8                      # padded V^T row
 # Query-head groups per KV head: one workgroup per (tile, KV head, group) when the G heads' S partials don't fit
 # next to the K and V^T tiles in 64 KiB of workgroup memory (G = 8: 70 KiB; Qwen3.5/3.6 MoE). Each group stages
 # K/V itself (the staging is repeated per group; the score/softmax/output work is not).
-NG = G // 2 if B_MODE == "2" else next(n for n in (1, 2, 4) if G % n == 0 and (KT * DP8 * 2 + D * VTC * 2 + (WPH * G // n) * KB * 16 * 16 * 4 <= 65536
+NG = G // B_HEADS if B_MODE == "2" else next(n for n in (1, 2, 4) if G % n == 0 and (KT * DP8 * 2 + D * VTC * 2 + (WPH * G // n) * KB * 16 * 16 * 4 <= 65536
                                                                              or WPH * G // n == 8))   # key-split loop: a workgroup is the four waves of a head pair
 if D == 512 and os.environ.get("FLASH2_NG512"):   # experiment: query-head groups per KV head at head_dim 512 (more groups: fewer waves per workgroup, cheaper barriers)
     NG = int(os.environ["FLASH2_NG512"])
@@ -537,8 +538,8 @@ if R4:
     text = to_rdna4(text)
     if B_MODE == "2":
         from flash2_b2 import rewrite_b2
-        assert GW == 2 and WPH == 4 and WAVES == 4
-        text = rewrite_b2(text, KVH, D, PARTIAL, QH)
+        assert GW == B_HEADS and WPH == 4 and WAVES == 4
+        text = rewrite_b2(text, KVH, D, PARTIAL, QH, B_HEADS)
     if not B_MODE == "2" and os.environ.get("FLASH2_ABL"):   # timing ablations (flash2_ablate.py), profiling only
         from flash2_ablate import ablate
         text = ablate(text, os.environ["FLASH2_ABL"])
