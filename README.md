@@ -41,6 +41,7 @@ skill directly.
 | `loom-optimize` | Improve a port's speed while checking correctness |
 | `loom-benchmark` | Validate a port, measure it against llama.cpp, and generate reports |
 | `loom-fleet` | Targeted fixes, campaigns, populating a Hugging Face org, publishing, and evaluating the skills themselves (merges the former `loom-org` and `loom-improve`) |
+| `loom-migrate` | Move packages, cards and the skills to a new hrx-loom SDK: a version entry per release pair (breaking changes, rewrite and sweep scripts, gotchas) and the fleet procedure |
 | `loom-kb` | Find the knowledge for a model, GPU and task: the router that prints which files to read |
 
 ### Example requests

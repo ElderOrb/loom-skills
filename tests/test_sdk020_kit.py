@@ -68,7 +68,7 @@ class SpellingTests(unittest.TestCase):
     def test_no_emitter_writes_a_v01_spelling(self):
         bad = []
         for p in list((ROOT / "skills").rglob("*.py")) + list((ROOT / "skills").rglob("*.loom")) + list((ROOT / "skills").rglob("*.patch")):
-            if "qwen4exp-example" in p.as_posix() or "/test/" in p.as_posix():
+            if "qwen4exp-example" in p.as_posix() or "/test/" in p.as_posix() or "skills/loom-migrate/" in p.as_posix():   # the migration skill names the old spellings on purpose
                 continue
             t = p.read_text(errors="replace")
             if re.search(r"vector\.constant\b(?!i)|command\.program\.(def|decl|launch)|command\\\.program", t):
