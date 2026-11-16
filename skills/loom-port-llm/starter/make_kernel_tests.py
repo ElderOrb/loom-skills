@@ -715,6 +715,14 @@ cases.append(f"""check.case public @attention_chain {{
   check.return
 }}
 """)
+if gate_kind == "fused_q" and os.environ.get("ROPE_QG") == "1":   # choice prefill.attn.rope_qg: the fused q|gate RoPE kernel replaces g_split_qgate + g_qk_rope_store
+    _c = cases[-1].replace("@attention_chain", "@attention_chain_qg", 1)
+    _c = _c.replace(f"  kernel.launch @g_split_qgate[%t](%t, %qg, %q, %g) : [index](index, tensor<{t}x{2 * QD}xf32>, tensor<{t}x{QD}xf32>, tensor<{t}x{QD}xf32>)\n", "", 1)
+    _c = _c.replace("kernel.launch @g_qk_rope_store[%t](%t, %layer, %rope, %ctx, %pool, %q, ", "kernel.launch @g_qk_rope_store_qg[%t](%t, %layer, %rope, %ctx, %pool, %qg, %q, %g, ", 1)
+    _c = _c.replace(f": [index](index, index, i32, index, index, tensor<{t}x{QD}xf32>, tensor<{t}x{KVH * D}xf32>,",
+                    f": [index](index, index, i32, index, index, tensor<{t}x{2 * QD}xf32>, tensor<{t}x{QD}xf32>, tensor<{t}x{QD}xf32>, tensor<{t}x{KVH * D}xf32>,", 1)
+    assert "@g_qk_rope_store_qg[" in _c and "@g_split_qgate" not in _c and f"tensor<{t}x{2 * QD}xf32>, tensor<{t}x{QD}xf32>, tensor<{t}x{QD}xf32>, tensor<{t}x{KVH * D}xf32>" in _c
+    cases.append(_c)
 # 3c. prefill attention on a span that CONTINUES stored KV: history positions [0, p0) are written
 # by g_qk_rope_store, then a span at p0 (t tokens, the last `pad` rows not live) runs the prefill
 # path (g_attention_flash2 on the listed 16-token tiles + the listed split/combine fallback for the

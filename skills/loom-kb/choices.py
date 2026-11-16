@@ -302,7 +302,11 @@ CHOICE("prefill.attn.flash2_swa_twin", "str", None, "FLASH2_SWA_TWIN", dynamic=T
 CHOICE("prefill.attn.flash2_trim", "bool", False, "FLASH2_TRIM", derive=_trim, from_pr="#656",
        doc="gfx12 flash twin trims (flash2_trim.py) as one switch; the per-trim switches below default to it.", **_FLR4)
 CHOICE("prefill.attn.flash2_b2", "str", None, "FLASH2_B", derive=_flash_b, from_pr="#656", generator_defaults=("2", None),
-       doc="2: key-split two-heads-per-wave global-layer flash twin at head_dim 512 / G 8 (gemma4 E2B) on gfx12.", **_FLR4)
+       doc="2: key-split two-heads-per-wave global-layer flash twin on gfx12 (flash2_b2.py): head_dim 512 / 8 query heads per KV head (gemma4 E2B) or head_dim 256 / 6 "
+           "(Qwen3.5-class 27B, three head pairs per KV head). 3: three heads per wave at head_dim 256 / 6 (256 VGPRs: measured slower than 2).", **_FLR4)
+CHOICE("prefill.attn.rope_qg", "bool", False, "ROPE_QG", kernels=["g_qk_rope_store*", "g_split_qgate"], rows=ROWS_ALL,
+       doc="Gated attention with a fused q|gate projection (qwen35 family): the norm + RoPE kernel reads the query heads from the projection's rows and copies the gate half "
+           "(g_qk_rope_store_qg), so g_split_qgate and a pass over q disappear. Full-attention layers only; no projection biases, no sliding layers.")
 for _k, _env, _what in (("sx", "FLASH2_SX", "S partials exchanged as the lanes' own vectors"),
                         ("lazy", "FLASH2_LAZY", "O^T rescale only when a column's max changed"),
                         ("kvh", "FLASH2_KVH", "loop-invariant half of the paged-KV lookup hoisted"),
