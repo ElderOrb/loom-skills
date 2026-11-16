@@ -1144,7 +1144,9 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _fold_on(gdn_geometry(cf
 # arena must be EQUAL (bit-exact); the deferred outputs are also checked against numpy (the first round's accepted steps in the state).
 from gen_gdn import defer_enabled as _defer_on  # noqa: E402
 if cfg.get("recurrent_layers") and cfg.get("draft") and _defer_on(gdn_geometry(cfg)):
-    LBd = gdn_geometry(cfg)["layer_bytes"]
+    Gd = gdn_geometry(cfg); LBd = Gd["layer_bytes"]   # test slots at the layer stride (layer 0 only); each one's pending block at pend_base
+    from gen_gdn import FOLD_W as _FW, PEND_HEAD as _PH
+    AW = ((2 * len([0, 1, 2])) * LBd + Gd["pend_base"] + _PH + _FW * (HK * DK + VD + HV) * 4 + 255) // 256 * 64   # f32 words of the arena
     r1 = [(4, 10, 2, True), (4, 20, 4, False), (3, 30, 1, False)]   # (length, start, accepted, at the fork)
     r2 = [(4, 3), (3, 1), (4, 4)]                                      # (length, accepted) of the second verification
     ns = len(r1); t = sum(L for L, _, _, _ in r1); assert t == sum(L for L, _ in r2)
@@ -1152,7 +1154,7 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _defer_on(gdn_geometry(c
     al1, be1, al2, be2 = (rng.standard_normal((t, HV)).astype(np.float32) for _ in range(4))
     # + a fourth row that forks from the first row's writer slot at its retained position (the final publishing epoch: two spans read
     # that slot, g_gdn_flush applies its pending fold once) and publishes to a slot of its own
-    arena = np.zeros((2 * ns + 1) * LBd // 4, np.float32); origins = np.zeros((ns + 1, 5), np.int64)
+    assert ns == 3; arena = np.zeros(AW, np.float32); origins = np.zeros((ns + 1, 5), np.int64)
     mk = lambda: np.zeros(4 + 9 * ns, np.int32)
     m1, c1, m2, c2, m2p = mk(), mk(), mk(), mk(), mk()
     m3 = np.zeros(4 + 9 * (ns + 1), np.int32)
@@ -1194,7 +1196,7 @@ if cfg.get("recurrent_layers") and cfg.get("draft") and _defer_on(gdn_geometry(c
                  ("gd_al2", al2), ("gd_be2", be2), ("gd_raw2", raw2.reshape(t, VD).astype(np.float32))]:
         save(n, a)
     from gen_gdn import FOLD_W as _FW
-    AT = f"tensor<{(2 * ns + 1) * LBd // 4}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * (ns + 1)}xi32>"; IT = f"tensor<{t}x4xi32>"
+    AT = f"tensor<{AW}xf32>"; MT = f"tensor<{4 + 9 * ns}xi32>"; OT = f"tensor<{10 * (ns + 1)}xi32>"; IT = f"tensor<{t}x4xi32>"
     M3 = f"tensor<{4 + 9 * (ns + 1)}xi32>"
     XT, ST, VT, HT = f"tensor<{t}x{C}xf32>", f"tensor<{t}x{2 * HK}xf32>", f"tensor<{t}x{VD}xf32>", f"tensor<{t}x{HV}xf32>"
     BX, BK, BD = (f"tensor<{ns * _FW}x{w}xf32>" for w in (C, HK * DK, VD + HV))
