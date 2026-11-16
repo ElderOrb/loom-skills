@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st kern exp2: doubling profile of the prefill (1k / 2k rows) of the fast mxfp4s kernels vs the simple kernels, one job, ABBA order. Evidence branch: not for merge.",
+ "_comment": "mxfp4st kern exp5: final A/B on the PR head (model node resolves the fast kernels): simple = the same package with both choices forced off, node = as the model node sets it; context 65536 (long rows to 32k), consistency, ktest, c4. ONE job, ABBA tail. Evidence branch: not for merge.",
  "runner": "r9700",
  "memory_bytes": 30000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
@@ -7,105 +7,36 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "amd-q38-kern-prof",
+   "name": "amd-q38-kern-final",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom@0a885e7027c1c89b47d76c83b68a2105db8ecd65",
    "kit": null,
    "llamacpp": "b1375",
    "variants": [
     {
      "name": "simple",
-     "build": {}
+     "build": {
+      "GEMM_MXFP4S_F8": "0",
+      "MXFP4S_Q8": "0"
+     },
+     "context": 65536
     },
     {
-     "name": "simple_gemm",
+     "name": "node",
      "build": {},
-     "double": [
-      "llm_advance:g_gemm_mxfp4s_store"
-     ]
-    },
-    {
-     "name": "simple_gdn",
-     "build": {},
-     "double": [
-      "llm_advance:g_gdn"
-     ]
-    },
-    {
-     "name": "base",
-     "build": {
-      "GEMM_MXFP4S_F8": "1",
-      "MXFP4S_Q8": "1"
-     }
-    },
-    {
-     "name": "gemm",
-     "build": {
-      "GEMM_MXFP4S_F8": "1",
-      "MXFP4S_Q8": "1"
-     },
-     "double": [
-      "llm_advance:g_gemm_mxfp4s_(store|swiglu)_f8_m256"
-     ]
-    },
-    {
-     "name": "prod",
-     "build": {
-      "GEMM_MXFP4S_F8": "1",
-      "MXFP4S_Q8": "1"
-     },
-     "double": [
-      "llm_advance:g_row_scale|g_post_add_norm|g_silu_mul|g_quant|g_split_qgate|g_qk_rope|g_embed|g_token"
-     ]
-    },
-    {
-     "name": "gdn",
-     "build": {
-      "GEMM_MXFP4S_F8": "1",
-      "MXFP4S_Q8": "1"
-     },
-     "double": [
-      "llm_advance:g_gdn"
-     ]
-    },
-    {
-     "name": "attn",
-     "build": {
-      "GEMM_MXFP4S_F8": "1",
-      "MXFP4S_Q8": "1"
-     },
-     "double": [
-      "llm_advance:attention|flash"
-     ]
-    },
-    {
-     "name": "head",
-     "build": {
-      "GEMM_MXFP4S_F8": "1",
-      "MXFP4S_Q8": "1"
-     },
-     "double": [
-      "llm_advance:g_head|g_gemm_bf16|g_mv_bf16"
-     ]
+     "context": 65536
     }
    ],
    "steps": [
+    "func:node",
+    "ktest:node",
+    "consistency:node:2",
     "perf:simple:1",
-    "perf:simple_gemm:1",
-    "perf:simple_gdn:1",
-    "perf:base:1",
-    "perf:gemm:1",
-    "perf:prod:1",
-    "perf:gdn:1",
-    "perf:attn:1",
-    "perf:head:1",
-    "perf:head:1",
-    "perf:attn:1",
-    "perf:gdn:1",
-    "perf:prod:1",
-    "perf:gemm:1",
-    "perf:base:1",
-    "perf:simple_gdn:1",
-    "perf:simple_gemm:1",
+    "perf:node:1",
+    "perf:node:1:long",
+    "perf:simple:1:long",
+    "c4:simple",
+    "c4:node",
+    "perf:node:1",
     "perf:simple:1"
    ]
   }
