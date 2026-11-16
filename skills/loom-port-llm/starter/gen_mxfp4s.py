@@ -672,7 +672,7 @@ def fuse_mxfp4s_f8(text, prefix="g", fuse=None):
         converted[leaf_at[g]] += 4   # gate and up leaves
     f16_optional = {x: converted[x] == len(readers[x]) for x in used}
     radd_leaf, fl_prod = {}, set()   # store leaf line -> the residual buffer it accumulates into; producer lines whose trailing flag is the %huge epoch flag
-    if fuse and os.environ.get("MXFP4S_FUSE_RADD", "1") not in ("0", "off", "no"):   # MXFP4S_FUSE_RADD=0: the bf16 SwiGLU output only (an A/B)
+    if fuse:
         for pi, l in enumerate(lines):
             m = _LAUNCH.match(l)
             if not (m and m.group("k").startswith("g_post_add_norm_rs") and _PRODUCER.match(m.group("k"))):
