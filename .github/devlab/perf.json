@@ -1,5 +1,5 @@
 {
- "_comment": "mxfp4st vhead round 2: short decode rows (decode, decode_2k) ABBA of base / p65 / v8 / v8p65; context func + full-context request; dev gates vs vLLM of v8p65 and base (separate jobs); cold first-load probes on fresh VMs: head pieces of 8192 rows with the Q4_0 block (c1), with the bf16 block (c2), the Q4_0 block alone (c3), the node config at 90112 / 81920 (c4, c5), v8p65 at 110592 / 98304 (c6, c7)",
+ "_comment": "mxfp4st vhead round 3: proposal-head pieces prepared by the MAIN weight policy (one preparation plan). Cold first load on fresh VMs (p49/p65 at 98304, p65 at 106496, v8p65 at 106496/114688); ktest of v8p65; perf ABBA short + long base / p65 / v8p65.",
  "runner": "r9700",
  "memory_bytes": 34000000000,
  "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
@@ -7,7 +7,7 @@
  "llamacpp": "b1375",
  "jobs": [
   {
-   "name": "vhead-perf2",
+   "name": "vhead-perf3",
    "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
    "kit": null,
    "llamacpp": "b1375",
@@ -34,17 +34,6 @@
      "context": 98304
     },
     {
-     "name": "v8",
-     "build": {
-      "VERIFY_HEAD_PREP": "q8_0"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    },
-    {
      "name": "v8p65",
      "build": {
       "PROPOSE_HEAD_PIECES": "1",
@@ -56,9 +45,79 @@
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
      "context": 98304
-    },
+    }
+   ],
+   "steps": [
+    "ktest:v8p65",
+    "perf:base:1",
+    "perf:p65:1",
+    "perf:v8p65:1",
+    "perf:v8p65:1",
+    "perf:p65:1",
+    "perf:base:1",
+    "perf:base:1:long",
+    "perf:p65:1:long",
+    "perf:v8p65:1:long",
+    "perf:v8p65:1:long",
+    "perf:p65:1:long",
+    "perf:base:1:long"
+   ],
+   "repeat_rows": 3
+  },
+  {
+   "name": "vhead-c3a",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
     {
-     "name": "p65c106",
+     "name": "c",
+     "build": {
+      "PROPOSE_HEAD_PIECES": "1",
+      "PROPOSE_HEAD_ROWS": "49152"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    }
+   ],
+   "steps": [
+    "cold:c:plain"
+   ]
+  },
+  {
+   "name": "vhead-c3b",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "c",
+     "build": {
+      "PROPOSE_HEAD_PIECES": "1",
+      "PROPOSE_HEAD_ROWS": "65536"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 98304
+    }
+   ],
+   "steps": [
+    "cold:c:plain"
+   ]
+  },
+  {
+   "name": "vhead-c3c",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "c",
      "build": {
       "PROPOSE_HEAD_PIECES": "1",
       "PROPOSE_HEAD_ROWS": "65536"
@@ -68,9 +127,44 @@
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
      "context": 106496
-    },
+    }
+   ],
+   "steps": [
+    "cold:c:plain"
+   ]
+  },
+  {
+   "name": "vhead-c3d",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
     {
-     "name": "v8p65c114",
+     "name": "c",
+     "build": {
+      "PROPOSE_HEAD_PIECES": "1",
+      "PROPOSE_HEAD_ROWS": "65536",
+      "VERIFY_HEAD_PREP": "q8_0"
+     },
+     "build_args": [
+      "--slug",
+      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
+     ],
+     "context": 106496
+    }
+   ],
+   "steps": [
+    "cold:c:plain"
+   ]
+  },
+  {
+   "name": "vhead-c3e",
+   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
+   "kit": null,
+   "llamacpp": "b1375",
+   "variants": [
+    {
+     "name": "c",
      "build": {
       "PROPOSE_HEAD_PIECES": "1",
       "PROPOSE_HEAD_ROWS": "65536",
@@ -81,225 +175,6 @@
       "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
      ],
      "context": 114688
-    }
-   ],
-   "steps": [
-    "perf:base:1",
-    "perf:p65:1",
-    "perf:v8:1",
-    "perf:v8p65:1",
-    "perf:v8p65:1",
-    "perf:v8:1",
-    "perf:p65:1",
-    "perf:base:1",
-    "func:p65c106",
-    "fullctx:p65c106",
-    "func:v8p65c114",
-    "fullctx:v8p65c114"
-   ],
-   "repeat_rows": 3
-  },
-  {
-   "name": "vhead-gates-v",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "v8p65",
-     "build": {
-      "PROPOSE_HEAD_PIECES": "1",
-      "PROPOSE_HEAD_ROWS": "65536",
-      "VERIFY_HEAD_PREP": "q8_0"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    }
-   ],
-   "steps": [
-    "perf:v8p65:1",
-    "func:v8p65",
-    "gates:v8p65:dev"
-   ]
-  },
-  {
-   "name": "vhead-gates-b",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "base",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    }
-   ],
-   "steps": [
-    "perf:base:1",
-    "func:base",
-    "gates:base:dev"
-   ]
-  },
-  {
-   "name": "vhead-cold1",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "c",
-     "build": {
-      "PROPOSE_HEAD_PIECES": "1",
-      "PROPOSE_HEAD_ROWS": "65536",
-      "HEAD_PIECE_ROWS": "8192"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    }
-   ],
-   "steps": [
-    "cold:c:plain"
-   ]
-  },
-  {
-   "name": "vhead-cold2",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "c",
-     "build": {
-      "PROPOSE_HEAD_PIECES": "1",
-      "PROPOSE_HEAD_ROWS": "65536",
-      "HEAD_PIECE_ROWS": "8192",
-      "MTP_BLOCK_PREP": ""
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    }
-   ],
-   "steps": [
-    "cold:c:plain"
-   ]
-  },
-  {
-   "name": "vhead-cold3",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "c",
-     "build": {
-      "PROPOSE_HEAD_ROWS": "0"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
-    }
-   ],
-   "steps": [
-    "cold:c:plain"
-   ]
-  },
-  {
-   "name": "vhead-cold4",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "c",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 90112
-    }
-   ],
-   "steps": [
-    "cold:c:plain"
-   ]
-  },
-  {
-   "name": "vhead-cold5",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "c",
-     "build": {},
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 81920
-    }
-   ],
-   "steps": [
-    "cold:c:plain"
-   ]
-  },
-  {
-   "name": "vhead-cold6",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "c",
-     "build": {
-      "PROPOSE_HEAD_PIECES": "1",
-      "PROPOSE_HEAD_ROWS": "65536",
-      "VERIFY_HEAD_PREP": "q8_0"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 110592
-    }
-   ],
-   "steps": [
-    "cold:c:plain"
-   ]
-  },
-  {
-   "name": "vhead-cold7",
-   "card": "loom-fun-staging/amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom",
-   "kit": null,
-   "llamacpp": "b1375",
-   "variants": [
-    {
-     "name": "c",
-     "build": {
-      "PROPOSE_HEAD_PIECES": "1",
-      "PROPOSE_HEAD_ROWS": "65536",
-      "VERIFY_HEAD_PREP": "q8_0"
-     },
-     "build_args": [
-      "--slug",
-      "amd-Qwen3.8-27B-Quark-AWQ-MXFP4-loom"
-     ],
-     "context": 98304
     }
    ],
    "steps": [
