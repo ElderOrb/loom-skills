@@ -516,6 +516,9 @@ def _flag_radd(t, name):
     t = _sub1(t, "  %active = index.cmp ult, %lane, %groups : index\n",
               "  %active = index.cmp ult, %lane, %groups : index\n  %fl_zero = index.constant 0 : index\n  %fl_on = index.cmp ne, %fl, %fl_zero : index\n"
               "  %fl_off = index.cmp eq, %fl, %fl_zero : index\n", name)
+    if os.environ.get("X_NOH") == "1":   # the f32 normalized row h: only the epochs that do not take the fp8 GEMMs read it (the fp8 alpha / beta read h8): written when %w16 != 0
+        hs = re.search(r"    vector\.store %hv, %h_view\[%token, %bl, %c0\] : vector<32xf32>, view<\[%tokens\]x\d+x32xf32>\n", t).group(0)
+        t = _sub1(t, hs, "    %wh_zero = index.constant 0 : index\n    %wh_on = index.cmp ne, %w16, %wh_zero : index\n    scf.if %wh_on {\n  " + hs + "    }\n", name)
     if "%yn = vector.addf %yv, %zero32 : vector<32xf32>" in t:   # no post-norm: the y statistics are dead code
         for dead in (r"  %ysq = .*\n", r"  %ylocal = .*\n", r"  %ysum = .*\n", r"  %ymean = .*\n", r"  %post_eps = .*\n", r"  %ystable = .*\n",
                      r"  %yinv = .*\n", r"  %yinvs = .*\n"):
