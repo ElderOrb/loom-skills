@@ -5465,8 +5465,10 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
                 from gen_gdn_fused import nslots_bytes
                 L_.append(f"  %gw_c31 = index.constant 31 : index\n  %gw_c32 = index.constant 32 : index\n  %gw_a = index.add %t, %gw_c31 : index\n"
                           f"  %gw_b = index.div %gw_a, %gw_c32 : index\n  %gw_c = index.add %gw_b, %spans : index\n  %gw_one = index.constant 1 : index\n"
-                          f"  %gw_n = index.add %gw_c, %gw_one : index\n  %gw_slot = index.constant {nslots_bytes(g)} : offset\n"
-                          f"  %gw_size = index.scale %gw_n, %gw_slot : index, offset -> offset\n  %gs_size = index.max %gs_size_own, %gw_size : offset\n")
+                          f"  %gw_n = index.add %gw_c, %gw_one : index\n  %gw_slot = index.constant {nslots_bytes(g) // 256} : index\n"
+                          f"  %gw_units = index.mul %gw_n, %gw_slot : index\n  %gs_row = index.constant {width * 4 // 256} : index\n"
+                          f"  %gs_c63 = index.constant 63 : index\n  %gs_c64 = index.constant 64 : index\n  %gs_ta = index.add %t, %gs_c63 : index\n  %gs_tb = index.div %gs_ta, %gs_c64 : index\n  %gs_tp = index.mul %gs_tb, %gs_c64 : index\n  %gs_units = index.mul %gs_tp, %gs_row : index\n  %gs_umax = index.max %gs_units, %gw_units : index\n"
+                          f"  %gs_unit = index.constant 256 : offset\n  %gs_size = index.scale %gs_umax, %gs_unit : index, offset -> offset\n")
             L_.append(f"  %{name} = buffer.alloca<global> align(256) %{name}_size : buffer\n")
         L_.append(f"  %nC = index.constant {g['C']} : index\n  %nVD = index.constant {g['VD']} : index\n  %nHV = index.constant {g['HV']} : index\n")
     if not QK_NORM:

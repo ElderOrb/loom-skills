@@ -371,6 +371,10 @@ CHOICE("prefill.gdn.fused2", "bool", False, "GDN_FUSED2", devices=["rdna4"], row
            "and W = T beta e^gc K, U = T beta V, P per (value head, 32-token chunk), fully parallel) and g_gdn_fb_rdna4 (the serial state pass "
            "d = U - W S, O = e^gc Q S + P d, S update, norm-gate epilogue, conv history commit) replace conv, commit, qk_norm, the chunk kernel and "
            "norm_gate in GEMM-shape epochs; gfx11 and short epochs keep the chain (128 x 128 heads, conv 4).")
+CHOICE("prefill.gdn.ab_q8", "bool", False, "GDN_AB_Q8", devices=["rdna4"], rows=ROWS_PREFILL, kernels=["g_quant_q8", "g_mv_mxfp4s_k5120_t16_q8"],
+       from_pr="mxfp4st olayer",
+       doc="MXFP4 split-plane hybrids, GEMM-shape epochs: the 48-row GDN alpha / beta projections run as the 16-token int8 matvec on h quantized "
+           "once to int8, not as the f32 4-token matvec over h (gen_llm.ab_q8).")
 
 # ======================================================================================================================
 # Speculative decoding (gen_llm.py, draft/)
