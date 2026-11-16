@@ -171,7 +171,8 @@ class ProducerTests(unittest.TestCase):
             base = self.kernel(name)
             t = R.f8_producer(base)
             self.assertIn(f'export("{name}_f8_rdna4")', t)
-            self.assertIn("%x8: buffer, %s8: buffer) {", t)
+            self.assertIn("%x8: buffer, %s8: buffer, %w16: index) {", t)
+            self.assertEqual(t.count("scf.if %w16_on {"), 1)   # the f16 operand store is guarded by the launch flag
             self.assertIn("f8E4M3", t)
             self.assertEqual(t.count("view.store %f8_scale"), 1)   # the live row's scales ...
             self.assertEqual(t.count("view.store %lv_zf, %lv_s8"), 2)   # ... and the padding row's (0, 0)
@@ -244,8 +245,8 @@ command.program.def public @llm_advance() launch(%weights: buffer) {{
         self.assertEqual(n, 3)   # gate + up (one fused group) and down
         self.assertEqual(text.count("// dual-group: rdna4 kernel.launch @g_gemm_mxfp4s_swiglu_f8_m256_rdna4[%tp, %nFF](%tp, %nH, %nFF, %h8, %s_h8, %wg, %wg_sc, %wu, %wu_sc, %f)"), 1)
         self.assertEqual(text.count("// dual-group: rdna4 kernel.launch @g_gemm_mxfp4s_store_f8_m256_rdna4[%tp, %nH](%tp, %nFF, %nH, %f8, %s_f8, %wd, %wd_sc, %y)"), 1)
-        self.assertIn("// dual-group: rdna4 kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%t](%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8)", text)
-        self.assertIn("// dual-group: rdna4 kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8)", text)
+        self.assertIn("// dual-group: rdna4 kernel.launch @g_row_scale_f16_live_lv_f8_rdna4[%t](%t, %info, %nFF, %f, %s_f, %f16, %f8, %s_f8, %w16_flag)", text)
+        self.assertIn("// dual-group: rdna4 kernel.launch @g_post_add_norm_rs_live_lv_f8_rdna4[%t](%t, %info, %y, %wn, %x, %wn, %h, %s_h, %h16, %h8, %s_h8, %w16_flag)", text)
         self.assertEqual(text.count("scf.if %huge {"), 2)
         for buf, width in (("%h8", 5120), ("%f8", 17408)):
             self.assertRegex(text, rf"{buf}_row = index\.constant {width} : offset")
