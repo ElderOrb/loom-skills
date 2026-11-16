@@ -9,22 +9,22 @@
       "gen_variants": [
         "base",
         "vtop",
-        "vmid",
-        "vtop2",
-        "vtop+kv0",
-        "vtop+noqk",
-        "vmid+noqk",
-        "vtop+nopv"
+        "vtop+e2",
+        "vtop2+e2",
+        "wg3qs",
+        "wg3qs+vtop",
+        "vtop+nopv",
+        "vtop+kv0+nopv"
       ],
       "files": [
         "bench.loom",
         "bench_vtop.loom",
-        "bench_vmid.loom",
-        "bench_vtop2.loom",
-        "bench_vtop+kv0.loom",
-        "bench_vtop+noqk.loom",
-        "bench_vmid+noqk.loom",
-        "bench_vtop+nopv.loom"
+        "bench_vtop+e2.loom",
+        "bench_vtop2+e2.loom",
+        "bench_wg3qs.loom",
+        "bench_wg3qs+vtop.loom",
+        "bench_vtop+nopv.loom",
+        "bench_vtop+kv0+nopv.loom"
       ],
       "tests": [
         "test.loom"
