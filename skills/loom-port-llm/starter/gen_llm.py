@@ -4852,9 +4852,9 @@ def gdn_layer(i, b, nm, sz, par):
     GATE = f"""  kernel.launch @g_gdn_norm_gate[%t](%t, %info, %graw, %ssm_norm_{i}, %gz, %o) : [index](index, buffer, buffer, view<{DV}xf32>, buffer, buffer)"""
     if fused_mode(g):   # gfx12, GEMM-shape epochs: two launches (gen_gdn_fused.py) in place of conv .. norm_gate; gfx11 and short epochs keep the chain
         REC0 = REC.split("\n")[0]
-        FA = (f"kernel.launch @g_gdn_fa_rdna4[%t, %spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %conv_{i}, %galpha, %gbeta, %ssm_a_{i}, %dt_bias_{i}, %gwork)"
+        FA = (f"kernel.launch @g_gdn_fa_rdna4[%t, %spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %conv_{i}, %galpha, %gbeta, %ssm_a_{i}, %dt_bias_{i}, %gs)"
               f" : [index, index](index, index, index, buffer, buffer, buffer, buffer, view<{C * K}xf32>, buffer, buffer, view<{HV}xf32>, view<{HV}xf32>, buffer)")
-        FB = (f"kernel.launch @g_gdn_fb_rdna4[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %gwork, %ssm_norm_{i}, %gz, %o)"
+        FB = (f"kernel.launch @g_gdn_fb_rdna4[%spans](%t, %spans, %layer_{i}, %metadata, %origins, %arena, %gq, %gs, %ssm_norm_{i}, %gz, %o)"
               f" : [index](index, index, index, buffer, buffer, buffer, buffer, buffer, view<{DV}xf32>, buffer, buffer)")
         ind = lambda t: "\n".join("  " + l for l in t.split("\n"))   # the GEMM branch indented: draft/gen_draft.py captures before the 2-space conv launch (verify: else branch)
         MIX = (f"  scf.if %gemm {{\n    // dual-group: rdna4 {FA}\n{ind(FRONT)}\n    // dual-group: end\n    // dual-group: rdna4 {FB}\n{ind(REC0)}\n{ind(GATE)}\n    // dual-group: end\n"
@@ -5459,15 +5459,16 @@ command.program.def public @llm_advance() launch(%weights: buffer, %residual: bu
     if GDN:
         g = GDN
         for name, width in (("gq", g["C"]), ("gs", g["C"]), ("gz", g["VD"]), ("graw", g["VD"]), ("ginv", 2 * g["HK"]), ("galpha", g["HV"]), ("gbeta", g["HV"])):
-            L_.append(f"  %{name}_bytes = index.constant {width * 4} : offset\n  %{name}_size = index.scale %t, %{name}_bytes : index, offset -> offset\n"
-                      f"  %{name} = buffer.alloca<global> align(256) %{name}_size : buffer\n")
+            gw = name == "gs" and fused_mode(g)   # gfx12 fused GDN prefill: %gs (unused there) also holds the chunk workspace, ceil(t / 32) + spans + 1 slots
+            L_.append(f"  %{name}_bytes = index.constant {width * 4} : offset\n  %{name}_size{'_own' if gw else ''} = index.scale %t, %{name}_bytes : index, offset -> offset\n")
+            if gw:
+                from gen_gdn_fused import nslots_bytes
+                L_.append(f"  %gw_c31 = index.constant 31 : index\n  %gw_c32 = index.constant 32 : index\n  %gw_a = index.add %t, %gw_c31 : index\n"
+                          f"  %gw_b = index.div %gw_a, %gw_c32 : index\n  %gw_c = index.add %gw_b, %spans : index\n  %gw_one = index.constant 1 : index\n"
+                          f"  %gw_n = index.add %gw_c, %gw_one : index\n  %gw_slot = index.constant {nslots_bytes(g)} : offset\n"
+                          f"  %gw_size = index.scale %gw_n, %gw_slot : index, offset -> offset\n  %gs_size = index.max %gs_size_own, %gw_size : offset\n")
+            L_.append(f"  %{name} = buffer.alloca<global> align(256) %{name}_size : buffer\n")
         L_.append(f"  %nC = index.constant {g['C']} : index\n  %nVD = index.constant {g['VD']} : index\n  %nHV = index.constant {g['HV']} : index\n")
-        if fused_mode(g):   # gfx12 fused GDN prefill (gen_gdn_fused.py): the chunk workspace, ceil(t / 32) + spans + 1 slots
-            from gen_gdn_fused import nslots_bytes
-            L_.append(f"  %gw_c31 = index.constant 31 : index\n  %gw_c32 = index.constant 32 : index\n  %gw_a = index.add %t, %gw_c31 : index\n"
-                      f"  %gw_b = index.div %gw_a, %gw_c32 : index\n  %gw_c = index.add %gw_b, %spans : index\n  %gw_one = index.constant 1 : index\n"
-                      f"  %gw_n = index.add %gw_c, %gw_one : index\n  %gw_slot = index.constant {nslots_bytes(g)} : offset\n"
-                      f"  %gw_size = index.scale %gw_n, %gw_slot : index, offset -> offset\n  %gwork = buffer.alloca<global> align(256) %gw_size : buffer\n")
     if not QK_NORM:
         L_.append("  %no_norm = buffer.alloca<global> align(256) %row_bytes : buffer\n")
     if MOE:   # its own part: the MTP drafter programs reuse the prologue (all parts but the last), MoE layer included
