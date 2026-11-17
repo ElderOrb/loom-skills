@@ -8,13 +8,28 @@
 # Every script that installs Loom for a package calls this (port.sh, port_e2e.sh, nightly_gates.sh, devlab_*.sh).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd); root=$1; cfg=${2:-}
-# Windows (Git Bash/MSYS): venvs keep executables in Scripts/ and `python3` may be the
-# Microsoft Store stub, so resolve the interpreter and the venv entry points once here.
-py3=$(command -v python3 2>/dev/null || true)
-case "$py3" in ''|*WindowsApps*) py3= ;; esac
-[ -n "$py3" ] || py3=$(command -v python 2>/dev/null || true)
-[ -n "$py3" ] || { echo "ensure_sdk.sh: no python3/python on PATH" >&2; exit 1; }
-sdk_pin() { "$py3" "$here/sdk_pin.py" "$@"; }
+# Resolve a working Python once: `python3`/`python` on PATH are the Microsoft Store stubs on some
+# Windows installs, an existing Loom venv already holds the right one, and `py -3` knows where the
+# real interpreter lives. LOOM_PYTHON overrides the search.
+py_find() {  # $1: dir whose .venv may already provide an interpreter (may be empty)
+  for p in "${1:-}/.venv/Scripts/python.exe" "${1:-}/.venv/bin/python" "${LOOM_PYTHON:-}"; do
+    [ -n "$p" ] && [ -x "$p" ] && { printf '%s\n' "$p"; return 0; }
+  done
+  for c in python3 python py; do
+    p=$(command -v "$c" 2>/dev/null || true); [ -n "$p" ] || continue
+    case "$p" in *WindowsApps*) continue ;; esac
+    if [ "$c" = py ]; then
+      p=$("$p" -3 -c 'import sys;print(sys.executable)' 2>/dev/null || true)
+      p=$(printf '%s' "$p" | tr '\\' '/')
+      case "$p" in ''|*WindowsApps*) continue ;; esac
+    fi
+    "$p" -c 'import sys' >/dev/null 2>&1 || continue
+    printf '%s\n' "$p"; return 0
+  done
+  return 1
+}
+PY=$(py_find "$root") || { echo "ensure_sdk.sh: no working python3/python found (WindowsApps stubs are skipped; set LOOM_PYTHON)" >&2; exit 1; }
+sdk_pin() { "$PY" "$here/sdk_pin.py" "$@"; }
 # The Loom venv is complete when both entry points run.
 sdk_ready() {  # $1: root
   [ -x "$1/.venv/bin/loom-serve" ] || [ -x "$1/.venv/Scripts/loom-serve.exe" ] || return 1
